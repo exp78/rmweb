@@ -1,0 +1,13 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# build artifacts
+build/
+dist/
+*.o
+*.so
+
+# macOS
+.DS_Store
