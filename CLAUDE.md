@@ -37,4 +37,8 @@ Mesa(llvmpipe), libsoup3 (+sqlite3/libpsl/nghttp2), libwebp, libxkbcommon, libep
 - Local git now; publish to GitHub later. Commit trailer: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
 
 ## Status
-Phase 0 (foundations). Next: Docker build env with ferrari SDK + hello-world on device.
+Phase 0 ✅ DONE & verified on device (2026-06-24): colima+docker build env with the ferrari SDK
+(GCC 13.4.0, sysroot cortexa53-crypto-remarkable-linux). Flow: `./scripts/fetch-sdk.sh` →
+`docker build -f toolchain/Dockerfile -t rmweb-sdk .` → cross-compile via `./scripts/build.sh '<cmd>'`
+→ deploy+run via `./scripts/deploy.sh <binary>`. `hello` ran on the Paper Pro (aarch64, reMarkable Ferrari).
+Next: **Phase 1 — display spike** (minimal Qt6 app shows an image via `-platform epaper`, xochitl stopped).

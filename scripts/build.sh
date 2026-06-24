@@ -5,4 +5,4 @@ set -euo pipefail
 # Usage: scripts/build.sh '<shell command, e.g. $CC -O2 hello/hello.c -o build/hello>'
 cd "$(dirname "$0")/.."
 docker run --rm -v "$PWD":/work -w /work rmweb-sdk \
-  bash -lc ". /opt/rmpp-sdk/environment-setup-* && $*"
+  bash -lc ". /opt/rmpp-sdk/environment-setup-cortexa53-crypto-remarkable-linux && $*"
