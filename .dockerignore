@@ -1,0 +1,9 @@
+# Keep the Docker build context small. The SDK installer under toolchain/sdk/ is
+# required (bind-mounted by the Dockerfile); everything below is irrelevant to the build.
+.git
+build
+docs
+.env
+.env.example
+README.md
+CLAUDE.md
