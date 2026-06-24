@@ -36,9 +36,21 @@ Mesa(llvmpipe), libsoup3 (+sqlite3/libpsl/nghttp2), libwebp, libxkbcommon, libep
 - Track work in the task list (phases 0→6). Use subagents for parallel/independent work.
 - Local git now; publish to GitHub later. Commit trailer: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
 
+## Build/deploy flow (Phase 0 ✅ verified 2026-06-24)
+`./scripts/fetch-sdk.sh` → `docker build -f toolchain/Dockerfile -t rmweb-sdk .` →
+cross-compile C/C++ via `./scripts/build.sh '<cmd>'` or CMake via `./scripts/cmake-build.sh <srcdir> <name>` →
+deploy+run via `./scripts/deploy.sh <bin>` (plain) or `./scripts/run-on-device.sh <bin> [args]` (stops xochitl,
+runs via epaper, restores xochitl). `hello` ran on the Paper Pro (aarch64, reMarkable Ferrari).
+
+## Display path (Phase 1 🔶 in progress — see docs/research-reuse.md)
+- Present via **Qt6 QtQuick (QML) ONLY** (NOT QtWidgets/QRasterWindow — those never reach the panel).
+- Run with `QT_QPA_PLATFORM=epaper QT_QUICK_BACKEND=epaper`, **xochitl stopped**. Size the Window to
+  `Screen.width/height` (official recipe — don't force geometry from C++ after creation).
+- Scenegraph `libqsgepaper` auto-refreshes, BUT color (Gallery 3/ACeP2) content needs a **FULL refresh**
+  (`EPFrameBuffer::setForceFull(true)`); partial/fast waveforms leave the screen white or show only a fragment.
+- `docs/research-reuse.md` = the external-knowledge map (display, refresh strategy to reuse from
+  netsurf-reMarkable + KOReader, WPE build reuse via Igalia meta-webkit, lifecycle/persistence, what NOT to reuse).
+
 ## Status
-Phase 0 ✅ DONE & verified on device (2026-06-24): colima+docker build env with the ferrari SDK
-(GCC 13.4.0, sysroot cortexa53-crypto-remarkable-linux). Flow: `./scripts/fetch-sdk.sh` →
-`docker build -f toolchain/Dockerfile -t rmweb-sdk .` → cross-compile via `./scripts/build.sh '<cmd>'`
-→ deploy+run via `./scripts/deploy.sh <binary>`. `hello` ran on the Paper Pro (aarch64, reMarkable Ferrari).
-Next: **Phase 1 — display spike** (minimal Qt6 app shows an image via `-platform epaper`, xochitl stopped).
+Phase 0 ✅ done. Phase 1 🔶 in progress: QML epaper spike — content reached the panel (fragment seen);
+applying the full-refresh fix, pending one more on-device check. Next after Phase 1: Phase 2 (WPE + Mesa build).
