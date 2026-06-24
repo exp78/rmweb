@@ -9,5 +9,8 @@ dist/
 *.o
 *.so
 
+# cross-compile SDK installer (large, fetched on demand)
+toolchain/sdk/
+
 # macOS
 .DS_Store
