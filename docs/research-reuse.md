@@ -231,3 +231,19 @@ Render → `build/wpe-render.png`: a real page (blue bar + red/green/yellow boxe
   `LIBGL_DRIVERS_PATH=$MESA/usr/lib/dri __EGL_VENDOR_LIBRARY_DIRS=$MESA/usr/share/glvnd/egl_vendor.d`.
 - Buffer path: `WPEDisplayHeadless` (surfaceless) → GPUProcess renders + `glReadPixels(BGRA)` → `WPEBufferSHM` →
   `wpe_buffer_import_to_pixels()` (BGRA bytes, no DRM/GBM map needed) → libpng. **This is the seam Phase 3 plugs into the epaper QPA.**
+
+### Device runtime bundle — WPE PROVEN on real hardware (Phase 3a, verified on device 2026-06-25)
+The full WPE stack renders the same page **on the actual Paper Pro** (native glibc 2.39, no GPU, software GL) via
+`scripts/bundle.sh` (deploy) + `scripts/render-on-device.sh`. Bundle = `/home/root/rmweb` (~171 MB): our built `.so` +
+Mesa + the `WPE{Web,GPU,Network}Process` helpers + WebKit resources/injected-bundle + `bin/wpe_render`.
+- **Dependency closure must be TRANSITIVE:** depth-1 `NEEDED` misses dlopen'd + nested deps. Walk it with
+  `aarch64-remarkable-linux-readelf -d` (the debian container has NO host `readelf`/`objdump` — use the SDK cross one).
+  Of 48 sonames, 21 are ours; the device provides all external ones EXCEPT **libsqlite3, libwebp{,demux,mux},
+  libsharpyuv** → copy those 5 from the SDK sysroot into the bundle (libsharpyuv is a transitive dep of libwebp 7.1.8).
+- **`/` is mounted READ-ONLY** → cannot symlink `/usr/libexec/wpe-webkit-2.0` (the baked prefix WPE spawns helpers from;
+  `WEBKIT_EXEC_PATH` is ignored in 2.48, and `/usr/libexec` already holds dbus/sftp/fc-cache so it can't be shadowed
+  wholesale). Fix without touching rootfs: **overlay-mount** `/usr/libexec` (lowerdir = real, upperdir = our
+  `wpe-webkit-2.0`), `umount` on exit. (Clean fix = rebuild with `-DCMAKE_INSTALL_PREFIX=/home/root/rmweb` in Phase 5.)
+- Device env: `LD_LIBRARY_PATH=/home/root/rmweb/lib` + the softpipe GL env + `WEBKIT_INJECTED_BUNDLE_PATH` +
+  `FONTCONFIG_PATH=/etc/fonts` (device ships 15 system TTFs — text renders without bundling a font) + `HOME=/home/root`.
+- **No glibc loader hacks on device** (everything is 2.39 native) — those were container-only.

@@ -24,7 +24,7 @@
 
 static const int   VIEW_W = 800;
 static const int   VIEW_H = 600;
-static const char *OUT_PNG = "/work/build/wpe-render.png";
+static const char *out_png = "/work/build/wpe-render.png";  /* default; overridable via argv[1] */
 
 static GMainLoop *loop = NULL;
 static gboolean   wrote_png = FALSE;
@@ -133,8 +133,8 @@ static void on_buffer_rendered(WPEView *view, WPEBuffer *buffer, gpointer user_d
     int stride = (int)(size / (gsize)h);
     g_printerr("[render] pixels: %zu bytes, stride=%d (=%d bpp)\n", size, stride, stride / w);
 
-    if (write_png_bgra(OUT_PNG, pix, w, h, stride)) {
-        g_printerr("[render] wrote %s (%dx%d)\n", OUT_PNG, w, h);
+    if (write_png_bgra(out_png, pix, w, h, stride)) {
+        g_printerr("[render] wrote %s (%dx%d)\n", out_png, w, h);
         wrote_png = TRUE;
     }
     g_bytes_unref(bytes);
@@ -160,7 +160,7 @@ static gboolean on_timeout(gpointer user_data)
 
 int main(int argc, char **argv)
 {
-    (void)argc; (void)argv;  /* output path is fixed to OUT_PNG */
+    if (argc > 1) out_png = argv[1];  /* optional output path (the device uses a writable one) */
 
     /* 1. Headless WPE display (surfaceless software EGL under the hood). */
     WPEDisplay *display = wpe_display_headless_new();
