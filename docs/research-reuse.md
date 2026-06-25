@@ -188,3 +188,46 @@ Oxide/draft · reStream/reSnap/rmview. All assume rM1/rM2 `/dev/fb0` + mxcfb.
 - ⚠️ **The SDK ships NO glib codegen tools** (`glib-mkenums`, `glib-genmarshal`). They were extracted from glib
   2.78.6 source and staged at **`build/stage/usr/bin`** — **prepend that to PATH for any glib-based build (libsoup,
   and WebKit itself needs them too)**.
+
+### WPE WebKit 2.48.5 (Skia CPU, software) — built + headless render PROVEN (2026-06-25)
+Recipe: `engine/build-wpe.incontainer.sh` (build) + `engine/render-wpe.incontainer.sh` + `engine/wpe_render.c` (render
+proof) + `engine/atomic16.c`, orchestrated by `scripts/build-wpe.sh {deps|build|render|all}`. Output:
+`build/stage/usr/lib/libWPEWebKit-2.0.so.1.5.10` (139 MB) + `libWPEPlatform-2.0.so` + `WPE{Web,Network,GPU}Process`.
+Render → `build/wpe-render.png`: a real page (blue bar + red/green/yellow boxes + anti-aliased DejaVu text).
+
+**Extra deps WebKit hard-requires (cross-built into `build/stage`, see `build_deps` in `scripts/build-wpe.sh`):**
+- **`libatomic.so` shim** — cortex-a53 is ARMv8.0 (no LSE); WebKit/libpas calls `__atomic_{load,store}_16` but the SDK
+  gcc ships NO libatomic. A tiny spinlock `engine/atomic16.c` provides the 16-byte ops; link WPE with `-latomic`.
+- **`libharfbuzz-icu`** — SDK harfbuzz 8.3.0 was built WITHOUT `--with-icu`; compile the single `src/hb-icu.cc` from the
+  matching 8.3.0 tarball + hand-write `harfbuzz-icu.pc`. (`find_package(HarfBuzz REQUIRED COMPONENTS ICU)`.)
+- **`libtasn1 4.19`** (autotools), **`libwpe 1.16.2`** (meson native-file), **`libxslt 1.1.39`** (autotools, explicit libxml2 flags).
+
+**Build gotchas (all fixed in the scripts):**
+- **`PKG_CONFIG_SYSROOT_DIR=$SR` is MANDATORY** (do NOT unset it): an absolute `-I` ignores `--sysroot`, so without it
+  `gio-unix-2.0` resolves to the header-LESS container `/usr/include` → `gio/gfiledescriptorbased.h: No such file`.
+- **Configure on a CASE-SENSITIVE FS:** the macOS `/work` bind mount is case-insensitive → `ArgumentCodersGLib.h` vs
+  `...Glib.h` collide → `incomplete type IPC::ArgumentCoder<GTlsCertificate>`. Build on a docker **named volume**
+  (`rmweb-build:/build`, ext4) — which ALSO makes the ~1.5–2.5 h ninja **resumable** across container/VM restarts. (Watch
+  the trap: a `cp -a` of the source must NOT drag a stale `_b` onto the volume, or a resume guard reuses a bad configure.)
+- **`g++` must be apt-installed** in the container (debian-slim lacks it) or a host-side C++ compile dies with
+  `gcc: cannot execute 'cc1plus'`.
+- cmake highlights: `-DPORT=WPE -DUSE_SKIA=ON -DENABLE_WPE_PLATFORM=ON -DENABLE_WPE_PLATFORM_HEADLESS=ON` + media/webgl/
+  sandbox/introspection OFF (full set in the script). Native-build trick (unset `CMAKE_TOOLCHAIN_FILE`, hand cmake the
+  bare `aarch64-remarkable-linux-g++` + `--sysroot`) lets WebKit run its generated host tools in the aarch64 container.
+
+**Headless render proof (`engine/render-wpe.incontainer.sh`) — 4 things that bit, all fixed (mostly container-only):**
+- **glibc loader mismatch:** WPE spawns Web/GPU/Network subprocesses whose ELF interp is `/lib/ld-linux-aarch64.so.1`
+  = container **glibc 2.36**, but they need the **2.39** sysroot libc → `undefined symbol __tunable_is_initialized,
+  GLIBC_PRIVATE`. Fix (container ONLY): repoint that symlink to `$SR/lib/ld-linux-aarch64.so.1` (a newer ld runs older
+  binaries fine). Side effect: bare container commands run *outside* the scoped `env` may segfault — gate the result
+  check with the bash `[ -s ... ]` builtin, not `ls`. **On the DEVICE this whole issue is moot (all 2.39 natively).**
+- **baked install prefix:** WPE spawns helpers from the ABSOLUTE `/usr/libexec/wpe-webkit-2.0/` (`WEBKIT_EXEC_PATH` is
+  NOT honored in 2.48) → symlink `/usr/{libexec,lib,share}/wpe-webkit-2.0` → `$STAGE/usr/...` (or just install to `/usr` on device).
+- **load via `webkit_web_view_load_html()`**, NOT a `data:text/html,` URL — an unescaped `#` (e.g. `#fff`) is parsed as
+  the URL fragment and truncates the document → blank render. Capture the buffer AFTER `load-changed == FINISHED`.
+- **fonts:** the SDK sysroot has `fonts.conf` but ZERO fonts → set `FONTCONFIG_PATH=$SR/etc/fonts`, `HOME=/tmp`, and drop
+  a TTF where it scans (`/usr/share/fonts`, e.g. apt `fonts-dejavu-core`); else text paints blank.
+- Software-GL env for the whole run: `GALLIUM_DRIVER=softpipe LIBGL_ALWAYS_SOFTWARE=1 EGL_PLATFORM=surfaceless` +
+  `LIBGL_DRIVERS_PATH=$MESA/usr/lib/dri __EGL_VENDOR_LIBRARY_DIRS=$MESA/usr/share/glvnd/egl_vendor.d`.
+- Buffer path: `WPEDisplayHeadless` (surfaceless) → GPUProcess renders + `glReadPixels(BGRA)` → `WPEBufferSHM` →
+  `wpe_buffer_import_to_pixels()` (BGRA bytes, no DRM/GBM map needed) → libpng. **This is the seam Phase 3 plugs into the epaper QPA.**

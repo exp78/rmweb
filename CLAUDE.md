@@ -56,4 +56,9 @@ Phase 0 ✅ done. Phase 1 ✅ DONE & verified on device (2026-06-25): a standalo
 test pattern on the Paper Pro e-ink via the epaper QPA (cure = Window sized to `Screen.width/height`; QtQuick
 only; `QT_QPA_PLATFORM=epaper QT_QUICK_BACKEND=epaper`; xochitl stopped/restored). The real rMPP refresh API
 is recorded for Phase 4 (`EPFramebuffer::swapBuffers/ghostControl`, exported by libqsgepaper — see research-reuse.md).
-Next: **Phase 2** — cross-build WPE WebKit (Skia CPU) + Mesa llvmpipe; headless render a page to PNG.
+Phase 2 ✅ DONE (2026-06-25): **WPE WebKit 2.48.5 (Skia CPU, software) cross-built** for aarch64 + **Mesa softpipe**
+(software EGL, surfaceless, no GPU); a headless `engine/wpe_render.c` **rendered a real web page to PNG**
+(`build/wpe-render.png` — bar + colored boxes + anti-aliased text). Recipe: `scripts/build-wpe.sh {deps|build|render}`
+→ `engine/*.incontainer.sh` (builds on a persistent, case-sensitive docker volume → resumable); all gotchas in
+research-reuse.md §8 (sysroot pkg-config, glibc-2.39 loader repoint, `/usr` symlinks, `load_html`, fonts).
+Next: **Phase 3** — feed the WPE ARGB buffer (`wpe_buffer_import_to_pixels`) into the Qt6 epaper QPA → web page on e-ink.

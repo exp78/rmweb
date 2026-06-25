@@ -9,6 +9,10 @@ dist/
 *.o
 *.so
 
+# core dumps
+core
+core.*
+
 # cross-compile SDK installer (large, fetched on demand)
 toolchain/sdk/
 
