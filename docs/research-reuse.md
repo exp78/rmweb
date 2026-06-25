@@ -156,3 +156,35 @@ Oxide/draft · reStream/reSnap/rmview. All assume rM1/rM2 `/dev/fb0` + mxcfb.
 - Display reuse: alex0809/netsurf-reMarkable · koreader/koreader-base · TiagoJMartins/rmBifrost · canselcik/libremarkable (wiki)
 - WPE: Igalia/meta-webkit · Igalia/WPEBackend-fdo · wpewebkit.org · docs.webkit.org Graphics · docs.mesa3d.org/drivers/llvmpipe
 - Ecosystem: asivery/xovi · asivery/rm-appload · owulveryck/goMarkableStream · vellum-dev/vellum · hmenzagh/rmpp-entware · reHackable/awesome-reMarkable
+
+## 8. Phase 2 build facts (verified 2026-06-25)
+
+**Software GL — Mesa 24.0.9 (softpipe, NO LLVM):** builds + the EGL surfaceless smoke test passes →
+`GL_RENDERER=softpipe`, `OpenGL ES 3.1 Mesa 24.0.9`. Artifacts: `libEGL.so / libGLESv2.so / libgbm.so` (aarch64).
+- **Runtime env (use these to run anything GL, incl. WPE):** `GALLIUM_DRIVER=softpipe` (NOT `swrast` — that's the
+  DRI module name and makes `eglInitialize` fail), `LIBGL_ALWAYS_SOFTWARE=1`, `EGL_PLATFORM=surfaceless`.
+- **Build approach (key trick, reuse for WPE):** the `rmweb-sdk` container is **aarch64**, and the SDK cross-gcc
+  produces binaries that **run natively in the container**. The OE meson-wrapper's cross-file sets
+  `needs_exe_wrapper=true` + a broken x86-64 native toolchain → breaks any build that runs generated host tools
+  (Mesa, and very likely WebKit). Fix: do a **native aarch64 build** with a custom meson native-file (or, for CMake,
+  a native config) pointing the SDK gcc at the device sysroot, bypassing the OE cross-wrapper. (Plain meson via the
+  OE wrapper still works for simple libs like libxkbcommon that don't run generated tools.)
+- Mesa meson: `-Dgallium-drivers=swrast -Dllvm=disabled -Degl-native-platform=surfaceless -Dplatforms=
+  -Dgles2=enabled -Dgbm=enabled -Dglx=disabled -Dvulkan-drivers=` (in 24.0.9 `surfaceless` moved from `platforms`
+  to `egl-native-platform`). Python build deps (mako/markupsafe/packaging) via `python3 -m ensurepip` → `build/pydeps`
+  (set `SSL_CERT_DIR=$OECORE_NATIVE_SYSROOT/etc/ssl/certs/`, `PYTHONPATH=build/pydeps`).
+- On the **device** these LD/loader gymnastics are moot — the device's own glibc loads everything normally.
+
+**Built deps (all into `build/stage/usr`, aarch64), exact working configs:**
+- `libxkbcommon 1.7.0` (meson) — `-Denable-wayland=false -Denable-x11=false -Denable-docs=false -Denable-tools=false`.
+- `libpsl 0.21.5` (meson) — `-Druntime=no -Dbuiltin=true -Dtests=false` (NB: `builtin` is a **boolean** in 0.21.5;
+  `-Dbuiltin=no` errors — use `true`, which embeds the PSL data so no on-device PSL file is needed).
+- `libepoxy 1.5.10` (meson) — from the **GNOME mirror** `download.gnome.org/sources/libepoxy/1.5/` (the GitHub
+  release tarball 404s). `-Dglx=no -Dx11=false -Degl=yes -Dtests=false -Dc_args=-I/work/build/stage-mesa/usr/include`
+  (needs EGL/KHR headers at BUILD time — they live in `build/stage-mesa`; libepoxy `dlopen`s libEGL at runtime, links only `libdl`).
+- `libsoup 3.6.0` (meson) — `-Dvapi=disabled -Dintrospection=disabled -Dtests=false -Dsysprof=disabled -Ddocs=disabled
+  -Dpkcs11_tests=disabled -Dautobahn=disabled -Dtls_check=false`. HTTPS needs **glib-networking** at runtime (deferred;
+  http/file/data work without it).
+- ⚠️ **The SDK ships NO glib codegen tools** (`glib-mkenums`, `glib-genmarshal`). They were extracted from glib
+  2.78.6 source and staged at **`build/stage/usr/bin`** — **prepend that to PATH for any glib-based build (libsoup,
+  and WebKit itself needs them too)**.
