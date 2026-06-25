@@ -247,3 +247,23 @@ Mesa + the `WPE{Web,GPU,Network}Process` helpers + WebKit resources/injected-bun
 - Device env: `LD_LIBRARY_PATH=/home/root/rmweb/lib` + the softpipe GL env + `WEBKIT_INJECTED_BUNDLE_PATH` +
   `FONTCONFIG_PATH=/etc/fonts` (device ships 15 system TTFs — text renders without bundling a font) + `HOME=/home/root`.
 - **No glibc loader hacks on device** (everything is 2.39 native) — those were container-only.
+
+### WPE → Qt6 → e-ink integration (Phase 3b, verified on device 2026-06-25)
+A Qt6 app (`engine/wpeqt/main.cpp`; build `scripts/build-wpeqt.sh`; run `scripts/run-wpeqt-on-device.sh {save|show}`)
+is the WPE UIProcess and shows a **live web page on the Paper Pro e-ink**.
+- **WpeEngine on a worker QThread** owns a `GMainContext` (pushed thread-default) + `GMainLoop`. Create the
+  context/loop in the CONSTRUCTOR (GUI thread, before `moveToThread`) so `stop()` reads them race-free, then quit via
+  `g_main_context_invoke()`. The worker runs `g_main_loop_run` — **NOT a Qt event loop** — so you can't reach it with
+  `QMetaObject::invokeMethod(QueuedConnection)`; marshal through GLib.
+- **buffer-rendered → QImage:** WPE's BGRA buffer (ARGB8888 little-endian, memory B,G,R,A) maps **directly** to
+  `QImage::Format_ARGB32` on little-endian — no channel swap. Deep-copy (`img.copy()`, an argument prvalue) BEFORE
+  `g_bytes_unref`; emit `frameReady(QImage)` to the GUI thread (queued — receiver lives there).
+- **Display:** a `QQuickPaintedItem` (`WpeView`) paints the frame full-screen; inline QML `Window` sized to
+  `Screen.width/height` (the Phase 1 cure), `QT_QPA_PLATFORM=epaper QT_QUICK_BACKEND=epaper`, xochitl stopped. The
+  epaper backend refreshes on `update()`. (Color/Gallery-3 full-refresh tuning = Phase 4.)
+- **Build gotcha:** WPE pulls in GLib `gio`, whose GDBus structs have members named `signals`/`slots`, colliding with
+  Qt's keyword macros → compile with **`QT_NO_KEYWORDS`** and use `Q_SIGNALS`/`Q_SLOTS`/`Q_EMIT`.
+- **Cross-build:** seed `build/stage` + `build/stage-mesa` into the sysroot, then the normal OE CMake toolchain finds
+  Qt6 (device) + WPE (pkg-config); Qt6 cross moc works out of the box. Device platform plugins: `libqoffscreen.so`
+  (save mode) + `libepaper.so` (show); PNG write is built into QtGui (no plugin). BusyBox on device has **no
+  `timeout`** → background the app + `sleep` + `kill`. The output PNG path is argv-configurable.

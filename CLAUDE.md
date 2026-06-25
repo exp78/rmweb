@@ -61,4 +61,10 @@ Phase 2 ✅ DONE (2026-06-25): **WPE WebKit 2.48.5 (Skia CPU, software) cross-bu
 (`build/wpe-render.png` — bar + colored boxes + anti-aliased text). Recipe: `scripts/build-wpe.sh {deps|build|render}`
 → `engine/*.incontainer.sh` (builds on a persistent, case-sensitive docker volume → resumable); all gotchas in
 research-reuse.md §8 (sysroot pkg-config, glibc-2.39 loader repoint, `/usr` symlinks, `load_html`, fonts).
-Next: **Phase 3** — feed the WPE ARGB buffer (`wpe_buffer_import_to_pixels`) into the Qt6 epaper QPA → web page on e-ink.
+Phase 3 ✅ DONE (2026-06-25): a **web page rendered by WPE WebKit is shown on the Paper Pro e-ink**. `engine/wpeqt`
+is a Qt6 app (= WPE UIProcess); `WpeEngine` drives WPE headless on a worker thread → `buffer-rendered` BGRA → `QImage`
+→ `QQuickPaintedItem` → epaper QPA (xochitl stopped). Device bundle = `/home/root/rmweb` (`scripts/bundle.sh`);
+build `scripts/build-wpeqt.sh`; run `scripts/run-wpeqt-on-device.sh {save|show}`. Engine also proven standalone
+on-device (3a: `scripts/render-on-device.sh`). All integration gotchas in research-reuse.md §8 (QT_NO_KEYWORDS,
+worker-thread GMainContext, BGRA==ARGB32, /usr/libexec overlay, BusyBox no-timeout).
+Next: **Phase 4** (scope A) — touch/pen input (evdev event2/event3), reading shell (QML chrome), e-ink refresh tuning.
