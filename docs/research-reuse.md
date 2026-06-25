@@ -45,6 +45,27 @@ Under the hood it's the Kindle-style `MXCFB_SEND_UPDATE`-equivalent. **rMPP's co
 differ from the mono rM2 table — rely on the NAMES, not raw integers.** Source `epframebuffer_acep2.cpp` is
 not public.
 
+### ⚠️ rMPP CORRECTION — verified on device (`nm -D` on the real `libqsgepaper.so`, 2026-06-25)
+The header above is the **rM1/rM2 (Qt5) `EPFrameBuffer`**. The Paper Pro uses a **different, newer class —
+note the lowercase 'b': `EPFramebuffer`** — and a different refresh API. These symbols are **exported** in
+`/usr/lib/plugins/scenegraph/libqsgepaper.so` (callable via `dlopen(plugin) + dlsym`; Qt loads plugins
+`RTLD_LOCAL`, so `RTLD_DEFAULT` does NOT see them — dlopen the .so explicitly):
+```
+EPFramebuffer* EPFramebuffer::instance();                       // _ZN13EPFramebuffer8instanceEv
+void EPFramebuffer::forceInstance(EPFramebuffer*);
+void EPFramebuffer::swapBuffers(QRect, EPContentType, EPScreenMode, QFlags<UpdateFlag>);   // the present/refresh call
+void EPFramebuffer::swapBuffers(QRegion, EPContentMap, EPScreenModeMap, QFlags<UpdateFlag>); // multi-region
+void EPFramebuffer::ghostControl(GhostControlMode);             // ghosting control — for Phase 4 anti-ghost
+void EPFramebuffer::setBuffers(std::tuple<QImage,QImage>);
+// impls: EPFramebufferAcep2 (color) :: swapBuffers_impl(...), ghostControl(...);
+//        EPFramebufferSwtcon :: update(QRect, int, PixelMode, int)
+```
+Enums to reverse for exact values: `EPContentType`, `EPScreenMode`, `UpdateFlag`, `GhostControlMode`, `PixelMode`.
+**For Phase 4 refresh tuning:** `dlopen("/usr/lib/plugins/scenegraph/libqsgepaper.so") → EPFramebuffer::instance()`
+then `swapBuffers(rect, contentType, screenMode, flags)` for full vs partial / waveform, and `ghostControl(...)`
+for ghost clearing. (For the basic Phase-1 spike none of this is needed — correct Window sizing alone presents
+content; the scenegraph auto-refreshes.)
+
 ### Official references (copy these)
 - reMarkable Qt epaper guide: https://developer.remarkable.com/documentation/qt_epaper
 - Official examples (run on rMPP): https://github.com/reMarkable/remarkable-developer-examples (`hello_remarkable`, `calculator`)

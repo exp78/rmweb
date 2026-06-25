@@ -52,5 +52,8 @@ runs via epaper, restores xochitl). `hello` ran on the Paper Pro (aarch64, reMar
   netsurf-reMarkable + KOReader, WPE build reuse via Igalia meta-webkit, lifecycle/persistence, what NOT to reuse).
 
 ## Status
-Phase 0 ✅ done. Phase 1 🔶 in progress: QML epaper spike — content reached the panel (fragment seen);
-applying the full-refresh fix, pending one more on-device check. Next after Phase 1: Phase 2 (WPE + Mesa build).
+Phase 0 ✅ done. Phase 1 ✅ DONE & verified on device (2026-06-25): a standalone Qt6 QML app presents a full
+test pattern on the Paper Pro e-ink via the epaper QPA (cure = Window sized to `Screen.width/height`; QtQuick
+only; `QT_QPA_PLATFORM=epaper QT_QUICK_BACKEND=epaper`; xochitl stopped/restored). The real rMPP refresh API
+is recorded for Phase 4 (`EPFramebuffer::swapBuffers/ghostControl`, exported by libqsgepaper — see research-reuse.md).
+Next: **Phase 2** — cross-build WPE WebKit (Skia CPU) + Mesa llvmpipe; headless render a page to PNG.

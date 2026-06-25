@@ -10,15 +10,15 @@ DEVICE_USER="${REMARKABLE_USER:-root}"
 BIN="${1:?usage: run-on-device.sh <local-binary> [app-args...]}"; shift || true
 NAME="$(basename "$BIN")"
 REMOTE="/home/root/rmweb/bin/$NAME"
-ARGS="$*"
+REMOTE_ARGS="$(printf '%q ' "$@")"   # shell-escape app args for the remote shell
 
 ssh "$DEVICE_USER@$HOST" 'mkdir -p /home/root/rmweb/bin'
 scp "$BIN" "$DEVICE_USER@$HOST:$REMOTE"
 ssh "$DEVICE_USER@$HOST" "
   set -e
+  trap 'echo \"[device] restarting xochitl…\"; systemctl start xochitl' EXIT   # restore BEFORE stopping
   echo '[device] stopping xochitl…'
   systemctl stop xochitl
-  trap 'echo \"[device] restarting xochitl…\"; systemctl start xochitl' EXIT
   echo '[device] running $NAME via epaper QPA…'
-  QT_QPA_PLATFORM=epaper QT_QUICK_BACKEND=epaper '$REMOTE' $ARGS || echo \"[device] app exited rc=\$?\"
+  QT_QPA_PLATFORM=epaper QT_QUICK_BACKEND=epaper '$REMOTE' $REMOTE_ARGS || echo \"[device] app exited rc=\$?\"
 "

@@ -8,5 +8,4 @@ find_package(Qt6 REQUIRED COMPONENTS Gui Qml Quick)
 qt_standard_project_setup()
 
 add_executable(display-spike main.cpp)
-target_link_libraries(display-spike PRIVATE Qt6::Gui Qt6::Qml Qt6::Quick ${CMAKE_DL_LIBS})
-target_compile_definitions(display-spike PRIVATE _GNU_SOURCE)  # RTLD_DEFAULT
+target_link_libraries(display-spike PRIVATE Qt6::Gui Qt6::Qml Qt6::Quick)
