@@ -81,7 +81,11 @@ facts, all verified on-device and written up in `docs/research/` (4 sourced docs
   **`wpe_buffer_shm_get_data/_stride`** — `wpe_buffer_import_to_pixels()` returns a garbage size on scrolled frames.
 - **Scroll:** a bare `scrollBy` changes scrollY but emits no buffer; a tiny DOM mutation forces an immediate
   repaint (`flip-latency≈23 ms`). Verified scrolled content renders correctly (saved frame PNG showed "Line 10–43").
-- **JIT:** `JSC_useJIT=0` (a JS page segfaulted with the JIT — revisit: rMPP may not actually be W^X).
+- **JIT:** `JSC_useJIT=0` — **W^X CONFIRMED on device (2026-06-26): the JIT kills/stalls the WebProcess on
+  any real JS page.** Wikipedia under `RMWEB_JIT=1` rendered ONE blank frame then the WebProcess died silently
+  (our UIProcess survives → no `[CRASH]`, no reboot); a trivial JS page survives only because it never tiers up
+  to the JIT. Keep the interpreter — heavy JS sites (e.g. rbc.ru) are out of reading-MVP scope. Re-run the
+  experiment with `RMWEB_JIT=1` (launcher toggle).
 - **Device:** a process **segfault reboots the device** (watchdog/memfault, ~100 s) — logs go to `/home/root` to
   survive; a SIGSEGV backtrace handler is compiled in (`-rdynamic`).
 **Phase 4 "~6 s per page-turn" SOLVED (2026-06-26):** the culprit was **Mesa softpipe** — the single-threaded,
