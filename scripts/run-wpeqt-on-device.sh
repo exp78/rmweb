@@ -11,7 +11,7 @@ MODE="${1:-save}"; URL="${2:-}"
 
 scp -q build/rmweb-wpeqt "$DUSER@$HOST:/home/root/rmweb/bin/rmweb-wpeqt"
 
-ssh "$DUSER@$HOST" "MODE='$MODE' URL='$URL' SHOW_SECS='${SHOW_SECS:-40}' RMWEB_AUTOPAGE_MS='${RMWEB_AUTOPAGE_MS:-}' WEBKIT_DEBUG='${WEBKIT_DEBUG:-}' RMWEB_FULL_EVERY='${RMWEB_FULL_EVERY:-}' RMWEB_DEBUG_TAP='${RMWEB_DEBUG_TAP:-}' RMWEB_DEBUG_NAV='${RMWEB_DEBUG_NAV:-}' bash -s" <<'EOS'
+ssh "$DUSER@$HOST" "MODE='$MODE' URL='$URL' SHOW_SECS='${SHOW_SECS:-40}' RMWEB_AUTOPAGE_MS='${RMWEB_AUTOPAGE_MS:-}' WEBKIT_DEBUG='${WEBKIT_DEBUG:-}' RMWEB_FULL_EVERY='${RMWEB_FULL_EVERY:-}' RMWEB_DEBUG_TAP='${RMWEB_DEBUG_TAP:-}' RMWEB_DEBUG_NAV='${RMWEB_DEBUG_NAV:-}' RMWEB_JIT='${RMWEB_JIT:-}' bash -s" <<'EOS'
 set -e
 R=/home/root/rmweb
 # WPE spawns helpers from the baked /usr/libexec/wpe-webkit-2.0 and / is read-only -> overlay it.
@@ -46,7 +46,7 @@ export GIO_EXTRA_MODULES="$R/lib/gio/modules"   # glib-networking OpenSSL TLS ba
 export FONTCONFIG_PATH=/etc/fonts HOME=/home/root
 # The device forbids writable+executable (W^X) / MAP_JIT memory, so JavaScriptCore's JIT segfaults
 # the WebProcess the moment a page runs JS. Run JSC in its interpreter (LLInt) — stable, fine for e-ink.
-export JSC_useJIT=0
+export JSC_useJIT="${RMWEB_JIT:-0}"   # RMWEB_JIT=1 to TEST the JIT (may segfault -> reboot; see CLAUDE.md W^X note)
 
 if [ "$MODE" = show ]; then
   echo "[device] stopping xochitl"; systemctl stop xochitl && STOPPED=1
