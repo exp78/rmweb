@@ -19,3 +19,5 @@ target_link_libraries(rmweb-wpeqt PRIVATE Qt6::Gui Qt6::Qml Qt6::Quick PkgConfig
 # WPE/WebKit pull in GLib's gio, whose GDBus structs have members named `signals`/`slots`.
 # Disable Qt's `signals`/`slots`/`emit` keyword macros (we use Q_SIGNALS/Q_SLOTS/Q_EMIT).
 target_compile_definitions(rmweb-wpeqt PRIVATE QT_NO_KEYWORDS)
+# Export symbols to the dynamic table so backtrace_symbols_fd() can name our frames in the crash handler.
+target_link_options(rmweb-wpeqt PRIVATE -rdynamic)

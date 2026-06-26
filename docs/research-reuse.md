@@ -60,11 +60,24 @@ void EPFramebuffer::setBuffers(std::tuple<QImage,QImage>);
 // impls: EPFramebufferAcep2 (color) :: swapBuffers_impl(...), ghostControl(...);
 //        EPFramebufferSwtcon :: update(QRect, int, PixelMode, int)
 ```
-Enums to reverse for exact values: `EPContentType`, `EPScreenMode`, `UpdateFlag`, `GhostControlMode`, `PixelMode`.
-**For Phase 4 refresh tuning:** `dlopen("/usr/lib/plugins/scenegraph/libqsgepaper.so") → EPFramebuffer::instance()`
-then `swapBuffers(rect, contentType, screenMode, flags)` for full vs partial / waveform, and `ghostControl(...)`
-for ghost clearing. (For the basic Phase-1 spike none of this is needed — correct Window sizing alone presents
-content; the scenegraph auto-refreshes.)
+**✅ Enum values CONFIRMED** (reverse-engineered from the rMPP toolchain `libqsgepaper.a` by asivery —
+https://github.com/asivery/epfb-re , `epframebuffer.h`). This is the authoritative rMPP refresh API:
+```cpp
+enum EPScreenMode { QualityFastest=0, QualityFast=1, Quality3=3, QualityFull=4, Quality5=5 };  // waveform quality
+enum EPContentType { Mono=0, Color=1 };                                                        // mono vs color path
+class EPFramebuffer { enum UpdateFlag { NoRefresh=0, CompleteRefresh=1 };                       // CompleteRefresh = FULL flash
+  unsigned long swapBuffers(QRect changed, EPContentType, EPScreenMode, QFlags<UpdateFlag>);    // present + refresh
+  static EPFramebuffer* createControlledInstance();   // LD_PRELOAD-hook variant; plain instance() also exported
+  QImage* getAuxFramebuffer();   // the back buffer you paint INTO
+  QImage* getMainFramebuffer(); };
+```
+Cross-check vs the older rmBifrost `(color, variant, full)` triple (sec. 2): they line up —
+`color`=`EPContentType`, `variant`=`EPScreenMode`, `full`=`CompleteRefresh`. So rmBifrost `COLOR_CONTENT→(1,4,0)`
+= `swapBuffers(r, Color, QualityFull, NoRefresh)` and `FULL→(1,4,1)` = `swapBuffers(r, Color, QualityFull, CompleteRefresh)`.
+`GhostControlMode`/`PixelMode` (from the `nm -D` map above) are NOT in epfb-re yet — still need on-device reversing if used.
+**For Phase 4 refresh tuning:** `dlopen("…/libqsgepaper.so") → EPFramebuffer::instance()` (or `createControlledInstance()`)
+then `swapBuffers(rect, contentType, screenMode, flags)`. (For the Phase-1 spike none of this is needed — correct Window
+sizing alone presents content; the scenegraph auto-refreshes.) **HOW it integrates with our Qt path → see §2a below.**
 
 ### Official references (copy these)
 - reMarkable Qt epaper guide: https://developer.remarkable.com/documentation/qt_epaper
@@ -84,16 +97,69 @@ The Qt path auto-refreshes but ghosts/leaves color un-developed. Reuse these *de
   **`FULL_REFRESH_COUNT`** — promote to a full (flashing) refresh every N partials to clear ghosting;
   per-update **waveform selection** (fast A2/DU for text/scroll, GC16 for images/final); hardware **dither**
   with **8-px alignment** (round x/y down, w/h up to ×8); **marker waits** for completion.
-- **rmBifrost** (rMPP, abandoned but the map — https://github.com/TiagoJMartins/rmBifrost): rMPP "waveform" =
-  a `(color, variant, full)` triple via `screen_update(QObject* fb, point, point, int color, int variant, int full)`.
+- **asivery `epfb-re`** (https://github.com/asivery/epfb-re) — ★ BEST source for rMPP: the reverse-engineered
+  `EPFramebuffer` header (confirmed enums above) + working `swapBuffers` demo + a mode-sweep test. Use THIS.
+- **rmBifrost** (rMPP, repo now gone/private; design preserved here): rMPP "waveform" = a `(color, variant, full)`
+  triple via `screen_update(QObject* fb, point, point, int color, int variant, int full)` — the same three params
+  as epfb's `swapBuffers(rect, EPContentType, EPScreenMode, UpdateFlag)`.
   Enum: `MONOCHROME=0, COLOR_ANIMATION=1, COLOR_FAST=2, COLOR_CONTENT=3, FULL=4` →
-  `MONO→(0,0,0)`, `COLOR_FAST→(1,1,0)`, `COLOR_CONTENT→(1,4,0)`, `FULL→(1,4,1)`. (Its binary is fw 3.14/3.15
+  `MONO→(0,0,0)`, `COLOR_FAST→(1,1,0)`, `COLOR_CONTENT→(1,4,0)`, `FULL→(1,4,1)`. (Its binary was fw 3.14/3.15
   only — hardcoded offsets; reuse the design, not the build.)
 - For web content (vs paginated books) we must add our own heuristics: scroll vs small-update vs full-repaint
   detection, kill CSS animations (`prefers-reduced-motion` + injected CSS), waveform per update class.
 - **Paper Pro color**: ICC profile + palette characterized by wavexx
   (https://www.thregr.org/wavexx/rnd/20260201-remarkable_pro_colors/): auto-contrast + quantized dither to the
   CMY(W) gamut; prefer hardware dither.
+
+### 2a. ACTIONABLE Phase-4 refresh plan for OUR Qt/epaper path (the concrete recommendation)
+
+**Where to hook.** Our display is a `QQuickPaintedItem` (`WpeView`) under the `epaper` QPA, which auto-calls the
+scenegraph's `EPFramebuffer::swapBuffers(...)` on every `update()`. That auto path picks a *generic* mode → color
+under-develops + ghosts. We take control by calling `swapBuffers` **ourselves** with the right mode per update class.
+
+**Two integration options — try (A) first, fall back to (B):**
+
+- **(A) Bypass the QtQuick scenegraph for the page area; drive `EPFramebuffer` directly.** This is exactly the
+  epfb-re recipe and what rmBifrost did. At startup: `dlopen("/usr/lib/plugins/scenegraph/libqsgepaper.so", RTLD_NOW)`
+  (Qt loads plugins `RTLD_LOCAL` so resolve via the explicit handle, NOT `RTLD_DEFAULT`), `dlsym` the mangled
+  `EPFramebuffer::instance` / `swapBuffers` (or link `-lqsgepaper` and `#include` the epfb-re header). Paint the WPE
+  BGRA frame into `instance()->getAuxFramebuffer()` (a full-screen `QImage*`), then call `swapBuffers(dirtyRect,
+  content, mode, flags)` with our chosen mode. Keep a tiny QML chrome layer above (toolbar) refreshed the normal way,
+  or also draw it into the aux buffer. **This gives per-update waveform control — the thing the plain QPA can't do.**
+  ⚠️ epfb-re's `createControlledInstance()` uses LD_PRELOAD QImage-ctor hooks to discover the two internal buffers;
+  the simpler plain `instance()` + `getAuxFramebuffer()` is enough if those symbols resolve on our fw. Verify on device.
+
+- **(B) Stay on the QPA, nudge it.** If grabbing the buffer fights QtQuick, keep painting via `WpeView` and only
+  call `EPFramebuffer::instance()->swapBuffers(fullScreenRect, Color, QualityFull, CompleteRefresh)` *after* a page
+  load / periodically to force the color full-flash, letting the auto path handle fast partials. Coarser, but minimal
+  change to the working Phase-3b code. (This is the `setForceFull`-equivalent for the new API.)
+
+**Per-update-class mode table (a reading browser → reuse KOReader/rmBifrost designs):**
+| Event | content | mode | flag | rationale |
+|---|---|---|---|---|
+| Page load / navigation (color) | `Color` | `QualityFull` (4) | `CompleteRefresh` | full multi-pass waveform develops color + clears ghosts (~1 s, matches stock) |
+| Scroll tick / panning text | `Mono` (0) | `QualityFastest`/`QualityFast` (0/1) | `NoRefresh` | fast mono partial (~350 ms class) — no flash, slight ghosting OK |
+| Small mono UI update (caret, toolbar, link highlight) | `Mono` | `QualityFast` (1) | `NoRefresh` | snappy partial, bounded region |
+| Image/color region settled (post-scroll) | `Color` | `Quality3`/`QualityFull` | `NoRefresh` | redo just that region in color once motion stops |
+| Anti-ghost flush | `Color` | `QualityFull` | `CompleteRefresh` | the periodic flash (below) |
+
+**Debounce + anti-ghost control loop (steal netsurf + KOReader):**
+1. **Coalesce** dirty rects into one bounding box; run an async **debounced redraw on a ~5 Hz / ~200 ms timer**
+   (netsurf-reMarkable) so a burst of WPE `buffer-rendered` frames = **one** `swapBuffers` per tick. While scrolling,
+   emit `Mono`/`QualityFast`/`NoRefresh` partials.
+2. **`FULL_REFRESH_COUNT`** (KOReader): keep a partial counter; **every Nth partial (start N≈8–12, tune on device)
+   AND on `scroll-end`/page-load, force `Color`+`QualityFull`+`CompleteRefresh`** over the whole screen to clear
+   accumulated ghosting. Reset counter on every full.
+3. **8-px align** the dirty rect (round x/y down, w/h up to ×8) before `swapBuffers` (E-Ink controller alignment).
+4. **Block animation churn**: inject `* { animation:none!important; transition:none!important; scroll-behavior:auto!important }`
+   + emulate `prefers-reduced-motion: reduce` in WPE, so CSS doesn't trigger endless partials.
+5. **Throttle waits**: `swapBuffers` returns a marker (the `unsigned long`); only block on completion before the *next
+   full*, not on every partial, to keep scrolling fluid (KOReader marker-wait pattern).
+
+**Reference impls to copy from:** epfb-re `test.cpp`/`OLD/modetest.cpp` (exact `swapBuffers` call + a mode-sweep
+harness — run it on device to time each `(EPContentType,EPScreenMode,flag)` combo and pick our constants);
+netsurf-reMarkable `libnsfb` (dirty-box + debounce thread); KOReader `framebuffer_mxcfb.lua` (`FULL_REFRESH_COUNT`,
+per-update waveform, dither, marker waits).
 
 ## 3. WPE WebKit build — REUSE (our Phase 2)
 
@@ -124,12 +190,16 @@ The Qt path auto-refreshes but ghosts/leaves color un-developed. Reuse these *de
   sleep: draw a pre-suspend image → `systemctl suspend` → set RTC `wakealarm`. Suspend-notify driver:
   write our PID to a sysfs `target_pid`, receive `SIGRTMAX-1` (prepare) / `SIGRTMAX` (post). Expect a full
   repaint on resume (FPGA bridge reloads).
-- **Input:** Elan (`elants_spi`), NOT Wacom. `event0`=power, `event1`=hall, `event2`="Elan marker input"
-  (pen), `event3`="Elan touch input", `event4`=Type Folio keyboard. Open **shared, not `EVIOCGRAB`**. On
-  aarch64 `struct input_event` is **24 bytes**. Transforms (KOReader): pen `x*1620/11180, y*2160/15340`;
-  touch `x*1620/2064, y*2160/2832`; no axis swap. ⚠️ Our earlier on-device recon showed `touchscreen0 -> event2`
-  and the epaper QPA already feeds touch via `QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS` — **verify the exact
-  event→device mapping on the device before wiring input.** The epaper QPA may deliver pen/touch to Qt for us.
+- **Input:** Elan (`elants_spi`), NOT Wacom. `event0`=power, `event1`=hall, **`event2`="Elan marker input"
+  (PEN), `event3`="Elan touch input" (FINGER TOUCH)** — resolve by NAME via `EVIOCGNAME`, never by `eventN`.
+  On aarch64 `struct input_event` is **24 bytes**. Transforms (KOReader): pen `x*1620/11180, y*2160/15340`;
+  touch `x*1620/2064, y*2160/2832`; no axis swap, no mirror on stock path (verify top-left tap on device).
+  ✅ RESOLVED 2026-06-26 (full plan: **`docs/research/remarkable-touch-input.md`**): the epaper QPA DOES have a
+  touch handler but posts `handleTouchEvent(nullptr,…)` → Qt drops it (null window / `topLevelAt` miss), so the
+  app receives nothing. **Recommendation: read `/dev/input/event3` directly (Protocol-B evdev) and `EVIOCGRAB`
+  it** — the grab also silences the QPA's touch path, which is the likely cause of the **WPE-app segfault on
+  touch**. The QPA only probes the grab at startup and releases it (no persistent grab), so a direct reader
+  works; without a grab, evdev broadcasts to both readers (kernel `drivers/input/evdev.c`).
 - **Packaging:** **Vellum** (apk; replaced Toltec for rMPP, model/fw-aware), `rmpp-entware`, and **XOVI +
   rm-appload** (in-xochitl launcher; our Strategy-B alternative). Frontlight
   `/sys/class/backlight/rm_frontlight/brightness` (0–2047). Battery sysfs `max1726x`.

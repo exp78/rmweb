@@ -67,4 +67,22 @@ is a Qt6 app (= WPE UIProcess); `WpeEngine` drives WPE headless on a worker thre
 build `scripts/build-wpeqt.sh`; run `scripts/run-wpeqt-on-device.sh {save|show}`. Engine also proven standalone
 on-device (3a: `scripts/render-on-device.sh`). All integration gotchas in research-reuse.md §8 (QT_NO_KEYWORDS,
 worker-thread GMainContext, BGRA==ARGB32, /usr/libexec overlay, BusyBox no-timeout).
-Next: **Phase 4** (scope A) — touch/pen input (evdev event2/event3), reading shell (QML chrome), e-ink refresh tuning.
+Phase 4 (scope A) 🔶 IN PROGRESS (2026-06-26): **finger touch + scroll work end-to-end on device.** Hard-won
+facts, all verified on-device and written up in `docs/research/` (4 sourced docs):
+- **Touch:** the epaper QPA posts finger touch with a NULL window → Qt drops it (and that path crashes WebKit).
+  So we read the finger digitizer **directly from evdev** — node **event3 = "Elan touch input"** (event2 = pen;
+  the old device-profile mapping was BACKWARDS), `EVIOCGRAB`'d (the grab also silences the QPA's crashing touch
+  dispatch). `TouchReader` decodes Protocol-B (SLOT 47 / TRACKING_ID 57 (−1=lift) / POS_X 53 / POS_Y 54 / SYN),
+  maps `x*1620/2064,y*2160/2832`, debounces 0.8 s, emits page-turn swipes. See `remarkable-touch-input.md`.
+- **Rendering (`wpe-rendering-protocol.md`):** (1) the headless view must be **mapped** or WebKit suspends
+  painting — `set_visible(FALSE)→(TRUE)` after sizing the toplevel; verify `wpe_view_get_mapped()`. (2) NEVER call
+  `wpe_view_buffer_released()` with an embedded WebKitWebView (double-free). (3) launcher sets
+  `WEBKIT_SKIA_CPU_PAINTING_THREADS=0` + `WEBKIT_SKIA_ENABLE_CPU_RENDERING=1`. (4) read pixels via
+  **`wpe_buffer_shm_get_data/_stride`** — `wpe_buffer_import_to_pixels()` returns a garbage size on scrolled frames.
+- **Scroll:** a bare `scrollBy` changes scrollY but emits no buffer; a tiny DOM mutation forces an immediate
+  repaint (`flip-latency≈23 ms`). Verified scrolled content renders correctly (saved frame PNG showed "Line 10–43").
+- **JIT:** `JSC_useJIT=0` (a JS page segfaulted with the JIT — revisit: rMPP may not actually be W^X).
+- **Device:** a process **segfault reboots the device** (watchdog/memfault, ~100 s) — logs go to `/home/root` to
+  survive; a SIGSEGV backtrace handler is compiled in (`-rdynamic`).
+Remaining for Phase 4: **e-ink refresh tuning** (screen updates ~every 6 s, not per page-turn — needs explicit
+full refresh via libqsgepaper `EPFramebuffer`), reading-shell chrome, HTTPS bundling, then code-review + simplify.

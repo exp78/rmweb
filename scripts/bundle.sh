@@ -10,9 +10,10 @@ cd "$(dirname "$0")/.."
 HOST="${REMARKABLE_HOST:-10.11.99.1}"; DUSER="${DEVICE_USER:-root}"
 S=build/stage/usr; M=build/stage-mesa/usr; B=build/bundle
 
-rm -rf "$B"; mkdir -p "$B/lib/dri" "$B/libexec" "$B/share/glvnd/egl_vendor.d" "$B/bin"
+rm -rf "$B"; mkdir -p "$B/lib/dri" "$B/lib/gio/modules" "$B/libexec" "$B/share/glvnd/egl_vendor.d" "$B/bin"
 cp -a "$S"/lib/*.so*                "$B/lib/"
 cp -a "$M"/lib/*.so*                "$B/lib/"
+cp -a "$S"/lib/gio/modules/*.so     "$B/lib/gio/modules/"            2>/dev/null || true   # glib-networking (TLS)
 cp -a "$M"/lib/dri/*.so             "$B/lib/dri/"                    2>/dev/null || true
 cp -a "$M"/share/glvnd/egl_vendor.d/. "$B/share/glvnd/egl_vendor.d/" 2>/dev/null || true
 cp -a "$S"/libexec/wpe-webkit-2.0   "$B/libexec/"

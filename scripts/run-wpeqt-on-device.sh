@@ -30,19 +30,31 @@ export GALLIUM_DRIVER=softpipe LIBGL_ALWAYS_SOFTWARE=1 EGL_PLATFORM=surfaceless
 export LIBGL_DRIVERS_PATH="$R/lib/dri" __EGL_VENDOR_LIBRARY_DIRS="$R/share/glvnd/egl_vendor.d"
 export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
 export WEBKIT_INJECTED_BUNDLE_PATH="$R/lib/wpe-webkit-2.0/injected-bundle"
+# CPU-only rendering knobs (verified against WPE 2.48.5 source — see docs/research/wpe-rendering-protocol.md):
+#   ENABLE_CPU_RENDERING=1  -> explicit software Skia (no Skia-GL context).
+#   CPU_PAINTING_THREADS=0  -> paint synchronously on the main thread; bypasses the threaded-Skia WorkerPool
+#                              whose multi-region replay segfaulted when rendering scrolled (scrollY>0) frames.
+#   DISABLE_ASYNC_SCROLLING -> keep scrolling on the main thread (calmer repaints, fine for paged e-ink).
+export WEBKIT_SKIA_ENABLE_CPU_RENDERING=1
+export WEBKIT_SKIA_CPU_PAINTING_THREADS=0
+export WEBKIT_DISABLE_ASYNC_SCROLLING=1
+export GIO_EXTRA_MODULES="$R/lib/gio/modules"   # glib-networking OpenSSL TLS backend -> https:// works
 export FONTCONFIG_PATH=/etc/fonts HOME=/home/root
+# The device forbids writable+executable (W^X) / MAP_JIT memory, so JavaScriptCore's JIT segfaults
+# the WebProcess the moment a page runs JS. Run JSC in its interpreter (LLInt) — stable, fine for e-ink.
+export JSC_useJIT=0
 
 if [ "$MODE" = show ]; then
   echo "[device] stopping xochitl"; systemctl stop xochitl && STOPPED=1
   export QT_QPA_PLATFORM=epaper QT_QUICK_BACKEND=epaper
   echo "[device] showing on e-ink for ${SHOW_SECS}s ..."
   # BusyBox here has no `timeout`; run in the background and kill after SHOW_SECS.
-  "$R/bin/rmweb-wpeqt" "$URL" >/tmp/wpeqt.log 2>&1 &
+  "$R/bin/rmweb-wpeqt" "$URL" >"$R/wpeqt.log" 2>&1 &
   APP=$!
   sleep "$SHOW_SECS"
   kill "$APP" 2>/dev/null || true
   wait "$APP" 2>/dev/null || true
-  tail -n 30 /tmp/wpeqt.log
+  tail -n 30 "$R/wpeqt.log"
 else
   export QT_QPA_PLATFORM=offscreen
   rm -f "$R/qt-out.png"

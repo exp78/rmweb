@@ -33,6 +33,7 @@ export LIBGL_DRIVERS_PATH="$R/lib/dri"
 export __EGL_VENDOR_LIBRARY_DIRS="$R/share/glvnd/egl_vendor.d"
 export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
 export WEBKIT_INJECTED_BUNDLE_PATH="$R/lib/wpe-webkit-2.0/injected-bundle"
+export GIO_EXTRA_MODULES="$R/lib/gio/modules"   # glib-networking OpenSSL TLS backend -> https:// works
 export FONTCONFIG_PATH=/etc/fonts HOME=/home/root
 echo "[device] system ttf fonts: $(find /usr/share/fonts -name '*.ttf' 2>/dev/null | wc -l)"
 rm -f "$R/out.png"

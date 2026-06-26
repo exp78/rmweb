@@ -65,8 +65,12 @@ any firmware update (especially storage, glibc, kernel, and xochitl offsets).
 
 - `/dev/input/event0` — `30370000.snvs:snvs-powerkey` (power button)
 - `/dev/input/event1` — `Hall effect sensors` (folio cover)
-- `/dev/input/event2` — `Elan touch input` (**touchscreen**, symlink `touchscreen0`)
-- `/dev/input/event3` — `Elan marker input` (**pen / stylus**)
+- `/dev/input/event2` — `Elan marker input` (**pen / stylus**)
+- `/dev/input/event3` — `Elan touch input` (**finger touchscreen**)
+  - ⚠️ CORRECTED 2026-06-26 (was reversed above): on the Paper Pro **event2 = PEN, event3 = TOUCH**
+    (the opposite of the rM2-era convention). **Resolve by NAME via `EVIOCGNAME`, never by `eventN`.**
+    Finger touch = Elan Type-B multitouch, `ABS_MT_POSITION_X` 0..2064, `ABS_MT_POSITION_Y` 0..2832,
+    `INPUT_PROP_DIRECT`. See `docs/research/remarkable-touch-input.md` for the full input plan.
 
 ## On-device libraries
 
