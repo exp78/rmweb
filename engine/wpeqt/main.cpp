@@ -47,6 +47,8 @@
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <atomic>
+#include <functional>
+#include <string>
 #include <cstdio>
 #include <cstring>
 #include <csignal>
@@ -118,6 +120,9 @@ public:
 
 Q_SIGNALS:
     void frameReady(const QImage &img, int frame);
+    void urlChanged(const QString &url);   // current page URI (toolbar address field)
+    void canGoBack(bool ok);               // toolbar Back button enabled-state
+    void canGoForward(bool ok);            // toolbar Forward button enabled-state
 
 public Q_SLOTS:
     void start() {
@@ -146,12 +151,27 @@ public Q_SLOTS:
         qInfo("[t] view mapped=%d size=%dx%d @%.0fms", wpe_view_get_mapped(wpeView),
               wpe_view_get_width(wpeView), wpe_view_get_height(wpeView), msSince(m_startUs));
         g_signal_connect(m_view, "load-changed", G_CALLBACK(&WpeEngine::onLoadChanged), this);
+        g_signal_connect(m_view, "notify::uri", G_CALLBACK(&WpeEngine::onUri), this);
 
         if (m_url.isEmpty())
             webkit_web_view_load_html(m_view, kTestPage, nullptr);
         else
             webkit_web_view_load_uri(m_view, m_url.toUtf8().constData());
         qInfo("[t] load dispatched @%.0fms", msSince(m_startUs));
+
+        // Diagnostic (RMWEB_DEBUG_NAV): drive a back/forward sequence so navigation + the canGo/url signals
+        // can be verified before the toolbar/URL entry exist (Tasks 4/8). A(initial) -> B -> back -> forward.
+        if (qEnvironmentVariableIntValue("RMWEB_DEBUG_NAV") > 0) {
+            scheduleOnCtx(4000, [](gpointer d) -> gboolean {
+                auto *self = static_cast<WpeEngine*>(d); qInfo("[nav][dbg] load B example.org");
+                webkit_web_view_load_uri(self->m_view, "https://example.org"); return G_SOURCE_REMOVE; });
+            scheduleOnCtx(8000, [](gpointer d) -> gboolean {
+                auto *self = static_cast<WpeEngine*>(d); qInfo("[nav][dbg] goBack");
+                if (webkit_web_view_can_go_back(self->m_view)) webkit_web_view_go_back(self->m_view); return G_SOURCE_REMOVE; });
+            scheduleOnCtx(12000, [](gpointer d) -> gboolean {
+                auto *self = static_cast<WpeEngine*>(d); qInfo("[nav][dbg] goForward");
+                if (webkit_web_view_can_go_forward(self->m_view)) webkit_web_view_go_forward(self->m_view); return G_SOURCE_REMOVE; });
+        }
 
         g_main_loop_run(m_loop);  // pumps WPE on this thread until stop()
 
@@ -175,7 +195,30 @@ public Q_SLOTS:
                                    [](gpointer d) { delete static_cast<PageMsg*>(d); });
     }
 
+    // Navigation — WebKit's own history/loading API, marshalled onto the worker GMainContext.
+    // Safe to call from the GUI thread (g_main_context_invoke_full is MT-safe); QML calls these directly.
+    void loadUrl(const QString &u) { const std::string s = u.toStdString();
+        marshalToCtx([this, s] { if (m_view) webkit_web_view_load_uri(m_view, s.c_str()); }); }
+    void goBack()    { marshalToCtx([this] { if (m_view && webkit_web_view_can_go_back(m_view))    webkit_web_view_go_back(m_view); }); }
+    void goForward() { marshalToCtx([this] { if (m_view && webkit_web_view_can_go_forward(m_view)) webkit_web_view_go_forward(m_view); }); }
+    void reload()    { marshalToCtx([this] { if (m_view) webkit_web_view_reload(m_view); }); }
+
 private:
+    // Run fn on the worker thread's GMainContext (g_main_context_invoke_full is MT-safe).
+    void marshalToCtx(std::function<void()> fn) {
+        auto *f = new std::function<void()>(std::move(fn));
+        g_main_context_invoke_full(m_ctx, G_PRIORITY_DEFAULT,
+            [](gpointer d) -> gboolean { (*static_cast<std::function<void()>*>(d))(); return G_SOURCE_REMOVE; },
+            f, [](gpointer d) { delete static_cast<std::function<void()>*>(d); });
+    }
+    // Attach a one-shot timeout to the WORKER context. g_timeout_add* would attach to the GLOBAL default
+    // context (which our worker loop never runs) and never fire — we must g_source_attach to m_ctx. Diag only.
+    void scheduleOnCtx(guint ms, GSourceFunc fn) {
+        GSource *s = g_timeout_source_new(ms);
+        g_source_set_callback(s, fn, this, nullptr);
+        g_source_attach(s, m_ctx);
+        g_source_unref(s);
+    }
     struct PageMsg { WpeEngine *self; double dy; };
     static gboolean onPage(gpointer d) {
         auto *m = static_cast<PageMsg*>(d);
@@ -211,10 +254,25 @@ private:
         if (self) qInfo("[t] page JS done scrollY=%.0f @%.0fms", scrollY, msSince(self->m_startUs));
     }
 
-    static void onLoadChanged(WebKitWebView *, WebKitLoadEvent ev, gpointer data) {
-        if (ev != WEBKIT_LOAD_FINISHED) return;
+    static void onUri(GObject *obj, GParamSpec *, gpointer data) {
         auto *self = static_cast<WpeEngine*>(data);
-        qInfo("[t] load finished @%.0fms", msSince(self->m_startUs));
+        const char *u = webkit_web_view_get_uri(WEBKIT_WEB_VIEW(obj));
+        qInfo("[nav] uri=%s", u ? u : "");
+        Q_EMIT self->urlChanged(QString::fromUtf8(u ? u : ""));
+    }
+
+    static void onLoadChanged(WebKitWebView *view, WebKitLoadEvent ev, gpointer data) {
+        auto *self = static_cast<WpeEngine*>(data);
+        if (ev == WEBKIT_LOAD_FINISHED)
+            qInfo("[t] load finished @%.0fms", msSince(self->m_startUs));
+        // Refresh nav state on commit (snappy button enable/disable) and again on finish.
+        if (ev == WEBKIT_LOAD_COMMITTED || ev == WEBKIT_LOAD_FINISHED) {
+            const bool b = webkit_web_view_can_go_back(view);
+            const bool f = webkit_web_view_can_go_forward(view);
+            qInfo("[nav] back=%d fwd=%d", b, f);
+            Q_EMIT self->canGoBack(b);
+            Q_EMIT self->canGoForward(f);
+        }
     }
 
     static void onBuffer(WPEView *, WPEBuffer *buffer, gpointer data) {
@@ -571,7 +629,7 @@ int main(int argc, char **argv) {
                          [sendClick](int x, int y) { sendClick(x, y); }, Qt::QueuedConnection);
         // Diagnostic (RMWEB_DEBUG_TAP): fire one synthetic click into the debug box ~3 s in, so the
         // bridge (sendEvent -> QtQuick routing) can be validated without a live finger.
-        if (win && qEnvironmentVariableIsSet("RMWEB_DEBUG_TAP")) {
+        if (win && qEnvironmentVariableIntValue("RMWEB_DEBUG_TAP") > 0) {
             QTimer::singleShot(3000, win, [sendClick] { qInfo("[dbg] auto-tap @ 250,120"); sendClick(250, 120); });
         }
         touchThread.start();
