@@ -31,6 +31,17 @@ if [ -f build/stage-mesa-llvm/usr/lib/dri/swrast_dri.so ]; then
 else
   echo "[bundle] WARN: no llvmpipe build (build/stage-mesa-llvm) — shipping softpipe (slow). Run engine/mesa-llvmpipe.incontainer.sh"
 fi
+# Qt Virtual Keyboard (on-screen URL entry): module libs + QML module + input-context plugin. Its Qt deps
+# (Gui/Qml/Quick/Svg/Layouts/Window) are already on the device. Run with QT_IM_MODULE=qtvirtualkeyboard and
+# QML_IMPORT_PATH/QT_PLUGIN_PATH pointed at the bundle (they EXTEND, not replace, the device defaults).
+if [ -d build/stage-vkb/usr/lib/qml/QtQuick/VirtualKeyboard ]; then
+  cp -a build/stage-vkb/usr/lib/libQt6VirtualKeyboard*.so* "$B/lib/"
+  mkdir -p "$B/qml/QtQuick" "$B/plugins/platforminputcontexts"
+  cp -a build/stage-vkb/usr/lib/qml/QtQuick/VirtualKeyboard "$B/qml/QtQuick/"
+  cp -a build/stage-vkb/usr/lib/plugins/platforminputcontexts/libqtvirtualkeyboardplugin.so "$B/plugins/platforminputcontexts/"
+else
+  echo "[bundle] WARN: no build/stage-vkb — on-screen keyboard unavailable (run scripts/build-vkb.sh)"
+fi
 cp -a "$S"/libexec/wpe-webkit-2.0   "$B/libexec/"
 cp -a "$S"/lib/wpe-webkit-2.0       "$B/lib/"                        2>/dev/null || true   # injected-bundle
 cp -a "$S"/share/wpe-webkit-2.0     "$B/share/"                      2>/dev/null || true   # resources
