@@ -57,6 +57,7 @@
 #include <dlfcn.h>
 
 #include "gesture.h"   // pure tap/swipe classifier (unit-tested in tests/gesture_test.cpp)
+#include "url.h"       // pure URL normalizer (unit-tested in tests/url_test.cpp)
 using rmweb::Gesture;
 using rmweb::classifyGesture;
 
@@ -198,7 +199,7 @@ public Q_SLOTS:
 
     // Navigation — WebKit's own history/loading API, marshalled onto the worker GMainContext.
     // Safe to call from the GUI thread (g_main_context_invoke_full is MT-safe); QML calls these directly.
-    void loadUrl(const QString &u) { const std::string s = u.toStdString();
+    void loadUrl(const QString &u) { const std::string s = rmweb::normalizeUrl(u.toStdString());
         marshalToCtx([this, s] { if (m_view) webkit_web_view_load_uri(m_view, s.c_str()); }); }
     void goBack()    { marshalToCtx([this] { if (m_view && webkit_web_view_can_go_back(m_view))    webkit_web_view_go_back(m_view); }); }
     void goForward() { marshalToCtx([this] { if (m_view && webkit_web_view_can_go_forward(m_view)) webkit_web_view_go_forward(m_view); }); }
