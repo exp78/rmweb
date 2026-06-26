@@ -105,6 +105,13 @@ public:
         : m_url(std::move(url)), m_w(w), m_h(h),
           m_ctx(g_main_context_new()), m_loop(g_main_loop_new(m_ctx, FALSE)) {}
 
+    ~WpeEngine() {
+        // main() joins the worker thread before destroying us, so the loop has exited and m_view is already
+        // released (end of start()); just drop the loop/context refs created in the ctor.
+        if (m_loop) g_main_loop_unref(m_loop);
+        if (m_ctx)  g_main_context_unref(m_ctx);
+    }
+
 Q_SIGNALS:
     void frameReady(const QImage &img, int frame);
 
@@ -122,25 +129,8 @@ public Q_SLOTS:
         }
         qInfo("[t] display connected @%.0fms", msSince(m_startUs));
 
-        // The headless screen reports a very low refresh rate (~167 mHz => 1 frame / 6 s). WebKit's
-        // DisplayRefreshMonitor paces compositing to the screen rate, so a repaint (e.g. after a scroll)
-        // only emits a buffer on that ~6 s grid. Bump every screen to 60 Hz BEFORE creating the web view
-        // (and its refresh monitor) so visual changes render on demand (~tens of ms). The e-ink panel
-        // present is driven separately (EpaperRefresh) — this only lifts WebKit's internal paint pacing.
-        const guint nScreens = wpe_display_get_n_screens(display);
-        for (guint i = 0; i < nScreens; ++i) {
-            WPEScreen *screen = wpe_display_get_screen(display, i);
-            if (!screen) continue;
-            const int was = wpe_screen_get_refresh_rate(screen);
-            wpe_screen_set_refresh_rate(screen, 60000);   // millihertz -> 60 Hz
-            qInfo("[t] screen %u refresh_rate %d -> %d mHz", i, was, wpe_screen_get_refresh_rate(screen));
-        }
-        if (nScreens == 0) qWarning("[t] headless display reports 0 screens — refresh-rate bump skipped");
-
         m_view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "display", display, nullptr));
         WPEView *wpeView = webkit_web_view_get_wpe_view(m_view);
-        if (WPEScreen *vs = wpe_view_get_screen(wpeView))
-            qInfo("[t] view screen refresh_rate=%d mHz", wpe_screen_get_refresh_rate(vs));
         // Size the toplevel first (headless default is 0x0 -> empty paints), then force a real
         // visible FALSE->TRUE transition so the view MAPS (WebKit only keeps painting while mapped).
         if (WPEToplevel *top = wpe_view_get_toplevel(wpeView))
@@ -160,6 +150,11 @@ public Q_SLOTS:
         qInfo("[t] load dispatched @%.0fms", msSince(m_startUs));
 
         g_main_loop_run(m_loop);  // pumps WPE on this thread until stop()
+
+        // Loop exited (engine.stop()): release the web view here, on its own thread, BEFORE ~WpeEngine —
+        // this drops the buffer-rendered/load-changed handlers that capture `this`, so none can fire late.
+        if (m_view) { g_object_unref(m_view); m_view = nullptr; }
+        g_main_context_pop_thread_default(m_ctx);
     }
 
     void stop() {
@@ -324,8 +319,12 @@ public Q_SLOTS:
         else
             qInfo("[touch] grabbed 'Elan touch input' — reading finger touch directly");
 
+        // Protocol-B, first finger. ABS_MT_TRACKING_ID (contact start / -1 lift) arrives BEFORE the
+        // POSITION_X/Y of the same SYN frame, so latching the swipe-start at TRACKING_ID time would capture
+        // the PREVIOUS frame's stale x/y. Flag down/lift instead and resolve at SYN_REPORT, where x/y are
+        // coherent for the whole frame.
         int curSlot = 0, x = 0, y = 0, sx = 0, sy = 0;
-        bool down = false;
+        bool down = false, pendingDown = false, pendingLift = false;
         struct input_event ev[64];
         while (!m_stop.load()) {
             struct pollfd pfd { fd, POLLIN, 0 };
@@ -334,14 +333,19 @@ public Q_SLOTS:
             if (n < static_cast<ssize_t>(sizeof(struct input_event))) continue;
             for (size_t i = 0; i < n / sizeof(struct input_event); ++i) {
                 const struct input_event &p = ev[i];
+                if (p.type == EV_SYN && p.code == SYN_REPORT) {
+                    if (pendingDown) { down = true; sx = x; sy = y; pendingDown = false; }   // start = coherent pos
+                    if (pendingLift) { if (down) emitSwipe(x - sx, y - sy); down = false; pendingLift = false; }
+                    continue;
+                }
                 if (p.type != EV_ABS) continue;
                 if (p.code == ABS_MT_SLOT) { curSlot = p.value; continue; }
                 if (curSlot != 0) continue;                                  // first finger only
                 if (p.code == ABS_MT_POSITION_X)      x = p.value * kPanelW / kTouchRawW;
                 else if (p.code == ABS_MT_POSITION_Y) y = p.value * kPanelH / kTouchRawH;
                 else if (p.code == ABS_MT_TRACKING_ID) {
-                    if (p.value >= 0) { down = true; sx = x; sy = y; }       // new contact -> down
-                    else { if (down) emitSwipe(x - sx, y - sy); down = false; }   // -1 -> lifted
+                    if (p.value >= 0) pendingDown = true;                     // new contact -> latch pos at SYN
+                    else              pendingLift = true;                     // -1 -> lifted -> emit at SYN
                 }
             }
         }
@@ -538,11 +542,15 @@ int main(int argc, char **argv) {
 
     thread.start();
     const int rc = app.exec();
+    // Tear down in dependency order, with UNBOUNDED waits: a timed-out wait would let a thread that still
+    // references `engine` (a stack object) run on past its destruction -> use-after-free -> device reboot.
+    // Both threads exit promptly: TouchReader::run sees m_stop within one ~200 ms poll; the worker's
+    // g_main_loop_run returns as soon as engine.stop() posts g_main_loop_quit.
     touchReader.requestStop();
     touchThread.quit();
-    touchThread.wait(1000);
+    touchThread.wait();
     engine.stop();
     thread.quit();
-    thread.wait(3000);
+    thread.wait();
     return rc;
 }

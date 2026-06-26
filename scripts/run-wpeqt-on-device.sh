@@ -19,6 +19,10 @@ R=/home/root/rmweb
 # still restores xochitl + unmounts the overlay (the guard vars default to unset = no-op).
 cleanup(){ [ -n "${STOPPED:-}" ] && systemctl start xochitl; [ -n "${MOUNTED:-}" ] && umount /usr/libexec 2>/dev/null; }
 trap cleanup EXIT
+# A hard-killed prior run leaves a stale overlay (its EXIT trap never ran) whose upper holds the OLD
+# helpers — and the [ ! -e ] check below would then skip re-mounting and silently run stale binaries.
+# Drop any stale overlay first so we always mount fresh (harmless/ignored if nothing is mounted there).
+umount /usr/libexec 2>/dev/null || true
 if [ ! -e /usr/libexec/wpe-webkit-2.0 ]; then
   rm -rf "$R/ovl"; mkdir -p "$R/ovl/upper/wpe-webkit-2.0" "$R/ovl/work"
   cp -a "$R/libexec/wpe-webkit-2.0/." "$R/ovl/upper/wpe-webkit-2.0/"

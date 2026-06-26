@@ -22,8 +22,12 @@ cp -a "$M"/share/glvnd/egl_vendor.d/. "$B/share/glvnd/egl_vendor.d/" 2>/dev/null
 # libxml2/ICU are NOT bundled (device provides libxml2). Run with GALLIUM_DRIVER=llvmpipe.
 if [ -f build/stage-mesa-llvm/usr/lib/dri/swrast_dri.so ]; then
   cp -a build/stage-mesa-llvm/usr/lib/dri/swrast_dri.so "$B/lib/dri/swrast_dri.so"
-  cp -aL build/llvm-bundle/libLLVM-16.so.1 build/llvm-bundle/libz3.so.4 build/llvm-bundle/libtinfo.so.6 \
-         build/llvm-bundle/libedit.so.2 build/llvm-bundle/libbsd.so.0 build/llvm-bundle/libmd.so.0 "$B/lib/"
+  # Copy each lib individually so a missing one WARNs loudly instead of aborting the bundle under `set -e`
+  # (and so an incomplete set is obvious rather than a silent runtime dlopen failure on the device).
+  for lib in libLLVM-16.so.1 libz3.so.4 libtinfo.so.6 libedit.so.2 libbsd.so.0 libmd.so.0; do
+    if [ -f "build/llvm-bundle/$lib" ]; then cp -aL "build/llvm-bundle/$lib" "$B/lib/"
+    else echo "[bundle] WARN: build/llvm-bundle/$lib MISSING — llvmpipe will fail to dlopen on device"; fi
+  done
 else
   echo "[bundle] WARN: no llvmpipe build (build/stage-mesa-llvm) — shipping softpipe (slow). Run engine/mesa-llvmpipe.incontainer.sh"
 fi
