@@ -52,11 +52,14 @@
 #include <execinfo.h>
 #include <dlfcn.h>
 
+#include "gesture.h"   // pure tap/swipe classifier (unit-tested in tests/gesture_test.cpp)
+using rmweb::Gesture;
+using rmweb::classifyGesture;
+
 // Finger digitizer raw range (Elan, verified on device) -> 1620x2160 panel; swipe thresholds in panel px.
 static const int kPanelW = 1620, kPanelH = 2160, kTouchRawW = 2064, kTouchRawH = 2832;
-static const int kSwipeMinDy = 240;   // vertical travel to count as a page turn (~11% of height)
-static const int kSwipeMaxDx = 200;   // keep the gesture roughly vertical
 static const double kPageStepPx = 2000.0;   // ~one screen of scroll per page turn (with a little overlap)
+// (swipe/tap thresholds live in gesture.h GestureParams — single source of truth)
 
 // Milliseconds elapsed since a monotonic timestamp (for the "[t] ... @Xms" instrumentation).
 static inline double msSince(gint64 us) { return (g_get_monotonic_time() - us) / 1000.0; }
@@ -309,7 +312,8 @@ class TouchReader : public QObject {
 public:
     void requestStop() { m_stop.store(true); }
 Q_SIGNALS:
-    void swipe(int dir);
+    void swipe(int dir);     // page turn (+1 next / -1 prev)
+    void tap(int x, int y);  // tap at panel px -> touch->mouse bridge -> QtQuick Controls
 public Q_SLOTS:
     void run() {
         int fd = openByName("Elan touch input");
@@ -325,6 +329,7 @@ public Q_SLOTS:
         // coherent for the whole frame.
         int curSlot = 0, x = 0, y = 0, sx = 0, sy = 0;
         bool down = false, pendingDown = false, pendingLift = false;
+        gint64 downUs = 0;   // contact-start time, for tap dwell
         struct input_event ev[64];
         while (!m_stop.load()) {
             struct pollfd pfd { fd, POLLIN, 0 };
@@ -334,8 +339,8 @@ public Q_SLOTS:
             for (size_t i = 0; i < n / sizeof(struct input_event); ++i) {
                 const struct input_event &p = ev[i];
                 if (p.type == EV_SYN && p.code == SYN_REPORT) {
-                    if (pendingDown) { down = true; sx = x; sy = y; pendingDown = false; }   // start = coherent pos
-                    if (pendingLift) { if (down) emitSwipe(x - sx, y - sy); down = false; pendingLift = false; }
+                    if (pendingDown) { down = true; sx = x; sy = y; downUs = g_get_monotonic_time(); pendingDown = false; }
+                    if (pendingLift) { if (down) emitGesture(x - sx, y - sy, x, y, downUs); down = false; pendingLift = false; }
                     continue;
                 }
                 if (p.type != EV_ABS) continue;
@@ -369,17 +374,32 @@ private:
         closedir(dir);
         return found;
     }
-    void emitSwipe(int dx, int dy) {
-        if (qAbs(dx) >= kSwipeMaxDx) return;                 // too diagonal
-        if (qAbs(dy) < kSwipeMinDy) return;                  // too short
+    // Classify the finished contact (gesture.h) and dispatch: a tap becomes a synthetic mouse click
+    // (the touch->mouse bridge), a swipe turns the page. Each path is independently debounced.
+    void emitGesture(int dx, int dy, int x, int y, gint64 downUs) {
         const gint64 now = g_get_monotonic_time();
-        if (m_lastSwipeUs && now - m_lastSwipeUs < 800000) return;   // debounce: <=1 turn / 0.8s
-        m_lastSwipeUs = now;
-        if (dy < 0) { qInfo("[touch] swipe up -> next");   Q_EMIT swipe(+1); }
-        else        { qInfo("[touch] swipe down -> prev"); Q_EMIT swipe(-1); }
+        const int dwellMs = static_cast<int>((now - downUs) / 1000);
+        switch (classifyGesture(dx, dy, dwellMs)) {
+        case Gesture::Tap:
+            if (m_lastTapUs && now - m_lastTapUs < 250000) return;       // debounce double-taps
+            m_lastTapUs = now;
+            qInfo("[touch] tap @ %d,%d", x, y);
+            Q_EMIT tap(x, y);
+            return;
+        case Gesture::SwipeUp:
+        case Gesture::SwipeDown:
+            if (m_lastSwipeUs && now - m_lastSwipeUs < 800000) return;   // <=1 turn / 0.8 s
+            m_lastSwipeUs = now;
+            if (dy < 0) { qInfo("[touch] swipe up -> next");   Q_EMIT swipe(+1); }
+            else        { qInfo("[touch] swipe down -> prev"); Q_EMIT swipe(-1); }
+            return;
+        case Gesture::None:
+            return;
+        }
     }
     std::atomic<bool> m_stop { false };
     gint64 m_lastSwipeUs = 0;
+    gint64 m_lastTapUs = 0;
 };
 
 #include "main.moc"
