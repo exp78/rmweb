@@ -32,6 +32,7 @@
 #include <QQuickPaintedItem>
 #include <QQuickWindow>
 #include <QPainter>
+#include <qpa/qwindowsysteminterface.h>   // QWindowSystemInterface — inject taps into QtQuick's input path
 
 #include <wpe/webkit.h>
 #include <wpe/wpe-platform.h>
@@ -471,7 +472,13 @@ Window {
     height: Screen.height
     visible: true
     color: "white"
+    Component.onCompleted: console.log("[qml] ready")
     WpeView { objectName: "view"; anchors.fill: parent }
+    Rectangle {            // TEMP (Task 2 touch->mouse bridge proof) — removed in Task 4
+        x: 40; y: 40; width: 420; height: 160; color: "#dddddd"; border.width: 3
+        Text { anchors.centerIn: parent; text: "TAP ME"; font.pixelSize: 44 }
+        MouseArea { anchors.fill: parent; onClicked: console.log("[qml] debug button clicked") }
+    }
 }
 )QML";
 
@@ -520,6 +527,7 @@ int main(int argc, char **argv) {
         auto *view = root ? root->findChild<WpeView*>("view") : nullptr;
         if (!view) { qWarning() << "[qml] WpeView not found"; return 3; }
         root->setParent(qmlEngine);   // engine owns the QML tree -> well-defined teardown order
+        auto *win = qobject_cast<QQuickWindow*>(root);
         QObject::connect(&engine, &WpeEngine::frameReady, view,
                          [view](const QImage &img, int frame) {
             const gint64 t = g_get_monotonic_time();
@@ -531,12 +539,10 @@ int main(int argc, char **argv) {
         // Drive the e-ink panel ourselves so page turns show immediately (needs QSG_RENDER_LOOP=basic so
         // afterRendering fires on the GUI thread and the EPRenderLoop's slow auto-present is out of the way).
         static EpaperRefresh epaper;
-        if (qgetenv("QT_QPA_PLATFORM") == "epaper") {   // only drive the panel on the real e-ink QPA
-            if (auto *win = qobject_cast<QQuickWindow*>(root)) {
-                if (epaper.init())
-                    QObject::connect(win, &QQuickWindow::afterRendering, win,
-                                     [] { epaper.present(); }, Qt::DirectConnection);
-            }
+        if (win && qgetenv("QT_QPA_PLATFORM") == "epaper") {   // only drive the panel on the real e-ink QPA
+            if (epaper.init())
+                QObject::connect(win, &QQuickWindow::afterRendering, win,
+                                 [] { epaper.present(); }, Qt::DirectConnection);
         }
 
         // Direct evdev touch -> page turns (queued onto the GUI thread; pageBy then marshals to the worker).
@@ -545,6 +551,29 @@ int main(int argc, char **argv) {
         QObject::connect(&touchReader, &TouchReader::swipe, &app, [&engine](int dir) {
             engine.pageBy(dir > 0 ? kPageStepPx : -kPageStepPx);
         });
+        // Touch->mouse bridge: a tap becomes a synthetic left click delivered to the QQuickWindow on the
+        // GUI thread, so Qt Quick Controls (toolbar buttons, address field, keyboard) hit-test and handle
+        // it natively — no bespoke chrome hit-testing. tap(x,y) is in panel px == QML scene coords.
+        auto sendClick = [win](int x, int y) {
+            if (!win) return;
+            const QPointF pt(x, y);   // panel px == QML scene coords; window is full-screen at origin
+            QWindowSystemInterface::handleMouseEvent(win, pt, pt, Qt::LeftButton, Qt::LeftButton,
+                                                     QEvent::MouseButtonPress,  Qt::NoModifier);
+            QWindowSystemInterface::handleMouseEvent(win, pt, pt, Qt::NoButton,  Qt::LeftButton,
+                                                     QEvent::MouseButtonRelease, Qt::NoModifier);
+            // Flush now so the press+release is delivered exactly once, here — otherwise the QPA queue
+            // is flushed at an unpredictable later point (observed: 0 deliveries before exit, or a
+            // burst of duplicates). One tap -> one click.
+            QWindowSystemInterface::flushWindowSystemEvents();
+        };
+        // Queued onto win's (GUI) thread: TouchReader emits tap from its own thread.
+        QObject::connect(&touchReader, &TouchReader::tap, win ? win : qobject_cast<QObject*>(&app),
+                         [sendClick](int x, int y) { sendClick(x, y); }, Qt::QueuedConnection);
+        // Diagnostic (RMWEB_DEBUG_TAP): fire one synthetic click into the debug box ~3 s in, so the
+        // bridge (sendEvent -> QtQuick routing) can be validated without a live finger.
+        if (win && qEnvironmentVariableIsSet("RMWEB_DEBUG_TAP")) {
+            QTimer::singleShot(3000, win, [sendClick] { qInfo("[dbg] auto-tap @ 250,120"); sendClick(250, 120); });
+        }
         touchThread.start();
 
         // Diagnostic: auto-page every RMWEB_AUTOPAGE_MS ms (alternating direction) through the exact same
