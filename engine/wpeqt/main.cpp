@@ -28,6 +28,7 @@
 #include <QDebug>
 #include <QQmlEngine>
 #include <QQmlComponent>
+#include <QQmlContext>
 #include <QQuickItem>
 #include <QQuickPaintedItem>
 #include <QQuickWindow>
@@ -340,6 +341,29 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// ShellBridge — a GUI-thread proxy between QML and the worker-thread WpeEngine. QML cannot `Connections`-
+// connect to a QObject living in another thread (it aborts), so the toolbar talks to this bridge: button
+// taps forward to the engine's MT-safe nav slots, and engine signals are relayed here (queued worker->GUI)
+// so QML can bind to them. Exposed to QML as the "engine" context property.
+// ---------------------------------------------------------------------------
+class ShellBridge : public QObject {
+    Q_OBJECT
+public:
+    explicit ShellBridge(WpeEngine *e, QObject *parent = nullptr) : QObject(parent), m_engine(e) {}
+public Q_SLOTS:
+    void goBack()                  { m_engine->goBack(); }
+    void goForward()               { m_engine->goForward(); }
+    void reload()                  { m_engine->reload(); }
+    void loadUrl(const QString &u) { m_engine->loadUrl(u); }
+Q_SIGNALS:
+    void urlChanged(const QString &url);
+    void canGoBack(bool ok);
+    void canGoForward(bool ok);
+private:
+    WpeEngine *m_engine;
+};
+
+// ---------------------------------------------------------------------------
 // WpeView — a full-screen QtQuick item that just paints the latest WPE frame (input comes from TouchReader,
 // not Qt: the epaper QPA does not deliver finger touch to QtQuick items here).
 // ---------------------------------------------------------------------------
@@ -521,21 +545,45 @@ private:
     gint64 m_lastPresentUs = 0;
 };
 
+// Reading-shell chrome: a top toolbar (Qt Quick Controls, Basic style = flat/high-contrast for e-ink)
+// over the full-screen web view. Buttons call the engine's nav slots directly (engine is a context
+// property); Connections reflect engine state (address text + Back/Forward enabled). Button glyphs are
+// literal UTF-8 in the source (U+25C0/25B6 arrows, U+27F3 reload) — GCC reads UTF-8 and passes the bytes
+// to QML. Tap (x,y)==scene coords, so the touch->mouse bridge routes taps to whichever item is under it.
 static const char *kQml = R"QML(
 import QtQuick
 import QtQuick.Window
+import QtQuick.Controls.Basic
+import QtQuick.Layouts
 import rmweb 1.0
-Window {
-    width: Screen.width
-    height: Screen.height
-    visible: true
-    color: "white"
-    Component.onCompleted: console.log("[qml] ready")
-    WpeView { objectName: "view"; anchors.fill: parent }
-    Rectangle {            // TEMP (Task 2 touch->mouse bridge proof) — removed in Task 4
-        x: 40; y: 40; width: 420; height: 160; color: "#dddddd"; border.width: 3
-        Text { anchors.centerIn: parent; text: "TAP ME"; font.pixelSize: 44 }
-        MouseArea { anchors.fill: parent; onClicked: console.log("[qml] debug button clicked") }
+ApplicationWindow {
+    id: win
+    width: Screen.width; height: Screen.height
+    visible: true; color: "white"
+    ColumnLayout {
+        anchors.fill: parent; spacing: 0
+        ToolBar {
+            Layout.fillWidth: true; implicitHeight: 104
+            background: Rectangle { color: "white"; border.color: "black"; border.width: 2 }
+            RowLayout {
+                anchors.fill: parent; anchors.margins: 6; spacing: 8
+                Button { id: back; text: "◀"; font.pixelSize: 40; implicitWidth: 104; implicitHeight: 88; enabled: false; onClicked: engine.goBack() }
+                Button { id: fwd;  text: "▶"; font.pixelSize: 40; implicitWidth: 104; implicitHeight: 88; enabled: false; onClicked: engine.goForward() }
+                Button { id: rel;  text: "⟳"; font.pixelSize: 40; implicitWidth: 104; implicitHeight: 88;                 onClicked: engine.reload() }
+                TextField {
+                    id: address; Layout.fillWidth: true; implicitHeight: 88; font.pixelSize: 34
+                    readOnly: true; verticalAlignment: TextInput.AlignVCenter   // editable in Task 8 (+ keyboard)
+                    onAccepted: engine.loadUrl(text)
+                }
+            }
+        }
+        WpeView { objectName: "view"; Layout.fillWidth: true; Layout.fillHeight: true }
+    }
+    Connections {
+        target: engine
+        function onUrlChanged(url)  { if (!address.activeFocus) address.text = url }
+        function onCanGoBack(ok)    { back.enabled = ok }
+        function onCanGoForward(ok) { fwd.enabled = ok }
     }
 }
 )QML";
@@ -554,6 +602,7 @@ int main(int argc, char **argv) {
     WpeEngine engine(url, 1620, 2160);
     engine.moveToThread(&thread);
     QObject::connect(&thread, &QThread::started, &engine, &WpeEngine::start);
+    ShellBridge bridge(&engine);   // GUI-thread proxy for QML (QML can't connect across threads to engine)
 
     QThread touchThread;
     TouchReader touchReader;
@@ -575,6 +624,10 @@ int main(int argc, char **argv) {
         // --- display mode: paint frames into a full-screen QtQuick item (epaper QPA) ---
         qmlRegisterType<WpeView>("rmweb", 1, 0, "WpeView");
         auto *qmlEngine = new QQmlEngine(&app);
+        qmlEngine->rootContext()->setContextProperty("engine", &bridge);   // QML talks to the GUI-thread bridge
+        QObject::connect(&engine, &WpeEngine::urlChanged,   &bridge, &ShellBridge::urlChanged);
+        QObject::connect(&engine, &WpeEngine::canGoBack,    &bridge, &ShellBridge::canGoBack);
+        QObject::connect(&engine, &WpeEngine::canGoForward, &bridge, &ShellBridge::canGoForward);
         auto *comp = new QQmlComponent(qmlEngine, qmlEngine);
         comp->setData(kQml, QUrl(QStringLiteral("inline.qml")));
         if (comp->status() != QQmlComponent::Ready) {
@@ -626,12 +679,7 @@ int main(int argc, char **argv) {
         };
         // Queued onto win's (GUI) thread: TouchReader emits tap from its own thread.
         QObject::connect(&touchReader, &TouchReader::tap, win ? win : qobject_cast<QObject*>(&app),
-                         [sendClick](int x, int y) { sendClick(x, y); }, Qt::QueuedConnection);
-        // Diagnostic (RMWEB_DEBUG_TAP): fire one synthetic click into the debug box ~3 s in, so the
-        // bridge (sendEvent -> QtQuick routing) can be validated without a live finger.
-        if (win && qEnvironmentVariableIntValue("RMWEB_DEBUG_TAP") > 0) {
-            QTimer::singleShot(3000, win, [sendClick] { qInfo("[dbg] auto-tap @ 250,120"); sendClick(250, 120); });
-        }
+                         sendClick, Qt::QueuedConnection);
         touchThread.start();
 
         // Diagnostic: auto-page every RMWEB_AUTOPAGE_MS ms (alternating direction) through the exact same
