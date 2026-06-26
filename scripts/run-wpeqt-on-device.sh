@@ -53,6 +53,11 @@ if [ "$MODE" = show ]; then
   # epaper scenegraph, but the BASIC render loop so QQuickWindow::afterRendering fires on the GUI thread
   # and the epaper EPRenderLoop's slow auto-present is bypassed — we present each frame via EpaperRefresh.
   export QT_QPA_PLATFORM=epaper QT_QUICK_BACKEND=epaper QSG_RENDER_LOOP=basic
+  # Qt Virtual Keyboard for on-screen URL entry: IM module + bundle import/plugin paths. These EXTEND the
+  # device defaults, so QtQuick.Controls and the epaper platform plugin still resolve from /usr/lib.
+  export QT_IM_MODULE=qtvirtualkeyboard
+  export QML_IMPORT_PATH="$R/qml" QML2_IMPORT_PATH="$R/qml"
+  export QT_PLUGIN_PATH="$R/plugins:${QT_PLUGIN_PATH:-/usr/lib/plugins}"
   export RMWEB_AUTOPAGE_MS   # diagnostic: if set, the app auto-turns pages at this interval (ms)
   export RMWEB_FULL_EVERY    # e-ink: full colour anti-ghost flash every N page-turns (<=0 = grayscale only, least flicker)
   export RMWEB_DEBUG_TAP     # diagnostic: fire one synthetic click into the debug box (touch->mouse bridge proof)

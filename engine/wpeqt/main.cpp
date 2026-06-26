@@ -556,6 +556,7 @@ import QtQuick
 import QtQuick.Window
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
+import QtQuick.VirtualKeyboard
 import rmweb 1.0
 ApplicationWindow {
     id: win
@@ -573,9 +574,12 @@ ApplicationWindow {
                 Button { id: rel;  text: "⟳"; font.pixelSize: 40; implicitWidth: 104; implicitHeight: 88;                 onClicked: engine.reload() }
                 TextField {
                     id: address; Layout.fillWidth: true; implicitHeight: 88; font.pixelSize: 34
-                    readOnly: true; verticalAlignment: TextInput.AlignVCenter   // editable in Task 8 (+ keyboard)
-                    onAccepted: engine.loadUrl(text)
+                    verticalAlignment: TextInput.AlignVCenter
+                    inputMethodHints: Qt.ImhUrlCharactersOnly | Qt.ImhNoAutoUppercase | Qt.ImhNoPredictiveText
+                    onAccepted: { engine.loadUrl(text); focus = false }   // load + dismiss keyboard
                 }
+                Button { id: clr; text: "✕"; font.pixelSize: 32; implicitWidth: 88; implicitHeight: 88
+                    onClicked: { address.text = ""; address.forceActiveFocus() } }   // clear, keep focus + keyboard
             }
         }
         WpeView { objectName: "view"; Layout.fillWidth: true; Layout.fillHeight: true }
@@ -585,6 +589,11 @@ ApplicationWindow {
         function onUrlChanged(url)  { if (!address.activeFocus) address.text = url }
         function onCanGoBack(ok)    { back.enabled = ok }
         function onCanGoForward(ok) { fwd.enabled = ok }
+    }
+    InputPanel {
+        id: inputPanel; z: 99
+        anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+        visible: active   // Qt Virtual Keyboard — shown only while a field has active focus
     }
 }
 )QML";
