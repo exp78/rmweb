@@ -84,5 +84,13 @@ facts, all verified on-device and written up in `docs/research/` (4 sourced docs
 - **JIT:** `JSC_useJIT=0` (a JS page segfaulted with the JIT — revisit: rMPP may not actually be W^X).
 - **Device:** a process **segfault reboots the device** (watchdog/memfault, ~100 s) — logs go to `/home/root` to
   survive; a SIGSEGV backtrace handler is compiled in (`-rdynamic`).
-Remaining for Phase 4: **e-ink refresh tuning** (screen updates ~every 6 s, not per page-turn — needs explicit
-full refresh via libqsgepaper `EPFramebuffer`), reading-shell chrome, HTTPS bundling, then code-review + simplify.
+**Phase 4 "~6 s per page-turn" SOLVED (2026-06-26):** the culprit was **Mesa softpipe** — the single-threaded,
+no-SIMD reference rasterizer — spending ~6 s compositing the 1620×2160 TextureMapper layer on the WebProcess
+compositor thread (NOT the panel / libqsgepaper, NOT WebKit's DisplayLink; ruled out by /proc CPU sampling +
+a safe LD_PRELOAD SIGUSR2 backtrace into `swrast_dri.so`). Rebuilt Mesa 24.0.9 with **llvmpipe** (multi-core +
+SIMD JIT) → frame render ~93 ms, page turns land on e-ink in **~120–250 ms** (verified, swipe + auto-page).
+Bundle now ships `libLLVM-16.so.1` + deps (`engine/mesa-llvmpipe.incontainer.sh`); run with
+`GALLIUM_DRIVER=llvmpipe`. Present = one grayscale frame per turn (sig-dedup drops idle/duplicate renders;
+`RMWEB_FULL_EVERY=0` = no colour flash = least flicker). See the `six-second-render-softpipe` memory.
+Remaining for Phase 4: reading-shell chrome, HTTPS bundling, optional refresh flicker/ghost-clear tuning,
+then code-review + simplify.

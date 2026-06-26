@@ -11,7 +11,7 @@ MODE="${1:-save}"; URL="${2:-}"
 
 scp -q build/rmweb-wpeqt "$DUSER@$HOST:/home/root/rmweb/bin/rmweb-wpeqt"
 
-ssh "$DUSER@$HOST" "MODE='$MODE' URL='$URL' SHOW_SECS='${SHOW_SECS:-40}' bash -s" <<'EOS'
+ssh "$DUSER@$HOST" "MODE='$MODE' URL='$URL' SHOW_SECS='${SHOW_SECS:-40}' RMWEB_AUTOPAGE_MS='${RMWEB_AUTOPAGE_MS:-}' WEBKIT_DEBUG='${WEBKIT_DEBUG:-}' RMWEB_FULL_EVERY='${RMWEB_FULL_EVERY:-}' bash -s" <<'EOS'
 set -e
 R=/home/root/rmweb
 # WPE spawns helpers from the baked /usr/libexec/wpe-webkit-2.0 and / is read-only -> overlay it.
@@ -26,7 +26,7 @@ if [ ! -e /usr/libexec/wpe-webkit-2.0 ]; then
 fi
 
 export LD_LIBRARY_PATH="$R/lib"
-export GALLIUM_DRIVER=softpipe LIBGL_ALWAYS_SOFTWARE=1 EGL_PLATFORM=surfaceless
+export GALLIUM_DRIVER=llvmpipe LIBGL_ALWAYS_SOFTWARE=1 EGL_PLATFORM=surfaceless   # llvmpipe = multi-core+SIMD SW GL (~64x faster than softpipe; see six-second-render memory)
 export LIBGL_DRIVERS_PATH="$R/lib/dri" __EGL_VENDOR_LIBRARY_DIRS="$R/share/glvnd/egl_vendor.d"
 export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
 export WEBKIT_INJECTED_BUNDLE_PATH="$R/lib/wpe-webkit-2.0/injected-bundle"
@@ -46,7 +46,15 @@ export JSC_useJIT=0
 
 if [ "$MODE" = show ]; then
   echo "[device] stopping xochitl"; systemctl stop xochitl && STOPPED=1
-  export QT_QPA_PLATFORM=epaper QT_QUICK_BACKEND=epaper
+  # epaper scenegraph, but the BASIC render loop so QQuickWindow::afterRendering fires on the GUI thread
+  # and the epaper EPRenderLoop's slow auto-present is bypassed — we present each frame via EpaperRefresh.
+  export QT_QPA_PLATFORM=epaper QT_QUICK_BACKEND=epaper QSG_RENDER_LOOP=basic
+  export RMWEB_AUTOPAGE_MS   # diagnostic: if set, the app auto-turns pages at this interval (ms)
+  export RMWEB_FULL_EVERY    # e-ink: full colour anti-ghost flash every N page-turns (<=0 = grayscale only, least flicker)
+  # Force WebKit's 60 fps software vblank timer instead of the DRM hardware vblank: the headless view may
+  # still bind the e-ink panel's DRM CRTC, whose vblank ticks at the panel's slow rate (~0.16 Hz => the
+  # observed ~6 s render cadence). The timer monitor decouples WebKit's frame clock from the panel.
+  export WEBKIT_FORCE_VBLANK_TIMER="${WEBKIT_FORCE_VBLANK_TIMER:-1}"
   echo "[device] showing on e-ink for ${SHOW_SECS}s ..."
   # BusyBox here has no `timeout`; run in the background and kill after SHOW_SECS.
   "$R/bin/rmweb-wpeqt" "$URL" >"$R/wpeqt.log" 2>&1 &
@@ -55,6 +63,18 @@ if [ "$MODE" = show ]; then
   kill "$APP" 2>/dev/null || true
   wait "$APP" 2>/dev/null || true
   tail -n 30 "$R/wpeqt.log"
+elif [ "$MODE" = bench ]; then
+  # Isolation probe: run the engine display path OFFSCREEN (no epaper, no panel, xochitl untouched) so the
+  # buffer-rendered cadence can be measured with the e-ink present path entirely out of the picture.
+  export QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software
+  export RMWEB_AUTOPAGE_MS WEBKIT_DEBUG WEBKIT_FORCE_VBLANK_TIMER="${WEBKIT_FORCE_VBLANK_TIMER:-1}"
+  echo "[device] bench (offscreen, no epaper) for ${SHOW_SECS}s ..."
+  "$R/bin/rmweb-wpeqt" "$URL" >"$R/wpeqt.log" 2>&1 &
+  APP=$!
+  sleep "$SHOW_SECS"
+  kill "$APP" 2>/dev/null || true
+  wait "$APP" 2>/dev/null || true
+  tail -n 40 "$R/wpeqt.log"
 else
   export QT_QPA_PLATFORM=offscreen
   rm -f "$R/qt-out.png"

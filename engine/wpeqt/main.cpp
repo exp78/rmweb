@@ -30,6 +30,7 @@
 #include <QQmlComponent>
 #include <QQuickItem>
 #include <QQuickPaintedItem>
+#include <QQuickWindow>
 #include <QPainter>
 
 #include <wpe/webkit.h>
@@ -49,6 +50,7 @@
 #include <cstring>
 #include <csignal>
 #include <execinfo.h>
+#include <dlfcn.h>
 
 // Finger digitizer raw range (Elan, verified on device) -> 1620x2160 panel; swipe thresholds in panel px.
 static const int kPanelW = 1620, kPanelH = 2160, kTouchRawW = 2064, kTouchRawH = 2832;
@@ -120,8 +122,25 @@ public Q_SLOTS:
         }
         qInfo("[t] display connected @%.0fms", msSince(m_startUs));
 
+        // The headless screen reports a very low refresh rate (~167 mHz => 1 frame / 6 s). WebKit's
+        // DisplayRefreshMonitor paces compositing to the screen rate, so a repaint (e.g. after a scroll)
+        // only emits a buffer on that ~6 s grid. Bump every screen to 60 Hz BEFORE creating the web view
+        // (and its refresh monitor) so visual changes render on demand (~tens of ms). The e-ink panel
+        // present is driven separately (EpaperRefresh) — this only lifts WebKit's internal paint pacing.
+        const guint nScreens = wpe_display_get_n_screens(display);
+        for (guint i = 0; i < nScreens; ++i) {
+            WPEScreen *screen = wpe_display_get_screen(display, i);
+            if (!screen) continue;
+            const int was = wpe_screen_get_refresh_rate(screen);
+            wpe_screen_set_refresh_rate(screen, 60000);   // millihertz -> 60 Hz
+            qInfo("[t] screen %u refresh_rate %d -> %d mHz", i, was, wpe_screen_get_refresh_rate(screen));
+        }
+        if (nScreens == 0) qWarning("[t] headless display reports 0 screens — refresh-rate bump skipped");
+
         m_view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "display", display, nullptr));
         WPEView *wpeView = webkit_web_view_get_wpe_view(m_view);
+        if (WPEScreen *vs = wpe_view_get_screen(wpeView))
+            qInfo("[t] view screen refresh_rate=%d mHz", wpe_screen_get_refresh_rate(vs));
         // Size the toplevel first (headless default is 0x0 -> empty paints), then force a real
         // visible FALSE->TRUE transition so the view MAPS (WebKit only keeps painting while mapped).
         if (WPEToplevel *top = wpe_view_get_toplevel(wpeView))
@@ -164,13 +183,16 @@ private:
         WpeEngine *self = m->self;
         if (self->m_view) {
             self->m_pageUs = g_get_monotonic_time();
-            // Scroll, then force an immediate repaint: a bare scroll changes scrollY but does NOT emit a
-            // buffer (the screen would only update on the next ~6 s periodic render). A tiny DOM mutation
-            // forces WebKit to repaint the viewport now. We reuse one hidden marker node (no accumulation).
+            // Scroll one page and force exactly ONE repaint: a bare scrollBy moves scrollY but commits no
+            // buffer, so we bump a hidden marker node to dirty the page → one composite. With llvmpipe that
+            // lands in ~90 ms, so one frame per turn is enough. (The earlier requestAnimationFrame burst was a
+            // workaround for softpipe's ~6 s composite; it also flooded the e-ink panel with ~20 presents/turn.)
             gchar *js = g_strdup_printf(
                 "window.scrollBy(0,%d);"
-                "var m=document.getElementById('__r')||document.body.appendChild(document.createElement('span'));"
-                "m.id='__r';m.textContent=((+m.textContent||0)+1);window.scrollY",
+                "var m=document.getElementById('__r');"
+                "if(!m){m=document.createElement('span');m.id='__r';"
+                "m.style.cssText='position:fixed;left:-9999px;top:0';document.body.appendChild(m);}"
+                "m.textContent=((+m.textContent||0)+1);window.scrollY",
                 static_cast<int>(m->dy));
             webkit_web_view_evaluate_javascript(self->m_view, js, -1, nullptr, nullptr, nullptr,
                                                 &WpeEngine::onJsDone, self);
@@ -222,16 +244,31 @@ private:
                      stride, static_cast<size_t>(size));
             return;
         }
-        // WPE SHM memory order is B,G,R,A (ARGB8888 little-endian) == QImage::Format_ARGB32.
-        QImage img(pix, w, h, stride, QImage::Format_ARGB32);
-        Q_EMIT self->frameReady(img.copy(), self->m_frames);
+        // Cheap sparse content fingerprint (FNV-1a over a pixel grid) — proves whether consecutive frames
+        // actually differ in pixels (diagnosing "the panel refreshed but the image didn't change").
+        unsigned sig = 2166136261u;
+        for (int yy = 0; yy < h; yy += 40) {
+            const uchar *row = pix + static_cast<gsize>(yy) * stride;
+            for (int xx = 0; xx < w; xx += 40) sig = (sig ^ row[xx * 4]) * 16777619u;
+        }
+        // Skip identical frames: WebKit re-submits the same composited buffer on its idle heartbeat, and
+        // the rAF page-turn pulse yields several identical ticks. Only repaint the e-ink when pixels change
+        // — this kills the wasteful periodic re-present and any flicker from the nudge.
+        const bool changed = (sig != self->m_lastSig);
+        self->m_lastSig = sig;
 
         const double dt   = self->m_lastBufUs ? (tIn - self->m_lastBufUs) / 1000.0 : 0.0;
         const double flip = self->m_pageUs    ? (tIn - self->m_pageUs)    / 1000.0 : -1.0;
-        qInfo("[t] frame %d @%.0fms  build=%.1fms  dt=%.1fms  flip-latency=%.1fms  %dx%d",
-              self->m_frames, msSince(self->m_startUs), msSince(tIn), dt, flip, w, h);
+        qInfo("[t] frame %d @%.0fms  build=%.1fms  dt=%.1fms  flip-latency=%.1fms  sig=%08x %s  %dx%d",
+              self->m_frames, msSince(self->m_startUs), msSince(tIn), dt, flip, sig,
+              changed ? "NEW" : "dup", w, h);
         self->m_lastBufUs = tIn;
-        self->m_pageUs = 0;
+        if (!changed) return;   // nothing visually new — do not repaint the panel
+        if (flip >= 0) self->m_pageUs = 0;   // count this changed frame as the page-turn's result
+
+        // WPE SHM memory order is B,G,R,A (ARGB8888 little-endian) == QImage::Format_ARGB32.
+        QImage img(pix, w, h, stride, QImage::Format_ARGB32);
+        Q_EMIT self->frameReady(img.copy(), self->m_frames);
     }
 
     QString m_url;
@@ -242,6 +279,7 @@ private:
     gint64 m_startUs = 0;     // monotonic origin (set in start) — all "@Xms" timings are relative to it
     gint64 m_lastBufUs = 0;   // previous buffer-rendered time — gives the inter-frame interval
     gint64 m_pageUs = 0;      // last page-flip dispatch time — gives swipe -> rendered-frame latency
+    unsigned m_lastSig = 0;   // fingerprint of the last emitted frame — to drop identical (dup) frames
 };
 
 // ---------------------------------------------------------------------------
@@ -342,6 +380,64 @@ private:
 
 #include "main.moc"
 
+// ---------------------------------------------------------------------------
+// EpaperRefresh — drives the e-ink panel ourselves. The libqsgepaper scenegraph renders into the DRM dumb
+// buffer fast (~ms) but defers the *panel present* to a coarse internal cadence (~6 s), and a fast waveform
+// never develops grayscale/color on Gallery 3 until a full pass. With QSG_RENDER_LOOP=basic (no EPRenderLoop
+// auto-present), we present each rendered frame ourselves from QQuickWindow::afterRendering:
+//   * fast grayscale  (Mono, QualityFast, NoRefresh)      — every frame, so a page turn shows immediately;
+//   * full colour flash (Color, QualityFull, CompleteRefresh) — every kFullEvery frames, develops colour +
+//     clears ghosting ("grayscale now, colour catches up"). Symbols verified in libqsgepaper.so via readelf.
+// ---------------------------------------------------------------------------
+class EpaperRefresh {
+public:
+    bool init() {
+        void *h = dlopen("/usr/lib/plugins/scenegraph/libqsgepaper.so", RTLD_NOW | RTLD_GLOBAL);
+        if (!h) { qWarning("[refresh] dlopen failed: %s", dlerror()); return false; }
+        m_instance = reinterpret_cast<InstanceFn>(dlsym(h, "_ZN13EPFramebuffer8instanceEv"));
+        m_swap = reinterpret_cast<SwapFn>(
+            dlsym(h, "_ZN13EPFramebuffer11swapBuffersE5QRect13EPContentType12EPScreenMode6QFlagsINS_10UpdateFlagEE"));
+        if (!m_instance || !m_swap) {
+            qWarning("[refresh] dlsym failed (instance=%p swap=%p)", (void*)m_instance, (void*)m_swap);
+            return false;
+        }
+        m_fb = m_instance();
+        // Full colour anti-ghost flash every N page-turns. Gallery 3 needs a full-screen flash to change
+        // colour (= visible flicker), so for text reading we make N large (mostly grayscale, no flash).
+        // Tunable live via RMWEB_FULL_EVERY (0/unset -> default). 0 disables the colour flash entirely.
+        if (qEnvironmentVariableIsSet("RMWEB_FULL_EVERY"))
+            m_fullEvery = qEnvironmentVariableIntValue("RMWEB_FULL_EVERY");
+        qInfo("[refresh] EPFramebuffer ready (instance=%p) fullEvery=%d", m_fb, m_fullEvery);
+        return m_fb != nullptr;
+    }
+    bool ok() const { return m_fb != nullptr; }
+    // Present what the scenegraph just rendered. Enum values: EPContentType{Mono=0,Color=1},
+    // EPScreenMode{QualityFast=1,QualityFull=4}, UpdateFlag{NoRefresh=0,CompleteRefresh=1}.
+    void present() {
+        if (!m_fb) return;
+        // e-ink physically can't refresh faster than ~6 Hz; with llvmpipe the engine can emit frames far
+        // faster, so rate-limit panel presents to protect the controller and avoid ghosting/flicker.
+        const gint64 now = g_get_monotonic_time();
+        if (m_lastPresentUs && (now - m_lastPresentUs) < 150000) return;   // >= ~150 ms between presents
+        m_lastPresentUs = now;
+        const QRect full(0, 0, kPanelW, kPanelH);
+        ++m_frames;
+        if (m_fullEvery > 0 && (m_frames % m_fullEvery) == 0) m_swap(m_fb, full, 1, 4, 1);  // colour + anti-ghost flash
+        else                                                  m_swap(m_fb, full, 0, 1, 0);  // fast grayscale, no flash
+    }
+private:
+    typedef void *(*InstanceFn)();
+    // ABI of EPFramebuffer::swapBuffers(QRect, EPContentType, EPScreenMode, QFlags<UpdateFlag>): the implicit
+    // `this` is the 1st arg; the two enums and the (int-sized) QFlags pass like ints on aarch64.
+    typedef void (*SwapFn)(void *self, QRect, int, int, int);
+    int m_fullEvery = 6;   // full colour flash every N presents (env RMWEB_FULL_EVERY; <=0 = grayscale only)
+    InstanceFn m_instance = nullptr;
+    SwapFn m_swap = nullptr;
+    void *m_fb = nullptr;
+    int m_frames = 0;
+    gint64 m_lastPresentUs = 0;
+};
+
 static const char *kQml = R"QML(
 import QtQuick
 import QtQuick.Window
@@ -356,6 +452,9 @@ Window {
 )QML";
 
 int main(int argc, char **argv) {
+    // Line-buffer stderr: the launcher redirects it to a file (block-buffered by default), so a kill at
+    // the end of a timed run would drop the last unflushed block — losing exactly the most recent events.
+    setvbuf(stderr, nullptr, _IOLBF, 0);
     signal(SIGSEGV, crashHandler);
     signal(SIGABRT, crashHandler);
     QGuiApplication app(argc, argv);
@@ -405,6 +504,17 @@ int main(int argc, char **argv) {
                   (g_get_monotonic_time() - t) / 1000.0, img.width(), img.height());
         });
 
+        // Drive the e-ink panel ourselves so page turns show immediately (needs QSG_RENDER_LOOP=basic so
+        // afterRendering fires on the GUI thread and the EPRenderLoop's slow auto-present is out of the way).
+        static EpaperRefresh epaper;
+        if (qgetenv("QT_QPA_PLATFORM") == "epaper") {   // only drive the panel on the real e-ink QPA
+            if (auto *win = qobject_cast<QQuickWindow*>(root)) {
+                if (epaper.init())
+                    QObject::connect(win, &QQuickWindow::afterRendering, win,
+                                     [] { epaper.present(); }, Qt::DirectConnection);
+            }
+        }
+
         // Direct evdev touch -> page turns (queued onto the GUI thread; pageBy then marshals to the worker).
         touchReader.moveToThread(&touchThread);
         QObject::connect(&touchThread, &QThread::started, &touchReader, &TouchReader::run);
@@ -412,6 +522,18 @@ int main(int argc, char **argv) {
             engine.pageBy(dir > 0 ? kPageStepPx : -kPageStepPx);
         });
         touchThread.start();
+
+        // Diagnostic: auto-page every RMWEB_AUTOPAGE_MS ms (alternating direction) through the exact same
+        // pageBy() path as a real swipe, so page-turn latency can be measured without hand-swipe timing.
+        if (const int autoMs = qEnvironmentVariableIntValue("RMWEB_AUTOPAGE_MS"); autoMs > 0) {
+            auto *t = new QTimer(&app);
+            QObject::connect(t, &QTimer::timeout, &app, [&engine, dir = 1]() mutable {
+                engine.pageBy(dir > 0 ? kPageStepPx : -kPageStepPx);
+                dir = -dir;
+            });
+            t->start(autoMs);
+            qInfo("[t] auto-page every %d ms (diagnostic)", autoMs);
+        }
     }
 
     thread.start();

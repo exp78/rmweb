@@ -28,7 +28,7 @@ trap '[ -n "${MOUNTED:-}" ] && umount /usr/libexec 2>/dev/null' EXIT
 echo "[device] helper path: $(ls -ld /usr/libexec/wpe-webkit-2.0 2>&1)"
 
 export LD_LIBRARY_PATH="$R/lib"
-export GALLIUM_DRIVER=softpipe LIBGL_ALWAYS_SOFTWARE=1 EGL_PLATFORM=surfaceless
+export GALLIUM_DRIVER=llvmpipe LIBGL_ALWAYS_SOFTWARE=1 EGL_PLATFORM=surfaceless   # llvmpipe = multi-core+SIMD SW GL (bundle ships libLLVM); softpipe was ~64x slower
 export LIBGL_DRIVERS_PATH="$R/lib/dri"
 export __EGL_VENDOR_LIBRARY_DIRS="$R/share/glvnd/egl_vendor.d"
 export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1

@@ -16,6 +16,17 @@ cp -a "$M"/lib/*.so*                "$B/lib/"
 cp -a "$S"/lib/gio/modules/*.so     "$B/lib/gio/modules/"            2>/dev/null || true   # glib-networking (TLS)
 cp -a "$M"/lib/dri/*.so             "$B/lib/dri/"                    2>/dev/null || true
 cp -a "$M"/share/glvnd/egl_vendor.d/. "$B/share/glvnd/egl_vendor.d/" 2>/dev/null || true
+# llvmpipe: multi-core + SIMD-JIT software rasterizer — ~64x faster page compositing than softpipe
+# (fixes the ~6 s page turn; see the six-second-render memory). Replace the softpipe swrast driver with
+# the llvm-enabled build, and bundle libLLVM + only the deps the device lacks (libz3/tinfo/edit/bsd/md).
+# libxml2/ICU are NOT bundled (device provides libxml2). Run with GALLIUM_DRIVER=llvmpipe.
+if [ -f build/stage-mesa-llvm/usr/lib/dri/swrast_dri.so ]; then
+  cp -a build/stage-mesa-llvm/usr/lib/dri/swrast_dri.so "$B/lib/dri/swrast_dri.so"
+  cp -aL build/llvm-bundle/libLLVM-16.so.1 build/llvm-bundle/libz3.so.4 build/llvm-bundle/libtinfo.so.6 \
+         build/llvm-bundle/libedit.so.2 build/llvm-bundle/libbsd.so.0 build/llvm-bundle/libmd.so.0 "$B/lib/"
+else
+  echo "[bundle] WARN: no llvmpipe build (build/stage-mesa-llvm) — shipping softpipe (slow). Run engine/mesa-llvmpipe.incontainer.sh"
+fi
 cp -a "$S"/libexec/wpe-webkit-2.0   "$B/libexec/"
 cp -a "$S"/lib/wpe-webkit-2.0       "$B/lib/"                        2>/dev/null || true   # injected-bundle
 cp -a "$S"/share/wpe-webkit-2.0     "$B/share/"                      2>/dev/null || true   # resources
