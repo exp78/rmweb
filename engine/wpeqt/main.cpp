@@ -103,6 +103,15 @@ static const char *kTestPage =
     "document.getElementById('lines').innerHTML=h;</script>"
     "</body></html>";
 
+// WKContentRuleList (Safari/WebKit content-blocker JSON): drop third-party scripts/media/fonts — i.e. ads,
+// trackers, analytics, and other heavy cross-origin JS — so the interpreter-only JSC isn't swamped. First-
+// party content/CSS is kept, so articles still render. Compiled once at startup (see onFilterSaved).
+static const char *kBlockRules =
+    "[{\"trigger\":{\"url-filter\":\".*\",\"resource-type\":[\"script\"],\"load-type\":[\"third-party\"]},"
+       "\"action\":{\"type\":\"block\"}},"
+     "{\"trigger\":{\"url-filter\":\".*\",\"resource-type\":[\"media\",\"font\"],\"load-type\":[\"third-party\"]},"
+       "\"action\":{\"type\":\"block\"}}]";
+
 // ---------------------------------------------------------------------------
 // WpeEngine — owns all WPE/WebKit objects on its worker thread.
 // ---------------------------------------------------------------------------
@@ -140,7 +149,9 @@ public Q_SLOTS:
         }
         qInfo("[t] display connected @%.0fms", msSince(m_startUs));
 
-        m_view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "display", display, nullptr));
+        m_ucm = webkit_user_content_manager_new();   // holds the content-blocking filter (added async below)
+        m_view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW,
+            "display", display, "user-content-manager", m_ucm, nullptr));
         WPEView *wpeView = webkit_web_view_get_wpe_view(m_view);
         // Size the toplevel first (headless default is 0x0 -> empty paints), then force a real
         // visible FALSE->TRUE transition so the view MAPS (WebKit only keeps painting while mapped).
@@ -155,11 +166,17 @@ public Q_SLOTS:
         g_signal_connect(m_view, "load-changed", G_CALLBACK(&WpeEngine::onLoadChanged), this);
         g_signal_connect(m_view, "notify::uri", G_CALLBACK(&WpeEngine::onUri), this);
 
-        if (m_url.isEmpty())
-            webkit_web_view_load_html(m_view, kTestPage, nullptr);
-        else
-            webkit_web_view_load_uri(m_view, m_url.toUtf8().constData());
-        qInfo("[t] load dispatched @%.0fms", msSince(m_startUs));
+        // Content blocking (RMWEB_BLOCK!=0, default on): compile the WKContentRuleList, add it, THEN load —
+        // so it applies to the very first resource loads. The compile is async; loadInitial() runs from its
+        // callback. Off => load immediately. A compile failure still loads (unfiltered) so the page works.
+        if (qgetenv("RMWEB_BLOCK") != "0") {
+            WebKitUserContentFilterStore *store = webkit_user_content_filter_store_new("/home/root/rmweb/cfstore");
+            GBytes *src = g_bytes_new_static(kBlockRules, strlen(kBlockRules));
+            webkit_user_content_filter_store_save(store, "rmweb-block", src, nullptr, &WpeEngine::onFilterSaved, this);
+            g_bytes_unref(src);
+        } else {
+            loadInitial();
+        }
 
         // Diagnostic (RMWEB_DEBUG_NAV): drive a back/forward sequence so navigation + the canGo/url signals
         // can be verified before the toolbar/URL entry exist (Tasks 4/8). A(initial) -> B -> back -> forward.
@@ -180,6 +197,7 @@ public Q_SLOTS:
         // Loop exited (engine.stop()): release the web view here, on its own thread, BEFORE ~WpeEngine —
         // this drops the buffer-rendered/load-changed handlers that capture `this`, so none can fire late.
         if (m_view) { g_object_unref(m_view); m_view = nullptr; }
+        if (m_ucm)  { g_object_unref(m_ucm);  m_ucm  = nullptr; }
         g_main_context_pop_thread_default(m_ctx);
     }
 
@@ -256,6 +274,23 @@ private:
         if (self) qInfo("[t] page JS done scrollY=%.0f @%.0fms", scrollY, msSince(self->m_startUs));
     }
 
+    void loadInitial() {
+        if (m_url.isEmpty()) webkit_web_view_load_html(m_view, kTestPage, nullptr);
+        else                 webkit_web_view_load_uri(m_view, m_url.toUtf8().constData());
+        qInfo("[t] load dispatched @%.0fms", msSince(m_startUs));
+    }
+    // WKContentRuleList compiled -> add it to the UCM (now active for all loads), then kick off the page load.
+    static void onFilterSaved(GObject *obj, GAsyncResult *res, gpointer data) {
+        auto *self = static_cast<WpeEngine*>(data);
+        GError *err = nullptr;
+        WebKitUserContentFilter *f = webkit_user_content_filter_store_save_finish(
+            WEBKIT_USER_CONTENT_FILTER_STORE(obj), res, &err);
+        if (f) { webkit_user_content_manager_add_filter(self->m_ucm, f); webkit_user_content_filter_unref(f);
+                 qInfo("[block] content filter active"); }
+        else   { qWarning("[block] filter compile failed: %s", err ? err->message : "?"); g_clear_error(&err); }
+        g_object_unref(obj);   // the filter store
+        self->loadInitial();
+    }
     static void onUri(GObject *obj, GParamSpec *, gpointer data) {
         auto *self = static_cast<WpeEngine*>(data);
         const char *u = webkit_web_view_get_uri(WEBKIT_WEB_VIEW(obj));
@@ -335,6 +370,7 @@ private:
     GMainContext *m_ctx = nullptr;
     GMainLoop *m_loop = nullptr;
     WebKitWebView *m_view = nullptr;
+    WebKitUserContentManager *m_ucm = nullptr;   // owns the content-blocking filter
     gint64 m_startUs = 0;     // monotonic origin (set in start) — all "@Xms" timings are relative to it
     gint64 m_lastBufUs = 0;   // previous buffer-rendered time — gives the inter-frame interval
     gint64 m_pageUs = 0;      // last page-flip dispatch time — gives swipe -> rendered-frame latency

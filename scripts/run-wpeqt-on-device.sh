@@ -11,7 +11,7 @@ MODE="${1:-save}"; URL="${2:-}"
 
 scp -q build/rmweb-wpeqt "$DUSER@$HOST:/home/root/rmweb/bin/rmweb-wpeqt"
 
-ssh "$DUSER@$HOST" "MODE='$MODE' URL='$URL' SHOW_SECS='${SHOW_SECS:-40}' RMWEB_AUTOPAGE_MS='${RMWEB_AUTOPAGE_MS:-}' WEBKIT_DEBUG='${WEBKIT_DEBUG:-}' RMWEB_FULL_EVERY='${RMWEB_FULL_EVERY:-}' RMWEB_DEBUG_TAP='${RMWEB_DEBUG_TAP:-}' RMWEB_DEBUG_NAV='${RMWEB_DEBUG_NAV:-}' RMWEB_JIT='${RMWEB_JIT:-}' RMWEB_JSC_OPTS='${RMWEB_JSC_OPTS:-}' bash -s" <<'EOS'
+ssh "$DUSER@$HOST" "MODE='$MODE' URL='$URL' SHOW_SECS='${SHOW_SECS:-40}' RMWEB_AUTOPAGE_MS='${RMWEB_AUTOPAGE_MS:-}' WEBKIT_DEBUG='${WEBKIT_DEBUG:-}' RMWEB_FULL_EVERY='${RMWEB_FULL_EVERY:-}' RMWEB_DEBUG_TAP='${RMWEB_DEBUG_TAP:-}' RMWEB_DEBUG_NAV='${RMWEB_DEBUG_NAV:-}' RMWEB_JIT='${RMWEB_JIT:-}' RMWEB_JSC_OPTS='${RMWEB_JSC_OPTS:-}' RMWEB_BLOCK='${RMWEB_BLOCK:-}' bash -s" <<'EOS'
 set -e
 R=/home/root/rmweb
 # WPE spawns helpers from the baked /usr/libexec/wpe-webkit-2.0 and / is read-only -> overlay it.
@@ -48,6 +48,7 @@ export FONTCONFIG_PATH=/etc/fonts HOME=/home/root
 # the WebProcess the moment a page runs JS. Run JSC in its interpreter (LLInt) — stable, fine for e-ink.
 export JSC_useJIT="${RMWEB_JIT:-0}"   # RMWEB_JIT=1 to TEST the JIT (exec memory IS allowed; abort is a JSC assert)
 [ -n "${RMWEB_JSC_OPTS:-}" ] && export $RMWEB_JSC_OPTS   # extra JSC_* options for experiments (space-separated)
+export RMWEB_BLOCK   # content-blocking: unset/!=0 => on (drop third-party scripts/ads); RMWEB_BLOCK=0 => off
 
 if [ "$MODE" = show ]; then
   echo "[device] stopping xochitl"; systemctl stop xochitl && STOPPED=1
@@ -72,8 +73,14 @@ if [ "$MODE" = show ]; then
   "$R/bin/rmweb-wpeqt" "$URL" >"$R/wpeqt.log" 2>&1 &
   APP=$!
   sleep "$SHOW_SECS"
+  # Robust teardown so a HUNG app can't leave the panel frozen (xochitl stopped): SIGTERM, then SIGKILL the
+  # app AND its WPE subprocess children (a stuck WebProcess holds the binary + DRM). The EXIT trap restores
+  # xochitl. BusyBox has no pkill/timeout, so loop pgrep+kill.
   kill "$APP" 2>/dev/null || true
-  wait "$APP" 2>/dev/null || true
+  for i in 1 2 3; do kill -0 "$APP" 2>/dev/null || break; sleep 1; done
+  for n in rmweb-wpeqt WPEWebProcess WPENetworkProc WPEGPUProcess; do
+    for p in $(pgrep "$n" 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
+  done
   tail -n 30 "$R/wpeqt.log"
 elif [ "$MODE" = bench ]; then
   # Isolation probe: run the engine display path OFFSCREEN (no epaper, no panel, xochitl untouched) so the
