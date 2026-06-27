@@ -46,7 +46,11 @@ export GIO_EXTRA_MODULES="$R/lib/gio/modules"   # glib-networking OpenSSL TLS ba
 export FONTCONFIG_PATH=/etc/fonts HOME=/home/root
 # The device forbids writable+executable (W^X) / MAP_JIT memory, so JavaScriptCore's JIT segfaults
 # the WebProcess the moment a page runs JS. Run JSC in its interpreter (LLInt) — stable, fine for e-ink.
-export JSC_useJIT="${RMWEB_JIT:-0}"   # RMWEB_JIT=1 to TEST the JIT (exec memory IS allowed; abort is a JSC assert)
+export JSC_useJIT="${RMWEB_JIT:-0}"   # RMWEB_JIT=1 enables the JIT (works — see usePollingTraps below)
+# THE JIT FIX (verified 2026-06-27): the JIT abort was a SIGNAL conflict — JSC's signal-based VMTraps vs our
+# crash handler / the environment. JSC_usePollingTraps=1 makes JSC poll instead of using signals -> no abort,
+# and the JIT renders correctly + fast (Wikipedia content rendered, was blank/aborting before). Bake it in.
+[ "${RMWEB_JIT:-0}" = 1 ] && export JSC_usePollingTraps=1
 [ -n "${RMWEB_JSC_OPTS:-}" ] && export $RMWEB_JSC_OPTS   # extra JSC_* options for experiments (space-separated)
 export RMWEB_BLOCK   # content-blocking: unset/!=0 => on (drop third-party scripts/ads); RMWEB_BLOCK=0 => off
 
