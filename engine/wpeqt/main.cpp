@@ -637,6 +637,19 @@ ApplicationWindow {
 }
 )QML";
 
+// DIAG (RMWEB_SIMPLE_QML): bare Window, no chrome — to bisect whether ApplicationWindow / Controls /
+// VirtualKeyboard is what stalls the GUI event loop (timers + async frames stop firing after startup).
+static const char *kQmlSimple = R"QML(
+import QtQuick
+import QtQuick.Window
+import rmweb 1.0
+Window {
+    width: Screen.width; height: Screen.height
+    visible: true; color: "white"
+    WpeView { objectName: "view"; anchors.fill: parent }
+}
+)QML";
+
 int main(int argc, char **argv) {
     // Line-buffer stderr: the launcher redirects it to a file (block-buffered by default), so a kill at
     // the end of a timed run would drop the last unflushed block — losing exactly the most recent events.
@@ -678,7 +691,8 @@ int main(int argc, char **argv) {
         QObject::connect(&engine, &WpeEngine::canGoBack,    &bridge, &ShellBridge::canGoBack);
         QObject::connect(&engine, &WpeEngine::canGoForward, &bridge, &ShellBridge::canGoForward);
         auto *comp = new QQmlComponent(qmlEngine, qmlEngine);
-        comp->setData(kQml, QUrl(QStringLiteral("inline.qml")));
+        comp->setData(qEnvironmentVariableIsSet("RMWEB_SIMPLE_QML") ? kQmlSimple : kQml,
+                      QUrl(QStringLiteral("inline.qml")));
         if (comp->status() != QQmlComponent::Ready) {
             qWarning() << "[qml]" << comp->errorString();
             return 2;
@@ -698,8 +712,13 @@ int main(int argc, char **argv) {
 
         // Drive the e-ink panel ourselves so page turns show immediately (needs QSG_RENDER_LOOP=basic so
         // afterRendering fires on the GUI thread and the EPRenderLoop's slow auto-present is out of the way).
+        // The epaper QPA's own EPRenderLoop already presents the scene to the panel. Calling
+        // EPFramebuffer::swapBuffers ourselves from afterRendering RE-ENTERS the framebuffer mutex that
+        // EPRenderLoop holds across renderSceneGraph -> non-recursive self-DEADLOCK on the GUI thread
+        // (the whole UI freezes after the first frame; confirmed by a backtrace). So let EPRenderLoop drive
+        // the panel by default; opt back into manual present only with RMWEB_MANUAL_PRESENT (diagnostic).
         static EpaperRefresh epaper;
-        if (win && qgetenv("QT_QPA_PLATFORM") == "epaper") {   // only drive the panel on the real e-ink QPA
+        if (win && qgetenv("QT_QPA_PLATFORM") == "epaper" && qEnvironmentVariableIsSet("RMWEB_MANUAL_PRESENT")) {
             if (epaper.init())
                 QObject::connect(win, &QQuickWindow::afterRendering, win,
                                  [] { epaper.present(); }, Qt::DirectConnection);
@@ -736,6 +755,16 @@ int main(int argc, char **argv) {
         { auto *hb = new QTimer(&app);
           QObject::connect(hb, &QTimer::timeout, &app, []{ qInfo("[gui] tick"); });
           hb->start(2000); }
+
+        // DIAG (RMWEB_GRAB_MS): grab the composited window to a PNG after N ms — captures exactly what Qt
+        // presents (= what's on the e-ink), so we can SEE the result without catching the live screen.
+        if (const int grabMs = qEnvironmentVariableIntValue("RMWEB_GRAB_MS"); grabMs > 0 && win) {
+            QTimer::singleShot(grabMs, win, [win]{
+                QImage g = win->grabWindow();
+                if (!g.isNull() && g.save("/home/root/rmweb/grab.png")) qInfo("[grab] saved %dx%d", g.width(), g.height());
+                else qInfo("[grab] FAILED null=%d", g.isNull());
+            });
+        }
 
         // Diagnostic: auto-page every RMWEB_AUTOPAGE_MS ms (alternating direction) through the exact same
         // pageBy() path as a real swipe, so page-turn latency can be measured without hand-swipe timing.
