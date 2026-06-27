@@ -11,7 +11,7 @@ MODE="${1:-save}"; URL="${2:-}"
 
 scp -q build/rmweb-wpeqt "$DUSER@$HOST:/home/root/rmweb/bin/rmweb-wpeqt"
 
-ssh "$DUSER@$HOST" "MODE='$MODE' URL='$URL' SHOW_SECS='${SHOW_SECS:-40}' RMWEB_AUTOPAGE_MS='${RMWEB_AUTOPAGE_MS:-}' WEBKIT_DEBUG='${WEBKIT_DEBUG:-}' RMWEB_FULL_EVERY='${RMWEB_FULL_EVERY:-}' RMWEB_DEBUG_TAP='${RMWEB_DEBUG_TAP:-}' RMWEB_DEBUG_NAV='${RMWEB_DEBUG_NAV:-}' RMWEB_JIT='${RMWEB_JIT:-}' RMWEB_JSC_OPTS='${RMWEB_JSC_OPTS:-}' RMWEB_BLOCK='${RMWEB_BLOCK:-}' bash -s" <<'EOS'
+ssh "$DUSER@$HOST" "MODE='$MODE' URL='$URL' SHOW_SECS='${SHOW_SECS:-40}' RMWEB_AUTOPAGE_MS='${RMWEB_AUTOPAGE_MS:-}' WEBKIT_DEBUG='${WEBKIT_DEBUG:-}' RMWEB_FULL_EVERY='${RMWEB_FULL_EVERY:-}' RMWEB_DEBUG_TAP='${RMWEB_DEBUG_TAP:-}' RMWEB_DEBUG_NAV='${RMWEB_DEBUG_NAV:-}' RMWEB_JIT='${RMWEB_JIT:-}' RMWEB_JSC_OPTS='${RMWEB_JSC_OPTS:-}' RMWEB_BLOCK='${RMWEB_BLOCK:-}' RMWEB_SIMPLE_QML='${RMWEB_SIMPLE_QML:-}' RMWEB_QUICK_BACKEND='${RMWEB_QUICK_BACKEND:-}' RMWEB_GRAB_MS='${RMWEB_GRAB_MS:-}' RMWEB_MANUAL_PRESENT='${RMWEB_MANUAL_PRESENT:-}' bash -s" <<'EOS'
 set -e
 R=/home/root/rmweb
 # WPE spawns helpers from the baked /usr/libexec/wpe-webkit-2.0 and / is read-only -> overlay it.
@@ -53,12 +53,13 @@ export JSC_useJIT="${RMWEB_JIT:-0}"   # RMWEB_JIT=1 enables the JIT (works — s
 [ "${RMWEB_JIT:-0}" = 1 ] && export JSC_usePollingTraps=1
 [ -n "${RMWEB_JSC_OPTS:-}" ] && export $RMWEB_JSC_OPTS   # extra JSC_* options for experiments (space-separated)
 export RMWEB_BLOCK   # content-blocking: unset/!=0 => on (drop third-party scripts/ads); RMWEB_BLOCK=0 => off
+export RMWEB_SIMPLE_QML   # DIAG: if set, use the bare-Window QML (no chrome) to bisect the GUI-loop stall
 
 if [ "$MODE" = show ]; then
   echo "[device] stopping xochitl"; systemctl stop xochitl && STOPPED=1
   # epaper scenegraph, but the BASIC render loop so QQuickWindow::afterRendering fires on the GUI thread
   # and the epaper EPRenderLoop's slow auto-present is bypassed — we present each frame via EpaperRefresh.
-  export QT_QPA_PLATFORM=epaper QT_QUICK_BACKEND=epaper QSG_RENDER_LOOP=basic
+  export QT_QPA_PLATFORM=epaper QT_QUICK_BACKEND="${RMWEB_QUICK_BACKEND:-epaper}" QSG_RENDER_LOOP=basic
   # Qt Virtual Keyboard for on-screen URL entry: IM module + bundle import/plugin paths. These EXTEND the
   # device defaults, so QtQuick.Controls and the epaper platform plugin still resolve from /usr/lib.
   export QT_IM_MODULE=qtvirtualkeyboard
