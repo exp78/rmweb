@@ -566,8 +566,11 @@ public:
         m_lastPresentUs = now;
         const QRect full(0, 0, kPanelW, kPanelH);
         ++m_frames;
-        if (m_fullEvery > 0 && (m_frames % m_fullEvery) == 0) m_swap(m_fb, full, 1, 4, 1);  // colour + anti-ghost flash
-        else                                                  m_swap(m_fb, full, 0, 1, 0);  // fast grayscale, no flash
+        const bool isFull = (m_fullEvery > 0 && (m_frames % m_fullEvery) == 0);
+        qInfo("[present] #%d swap enter full=%d", m_frames, isFull);
+        if (isFull) m_swap(m_fb, full, 1, 4, 1);  // colour + anti-ghost flash
+        else        m_swap(m_fb, full, 0, 1, 0);  // fast grayscale, no flash
+        qInfo("[present] #%d swap done", m_frames);
     }
 private:
     typedef void *(*InstanceFn)();
@@ -727,6 +730,12 @@ int main(int argc, char **argv) {
         QObject::connect(&touchReader, &TouchReader::tap, win ? win : qobject_cast<QObject*>(&app),
                          sendClick, Qt::QueuedConnection);
         touchThread.start();
+
+        // DIAG: GUI event-loop heartbeat. If these "[gui] tick" lines stop, the GUI thread is blocked
+        // (e.g. inside present()/swapBuffers) and queued frameReady deliveries stall -> content never paints.
+        { auto *hb = new QTimer(&app);
+          QObject::connect(hb, &QTimer::timeout, &app, []{ qInfo("[gui] tick"); });
+          hb->start(2000); }
 
         // Diagnostic: auto-page every RMWEB_AUTOPAGE_MS ms (alternating direction) through the exact same
         // pageBy() path as a real swipe, so page-turn latency can be measured without hand-swipe timing.
