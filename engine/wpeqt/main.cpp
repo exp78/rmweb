@@ -33,6 +33,7 @@
 #include <QQuickPaintedItem>
 #include <QQuickWindow>
 #include <QPainter>
+#include <QElapsedTimer>
 #include <qpa/qwindowsysteminterface.h>   // QWindowSystemInterface — inject taps into QtQuick's input path
 
 #include <wpe/webkit.h>
@@ -407,17 +408,33 @@ private:
 class WpeView : public QQuickPaintedItem {
     Q_OBJECT
 public:
-    explicit WpeView(QQuickItem *parent = nullptr) : QQuickPaintedItem(parent) {}
+    explicit WpeView(QQuickItem *parent = nullptr) : QQuickPaintedItem(parent) {
+        // Coalesce + rate-limit frames to ONE present per ~2 s. The vendor epaper present (EPRenderLoop)
+        // DEADLOCKS when a 2nd present overlaps the 1st (the panel refresh holds the framebuffer mutex);
+        // static/simple pages only worked because they emit a single frame. So present the LATEST frame,
+        // never faster than the panel can refresh -> presents never overlap -> no deadlock, content shows.
+        m_present.setSingleShot(true);
+        connect(&m_present, &QTimer::timeout, this, [this]{
+            m_img = m_pending; m_clock.restart(); update();
+            qInfo("[t][gui] present (rate-limited) %dx%d", m_img.width(), m_img.height());
+        });
+    }
     void paint(QPainter *p) override {
         if (m_img.isNull()) return;
-        const gint64 t = g_get_monotonic_time();
         p->drawImage(QRectF(0, 0, width(), height()), m_img);
-        qInfo("[t][gui] paint drawImage %.1fms", (g_get_monotonic_time() - t) / 1000.0);
     }
 public Q_SLOTS:
-    void setImage(const QImage &img) { m_img = img; update(); }
+    void setImage(const QImage &img) {
+        m_pending = img;
+        if (m_present.isActive()) return;                              // a present is already scheduled
+        const int since = m_clock.isValid() ? int(m_clock.elapsed()) : kPresentGapMs;
+        m_present.start(since >= kPresentGapMs ? 0 : kPresentGapMs - since);
+    }
 private:
-    QImage m_img;
+    static const int kPresentGapMs = 2000;   // >= panel refresh, so successive presents never overlap
+    QImage m_img, m_pending;
+    QElapsedTimer m_clock;
+    QTimer m_present;
 };
 
 // ---------------------------------------------------------------------------
