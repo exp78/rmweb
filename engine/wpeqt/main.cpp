@@ -48,6 +48,7 @@
 #include <dirent.h>
 #include <poll.h>
 #include <sys/ioctl.h>
+#include <algorithm>
 #include <atomic>
 #include <functional>
 #include <string>
@@ -121,11 +122,13 @@ class WpeEngine : public QObject {
 public:
     WpeEngine(QString url, int w, int h)
         : m_url(std::move(url)), m_w(w), m_h(h),
-          m_ctx(g_main_context_new()), m_loop(g_main_loop_new(m_ctx, FALSE)) {}
+          m_ctx(g_main_context_new()), m_loop(g_main_loop_new(m_ctx, FALSE)),
+          m_cancel(g_cancellable_new()) {}
 
     ~WpeEngine() {
         // main() joins the worker thread before destroying us, so the loop has exited and m_view is already
-        // released (end of start()); just drop the loop/context refs created in the ctor.
+        // released (end of start()); just drop the loop/context/cancellable refs created in the ctor.
+        if (m_cancel) g_object_unref(m_cancel);
         if (m_loop) g_main_loop_unref(m_loop);
         if (m_ctx)  g_main_context_unref(m_ctx);
     }
@@ -173,7 +176,7 @@ public Q_SLOTS:
         if (qgetenv("RMWEB_BLOCK") != "0") {
             WebKitUserContentFilterStore *store = webkit_user_content_filter_store_new("/home/root/rmweb/cfstore");
             GBytes *src = g_bytes_new_static(kBlockRules, strlen(kBlockRules));
-            webkit_user_content_filter_store_save(store, "rmweb-block", src, nullptr, &WpeEngine::onFilterSaved, this);
+            webkit_user_content_filter_store_save(store, "rmweb-block", src, m_cancel, &WpeEngine::onFilterSaved, this);
             g_bytes_unref(src);
         } else {
             loadInitial();
@@ -203,6 +206,7 @@ public Q_SLOTS:
     }
 
     void stop() {
+        g_cancellable_cancel(m_cancel);   // abort an in-flight content-filter save so its callback bails
         g_main_context_invoke(m_ctx, [](gpointer l) -> gboolean {
             g_main_loop_quit(static_cast<GMainLoop*>(l)); return G_SOURCE_REMOVE; }, m_loop);
     }
@@ -286,6 +290,12 @@ private:
         GError *err = nullptr;
         WebKitUserContentFilter *f = webkit_user_content_filter_store_save_finish(
             WEBKIT_USER_CONTENT_FILTER_STORE(obj), res, &err);
+        // Cancelled = engine is tearing down (stop() cancelled m_cancel): release and bail without
+        // touching m_ucm or starting a load.
+        if (err && g_error_matches(err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+            if (f) webkit_user_content_filter_unref(f);
+            g_clear_error(&err); g_object_unref(obj); return;
+        }
         if (f) { webkit_user_content_manager_add_filter(self->m_ucm, f); webkit_user_content_filter_unref(f);
                  qInfo("[block] content filter active"); }
         else   { qWarning("[block] filter compile failed: %s", err ? err->message : "?"); g_clear_error(&err); }
@@ -370,6 +380,7 @@ private:
     int m_w, m_h, m_frames = 0;
     GMainContext *m_ctx = nullptr;
     GMainLoop *m_loop = nullptr;
+    GCancellable *m_cancel = nullptr;            // cancels an in-flight content-filter save on shutdown
     WebKitWebView *m_view = nullptr;
     WebKitUserContentManager *m_ucm = nullptr;   // owns the content-blocking filter
     gint64 m_startUs = 0;     // monotonic origin (set in start) — all "@Xms" timings are relative to it
@@ -483,8 +494,8 @@ public Q_SLOTS:
                 if (p.type != EV_ABS) continue;
                 if (p.code == ABS_MT_SLOT) { curSlot = p.value; continue; }
                 if (curSlot != 0) continue;                                  // first finger only
-                if (p.code == ABS_MT_POSITION_X)      x = p.value * kPanelW / kTouchRawW;
-                else if (p.code == ABS_MT_POSITION_Y) y = p.value * kPanelH / kTouchRawH;
+                if (p.code == ABS_MT_POSITION_X)      x = std::min(p.value * kPanelW / kTouchRawW, kPanelW - 1);
+                else if (p.code == ABS_MT_POSITION_Y) y = std::min(p.value * kPanelH / kTouchRawH, kPanelH - 1);
                 else if (p.code == ABS_MT_TRACKING_ID) {
                     if (p.value >= 0) pendingDown = true;                     // new contact -> latch pos at SYN
                     else              pendingLift = true;                     // -1 -> lifted -> emit at SYN
