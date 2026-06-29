@@ -359,6 +359,23 @@ so buttons work.
 
 ---
 
+## Task A0: Land code-review fixes first (device build+verify)
+
+From the 2026-06-29 code review; both need the device (deferred from the host session):
+
+- **C7 (critical) — `onFilterSaved` dangling `this`.** `WpeEngine`: add `GCancellable *m_cancel =
+  g_cancellable_new();`; pass it to `webkit_user_content_filter_store_save(store,"rmweb-block",src,
+  m_cancel,&onFilterSaved,this)`; in `stop()` call `g_cancellable_cancel(m_cancel)` before the loop-quit;
+  early-return in `onFilterSaved` if `g_cancellable_is_cancelled(...)`; unref `m_cancel` at end of
+  `start()`. Verify: blocking still activates on a normal load; a kill mid-load does not crash/reboot.
+- **C17 (high) — touch coords 1 px out of bounds.** `TouchReader::run` ABS_MT_POSITION mapping: clamp
+  `x = std::min(p.value*kPanelW/kTouchRawW, kPanelW-1)` and `y = std::min(..., kPanelH-1)`
+  (`#include <algorithm>`). Verify: an extreme-edge tap still hits the intended control / classifies right.
+
+Land as one small commit, build via `scripts/build-wpeqt.sh`, smoke on device, THEN start A4.
+
+---
+
 ## Task A4: Engine façade reshape — DEVICE-VERIFIED (execute with tablet+SDK)
 
 **Files:** Modify `engine/wpeqt/main.cpp` (`WpeEngine`, `ShellBridge`).
