@@ -34,6 +34,10 @@ int main() {
     { RefreshPolicy p; assert(p.decide(PresentKind::Idle, false) == Waveform::Fast); }
     { RefreshPolicy p; p.fullEveryN = 0; p.decide(PresentKind::PageTurn, false); // turnsSinceFull=1
       assert(p.decide(PresentKind::Idle, false) == Waveform::Full); assert(p.turnsSinceFull == 0); }
+    // idle ghost-clear also fires after partial accumulation when fullEveryN>0 (not yet at threshold)
+    { RefreshPolicy p; p.fullEveryN = 12;
+      for (int i = 0; i < 5; ++i) p.decide(PresentKind::PageTurn, false);
+      assert(p.decide(PresentKind::Idle, false) == Waveform::Full); assert(p.turnsSinceFull == 0); }
     printf("refreshpolicy tests OK\n");
     return 0;
 }

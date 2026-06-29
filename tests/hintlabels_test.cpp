@@ -16,6 +16,8 @@ int main() {
     { auto v = hintLabels(100); std::set<std::string> u(v.begin(),v.end());
       assert(v.size()==100 && u.size()==100); }                                          // 100 unique
     { HintConfig c; c.chars=""; assert(hintLabels(5,c).empty()); }    // empty-alphabet guard
+    { HintConfig c; c.chars="x"; auto v=hintLabels(1,c); assert(v.size()==1 && v[0]=="x"); } // 1-char ok for n==1
+    { HintConfig c; c.chars="x"; assert(hintLabels(3,c).empty()); }   // 1-char can't make >1 unique -> empty
     printf("hintlabels tests OK\n");
     return 0;
 }
