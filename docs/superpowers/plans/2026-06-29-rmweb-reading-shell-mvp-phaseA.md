@@ -2,9 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status (2026-06-29):** A1–A3 ✅ DONE — pure logic + test runner, all host tests green
-(`gesture`, `url`, `tapzone`, `refreshpolicy`). A4–A8 queued for when the tablet + SDK are available
-(they are device-verified; their bite-sized steps expand against the real `main.cpp` at execution).
+**Status (2026-06-29):** Pure-logic layer ✅ DONE — `tapzone` + `refreshpolicy` (Phase A) and
+`hintlabels` (Phase D, done early); runner `scripts/run-tests.sh`; all 5 host tests green
+(`gesture, url, tapzone, refreshpolicy, hintlabels`). A4–A8 are now **grounded against the real
+`engine/wpeqt/main.cpp`** (see "Grounding" below) and queued for the device+SDK session.
 
 **Goal:** Turn the working WPE-on-e-ink engine into a *polished, fast* reading core: reader-first
 fullscreen chrome that summons on a tap, edge-zone page-turn navigation, and an adaptive e-ink
@@ -305,6 +306,56 @@ Run: `chmod +x scripts/run-tests.sh && ./scripts/run-tests.sh`
 Expected: all of `gesture`, `url`, `tapzone`, `refreshpolicy` print `… tests OK`, then `ALL HOST TESTS OK`.
 
 - [ ] **Step 3: Commit** (with the `.env` guard).
+
+---
+
+## Grounding — current engine (`engine/wpeqt/main.cpp` @ 3b35435) → Phase A changes
+
+**Current state:**
+- `WpeEngine` (worker): signals `frameReady, urlChanged, canGoBack, canGoForward`; slots `start, stop,
+  pageBy(double), loadUrl, goBack, goForward, reload`. Wired: `load-changed`→`onLoadChanged` (emits
+  canGoBack/Forward on COMMITTED/FINISHED), `notify::uri`→`onUri` (urlChanged), `buffer-rendered`→
+  `onBuffer` (frameReady; drops dup frames by FNV sig). `pageBy` = `scrollBy + hidden-marker mutation
+  → one repaint` (the verified pagination trick).
+- `ShellBridge` (GUI proxy, exposed as `engine`): slots `goBack/goForward/reload/loadUrl`; signals
+  `urlChanged/canGoBack/canGoForward`; QML binds via `Connections`.
+- `WpeView`: present coalescer — `setImage` schedules one `update()` per `kPresentGapMs = 2000` (QTimer).
+- `TouchReader`: emits `swipe(±1)`, `tap(x,y)`. `main()` maps swipe→`engine.pageBy(±kPageStepPx)`,
+  tap→`sendClick` (UNCONDITIONAL touch→mouse bridge).
+- `EpaperRefresh`: `dlopen` libqsgepaper `EPFramebuffer::instance/swapBuffers`. **Manual present GATED
+  OFF** (`RMWEB_MANUAL_PRESENT`) — `swapBuffers` from `afterRendering` re-enters EPRenderLoop's
+  framebuffer mutex → self-deadlock (proven). EPRenderLoop drives the panel when `update()` dirties it.
+- `kQml`: **persistent top `ToolBar` + `WpeView`** (current layout = "persistent top", NOT reader-first).
+
+**A4 façade:** keep `loadUrl/goBack/goForward/reload`; add engine `pageNext()/pagePrev()` (wrap
+`pageBy(±kPageStepPx)`, move the mapping out of `main()`); stub Phase B/D `readerToggle, setReaderStyle,
+findText…, setJsEnabled, hintStart, hintFollow`. Convert `ShellBridge` to a **Q_PROPERTY contract**
+(`url, title, loading, loadProgress, canGoBack, canGoForward, readerable, readerMode, tlsOk, …`) with
+NOTIFY so borrowed chrome binds `engine.canGoBack` directly; relay engine signals → property updates.
+
+**A5 signals+crash:** have `load-changed`, `notify::uri`. ADD `g_signal_connect`:
+`notify::estimated-load-progress`→loadProgress; `notify::title`→title; loading bool from `load-changed`
+STARTED/FINISHED; `load-failed-with-tls-errors`+`webkit_web_view_get_tls_info()`→tls;
+`web-process-terminated`→`processCrashed`→error page + auto-reload once (per-URL attempt guard).
+
+**A6 present serializer (perf bet):** replace `WpeView`'s fixed `kPresentGapMs=2000` with
+**`QQuickWindow::frameSwapped`-gated** release (frameSwapped fires after the scene swap = after
+`EPFramebuffer::swapBuffers` returns) PLUS a waveform-aware minimum dwell from `refreshpolicy.decide()`
+(Fast ~150 ms, Full ~1–1.5 s) — `swapBuffers` can return before the physical refresh completes (that
+overlap was the deadlock). For a Full (colour/ghost-clear) frame, set `EPFramebuffer::setForceFull(true)`
+(a flag setter — should not re-enter the mutex; verify) around the `update()`. **Never** resurrect the
+`afterRendering`→`swapBuffers` manual-present path. Keep the 2000 ms proxy behind a fallback toggle.
+Keep the `[gui] tick` heartbeat + `[present]`/`[t] frame` logs while tuning this (they diagnosed the
+original deadlock).
+
+**A7 reader-first chrome:** rewrite `kQml` to `WpeView` `anchors.fill` + top/bottom overlay bars whose
+`visible` binds a `chromeVisible` prop; **instant** show/hide (no animation). Reuse the existing
+Button/TextField/InputPanel; bind to A4 properties.
+
+**A8 pagination+tap-zones:** route `TouchReader::tap` through `classifyTap(x,y,1620,2160)`:
+`SummonChrome`→toggle `chromeVisible`; `Next`/`Prev`→`engine.pageNext/Prev`; `Content`→`sendClick`
+(follow link). Keep `swipe`→page turn. When chrome is visible, taps within a bar rect still `sendClick`
+so buttons work.
 
 ---
 
