@@ -359,7 +359,7 @@ so buttons work.
 
 ---
 
-## Task A0: Land code-review fixes first (device build+verify)
+## Task A0: Land code-review fixes first (device build+verify) — ✅ DONE 2026-06-30
 
 From the 2026-06-29 code review; both need the device (deferred from the host session):
 
