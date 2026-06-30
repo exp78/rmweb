@@ -546,6 +546,16 @@ public:
     void paint(QPainter *p) override {
         if (m_img.isNull()) return;
         p->drawImage(QRectF(0, 0, width(), height()), m_img);
+        // B2: draw the browser chrome straight into the WpeView's painted content — THIS is the frame
+        // that reaches the e-ink panel (verified: grabWindow only ever captures this item, and every
+        // QtQuick overlay/header did NOT composite over it). So the toolbar is painted here, not in QML.
+        // FOUNDATION (verified on device): an always-on bar overlaid at the top. Next: wire the buttons
+        // to engine state + C++ hit-testing, position the web image below the bar, and a reader-first toggle.
+        const qreal w = width(); const qreal bh = 120;
+        p->fillRect(QRectF(0, 0, w, bh), Qt::white);
+        p->fillRect(QRectF(0, bh - 3, w, 3), Qt::black);
+        QFont f = p->font(); f.setPixelSize(52); p->setFont(f); p->setPen(Qt::black);
+        p->drawText(QRectF(24, 0, w - 48, bh), Qt::AlignVCenter, "< Back      > Fwd      R Reload");
     }
 public Q_SLOTS:
     void setImage(const QImage &img) {
