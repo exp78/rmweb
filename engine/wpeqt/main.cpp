@@ -64,6 +64,7 @@
 #include "gesture.h"   // pure tap/swipe classifier (unit-tested in tests/gesture_test.cpp)
 #include "url.h"       // pure URL normalizer (unit-tested in tests/url_test.cpp)
 #include "tapzone.h"   // pure tap-zone classifier (unit-tested in tests/tapzone_test.cpp)
+#include "keyboard.h"  // pure on-screen-keyboard layout + hit-test (unit-tested in tests/keyboard_test.cpp)
 using rmweb::Gesture;
 using rmweb::classifyGesture;
 
@@ -588,6 +589,7 @@ public:
         m_fallback.setSingleShot(true);
         connect(&m_fallback, &QTimer::timeout, this,
                 [this]{ qInfo("[t][gui] present fallback-release (no frameSwapped)"); releaseGate(); });
+        m_keys = rmweb::buildKeyboard(kPanelW, kPanelH, kKbTopY);   // URL keyboard, drawn into the frame (B2)
     }
     void paint(QPainter *p) override {
         const qreal w = width(), h = height();
@@ -608,13 +610,27 @@ public:
         btn(kFwdX,  kRelX,  m_loading ? "Stop" : "Reload", true);
         const qreal rx = w - kReaderW;
         QFont af = p->font(); af.setPixelSize(34); p->setFont(af); p->setPen(Qt::black);
-        const QString a = p->fontMetrics().elidedText(m_addr, Qt::ElideRight, int(rx - kRelX - 40));
+        const QString addrText = m_editing ? (m_editBuf + "|") : m_addr;   // editing -> typed buffer + caret
+        const auto elide = m_editing ? Qt::ElideLeft : Qt::ElideRight;     // keep the caret end visible while typing
+        const QString a = p->fontMetrics().elidedText(addrText, elide, int(rx - kRelX - 40));
         p->drawText(QRectF(kRelX + 20, 0, rx - kRelX - 40, kBarH), Qt::AlignVCenter, a);
         // Reader toggle: inverted (black fill, white text) when active; greyed when the page isn't an article.
         QFont rf = p->font(); rf.setPixelSize(40); p->setFont(rf);
         if (m_readerMode) { p->fillRect(QRectF(rx, 6, kReaderW - 6, kBarH - 12), Qt::black); p->setPen(Qt::white); }
         else              { p->setPen(m_readerable ? Qt::black : QColor(170, 170, 170)); }
         p->drawText(QRectF(rx, 0, kReaderW, kBarH), Qt::AlignCenter, "Reader");
+        if (!m_editing) return;
+        // On-screen URL keyboard, drawn into the frame (B2: a QtQuick keyboard does not composite here). Taps
+        // are routed to handleEditTap() (keyboard.h hitKey) by the tap router in main() while editing.
+        p->fillRect(QRectF(0, kKbTopY, w, h - kKbTopY), Qt::white);
+        p->fillRect(QRectF(0, kKbTopY, w, 2), Qt::black);
+        QFont kf = p->font(); kf.setPixelSize(44); p->setFont(kf);
+        for (const rmweb::Key &k : m_keys) {
+            const QRectF r(k.x, k.y, k.w, k.h);
+            if (k.kind == rmweb::KeyKind::Go) { p->fillRect(r.adjusted(3, 3, -3, -3), Qt::black); p->setPen(Qt::white); }
+            else { p->setPen(Qt::black); p->drawRect(r.adjusted(2, 2, -2, -2)); }
+            p->drawText(r, Qt::AlignCenter, QString::fromStdString(k.label));
+        }
     }
     // Hit-test a tap against the chrome bar (panel px); returns the control, or None (off / below the bar).
     enum Hit { None, Back, Fwd, Reload, Address, Reader };
@@ -629,6 +645,26 @@ public:
     }
     bool chromeOn()  const { return m_chromeOn; }
     bool isLoading() const { return m_loading; }
+    bool isEditing() const { return m_editing; }
+    // URL entry: tapping the address field calls beginEdit() -> the on-screen keyboard shows; key taps feed
+    // m_editBuf; Go emits urlEntered (main() -> engine.loadUrl); Cancel/Go end the edit. The tap router in
+    // main() routes ALL taps here while editing.
+    void beginEdit() { m_editing = true; m_editBuf.clear(); schedule(); }
+    void endEdit()   { if (m_editing) { m_editing = false; schedule(); } }
+    void handleEditTap(int x, int y) {
+        const int i = rmweb::hitKey(m_keys, x, y);
+        if (i < 0) return;                                       // tap outside the keys (page area) -> ignore
+        switch (m_keys[i].kind) {
+            case rmweb::KeyKind::Char:      m_editBuf += QString::fromStdString(m_keys[i].insert); break;
+            case rmweb::KeyKind::Backspace: m_editBuf.chop(1); break;
+            case rmweb::KeyKind::Cancel:    endEdit(); return;
+            case rmweb::KeyKind::Go: { const QString u = m_editBuf; endEdit();
+                                       if (!u.isEmpty()) Q_EMIT urlEntered(u); return; }
+        }
+        schedule();
+    }
+Q_SIGNALS:
+    void urlEntered(const QString &url);   // Go pressed with a non-empty buffer -> load it (wired in main())
 public Q_SLOTS:
     void setImage(const QImage &img) { m_pending = img; m_hasPending = true; schedule(); }
     // Chrome state (fed by engine signals on the GUI thread). Each re-presents the current frame with the
@@ -679,6 +715,10 @@ private:
     bool m_chromeOn = true, m_canBack = false, m_canFwd = false, m_loading = false;
     bool m_readerMode = false, m_readerable = false;
     QString m_addr;
+    bool m_editing = false;             // URL-entry mode: the on-screen keyboard is shown over the page
+    QString m_editBuf;                  // the URL currently being typed
+    std::vector<rmweb::Key> m_keys;     // keyboard layout, built once in the ctor
+    static const int kKbTopY = 1340;    // keyboard occupies [kKbTopY, kPanelH) in panel px
 };
 
 // ---------------------------------------------------------------------------
@@ -922,6 +962,8 @@ int main(int argc, char **argv) {
         QObject::connect(&engine, &WpeEngine::urlChanged,     view, &WpeView::setAddr);
         QObject::connect(&engine, &WpeEngine::readerModeChanged, view, &WpeView::setReaderMode);
         QObject::connect(&engine, &WpeEngine::readerableChanged, view, &WpeView::setReaderable);
+        // URL entry: the on-screen keyboard's Go (WpeView::urlEntered) -> load it (engine.loadUrl normalizes).
+        QObject::connect(view, &WpeView::urlEntered, &app, [&engine](const QString &u){ engine.loadUrl(u); });
 
         // Drive the e-ink panel ourselves so page turns show immediately (needs QSG_RENDER_LOOP=basic so
         // afterRendering fires on the GUI thread and the EPRenderLoop's slow auto-present is out of the way).
@@ -949,12 +991,13 @@ int main(int argc, char **argv) {
         // pages at the edges. tap(x,y) is in panel px.
         QObject::connect(&touchReader, &TouchReader::tap, win ? win : qobject_cast<QObject*>(&app),
             [&engine, view](int x, int y) {
+                if (view->isEditing()) { view->handleEditTap(x, y); return; }   // keyboard captures all taps
                 switch (view->hitChrome(x, y)) {
                     case WpeView::Back:    engine.goBack();    return;
                     case WpeView::Fwd:     engine.goForward(); return;
                     case WpeView::Reload:  view->isLoading() ? engine.stopLoading() : engine.reload(); return;
                     case WpeView::Reader:  engine.toggleReader(); return;
-                    case WpeView::Address: return;            // URL entry comes later (drawn OSK / HTML chrome)
+                    case WpeView::Address: view->beginEdit();  return;   // open the on-screen URL keyboard
                     case WpeView::None:    break;             // tap not on the bar
                 }
                 if (view->chromeOn()) { view->setChromeOn(false); return; }   // tap page -> hide chrome (read)
@@ -987,6 +1030,11 @@ int main(int argc, char **argv) {
         // (pair with RMWEB_GRAB_MS to capture the result) without a human tap on the Reader button.
         if (const int rdMs = qEnvironmentVariableIntValue("RMWEB_DEBUG_READER"); rdMs > 0) {
             QTimer::singleShot(rdMs, &app, [&engine]{ qInfo("[reader][dbg] toggleReader"); engine.toggleReader(); });
+        }
+
+        // DIAG (RMWEB_DEBUG_KB): open the URL keyboard after N ms so its rendering can be grabbed (RMWEB_GRAB_MS).
+        if (const int kbMs = qEnvironmentVariableIntValue("RMWEB_DEBUG_KB"); kbMs > 0) {
+            QTimer::singleShot(kbMs, &app, [view]{ qInfo("[kb][dbg] beginEdit"); view->beginEdit(); });
         }
 
         // Diagnostic: auto-page every RMWEB_AUTOPAGE_MS ms (alternating direction) through the exact same
