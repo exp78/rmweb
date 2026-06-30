@@ -376,7 +376,7 @@ Land as one small commit, build via `scripts/build-wpeqt.sh`, smoke on device, T
 
 ---
 
-## Task A4: Engine façade reshape — DEVICE-VERIFIED (execute with tablet+SDK)
+## Task A4: Engine façade reshape — ✅ DONE 2026-06-30 (nav-state verified on device)
 
 **Files:** Modify `engine/wpeqt/main.cpp` (`WpeEngine`, `ShellBridge`).
 
@@ -400,7 +400,7 @@ updates, back/fwd enable correctly.
 
 ---
 
-## Task A5: Epiphany signal wiring + WebProcess-crash recovery — DEVICE-VERIFIED
+## Task A5: Epiphany signal wiring + WebProcess-crash recovery — ✅ DONE 2026-06-30 (verified on device)
 
 **Files:** Modify `engine/wpeqt/main.cpp`.
 
@@ -413,7 +413,7 @@ WebProcess (`kill` its PID) shows the error page and a single auto-reload, no de
 
 ---
 
-## Task A6: Present serializer + refresh controller — DEVICE-VERIFIED (the perf bet)
+## Task A6: Present serializer — ✅ DONE 2026-06-30 (~130ms turns, frameSwapped-gated); refreshpolicy waveform/ghost-clear deferred
 
 **Files:** Modify `engine/wpeqt/main.cpp` (`WpeView`/present path); consume `refreshpolicy.h`.
 
