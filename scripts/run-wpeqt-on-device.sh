@@ -11,7 +11,7 @@ MODE="${1:-save}"; URL="${2:-}"
 
 scp -q build/rmweb-wpeqt "$DUSER@$HOST:/home/root/rmweb/bin/rmweb-wpeqt"
 
-ssh "$DUSER@$HOST" "MODE='$MODE' URL='$URL' SHOW_SECS='${SHOW_SECS:-40}' RMWEB_AUTOPAGE_MS='${RMWEB_AUTOPAGE_MS:-}' WEBKIT_DEBUG='${WEBKIT_DEBUG:-}' RMWEB_FULL_EVERY='${RMWEB_FULL_EVERY:-}' RMWEB_DEBUG_TAP='${RMWEB_DEBUG_TAP:-}' RMWEB_DEBUG_READER='${RMWEB_DEBUG_READER:-}' RMWEB_DEBUG_KB='${RMWEB_DEBUG_KB:-}' RMWEB_DEBUG_ZOOM='${RMWEB_DEBUG_ZOOM:-}' RMWEB_JIT='${RMWEB_JIT:-}' RMWEB_JSC_OPTS='${RMWEB_JSC_OPTS:-}' RMWEB_BLOCK='${RMWEB_BLOCK:-}' RMWEB_QUICK_BACKEND='${RMWEB_QUICK_BACKEND:-}' RMWEB_GRAB_MS='${RMWEB_GRAB_MS:-}' RMWEB_MANUAL_PRESENT='${RMWEB_MANUAL_PRESENT:-}' RMWEB_PRESENT_DWELL='${RMWEB_PRESENT_DWELL:-}' RMWEB_DPR='${RMWEB_DPR:-}' RMWEB_READER_FONT='${RMWEB_READER_FONT:-}' RMWEB_READER_DIR='${RMWEB_READER_DIR:-}' RMWEB_UA='${RMWEB_UA:-}' bash -s" <<'EOS'
+ssh "$DUSER@$HOST" "MODE='$MODE' URL='$URL' SHOW_SECS='${SHOW_SECS:-40}' RMWEB_AUTOPAGE_MS='${RMWEB_AUTOPAGE_MS:-}' WEBKIT_DEBUG='${WEBKIT_DEBUG:-}' RMWEB_FULL_EVERY='${RMWEB_FULL_EVERY:-}' RMWEB_DEBUG_TAP='${RMWEB_DEBUG_TAP:-}' RMWEB_DEBUG_READER='${RMWEB_DEBUG_READER:-}' RMWEB_DEBUG_KB='${RMWEB_DEBUG_KB:-}' RMWEB_DEBUG_ZOOM='${RMWEB_DEBUG_ZOOM:-}' RMWEB_JIT='${RMWEB_JIT:-}' RMWEB_JSC_OPTS='${RMWEB_JSC_OPTS:-}' RMWEB_BLOCK='${RMWEB_BLOCK:-}' RMWEB_SITECSS='${RMWEB_SITECSS:-}' RMWEB_QUICK_BACKEND='${RMWEB_QUICK_BACKEND:-}' RMWEB_GRAB_MS='${RMWEB_GRAB_MS:-}' RMWEB_MANUAL_PRESENT='${RMWEB_MANUAL_PRESENT:-}' RMWEB_PRESENT_DWELL='${RMWEB_PRESENT_DWELL:-}' RMWEB_DPR='${RMWEB_DPR:-}' RMWEB_READER_FONT='${RMWEB_READER_FONT:-}' RMWEB_READER_DIR='${RMWEB_READER_DIR:-}' RMWEB_UA='${RMWEB_UA:-}' bash -s" <<'EOS'
 set -e
 R=/home/root/rmweb
 # WPE spawns helpers from the baked /usr/libexec/wpe-webkit-2.0 and / is read-only -> overlay it.
@@ -54,6 +54,7 @@ export JSC_useJIT="${RMWEB_JIT:-0}"   # RMWEB_JIT=1 enables the JIT (works — s
 for opt in ${RMWEB_JSC_OPTS:-}; do export "$opt"; done   # extra JSC_* options for experiments (space-separated, word-split safely)
 export RMWEB_BLOCK   # content-blocking: unset/!=0 => on (drop third-party scripts/ads); RMWEB_BLOCK=0 => off
 export RMWEB_UA      # User-Agent: unset => WPE default (renders Wikipedia/content); RMWEB_UA=mobile => mobile layout (heavy JS-apps); else custom string
+export RMWEB_SITECSS # readability user stylesheet: unset/!=0 => on (clamp wide media, no h-scroll); RMWEB_SITECSS=0 => off
 
 if [ "$MODE" = show ]; then
   echo "[device] stopping xochitl"; systemctl stop xochitl && STOPPED=1
