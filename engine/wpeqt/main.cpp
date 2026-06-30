@@ -223,6 +223,7 @@ Q_SIGNALS:
     void processCrashed();                         // WebProcess died (auto-reload attempted)
     void readerModeChanged(bool on);               // reader view applied/cleared -> toolbar button state
     void readerableChanged(bool can);              // current page looks like an article -> enable Reader
+    void renderFailed(bool failed);                // load finished but the page rendered ~blank (heavy SPA)
 
 public Q_SLOTS:
     void start() {
@@ -427,6 +428,33 @@ private:
         Q_EMIT self->readerableChanged(can);
     }
 
+    // After a load finishes, wait a grace period (let a slow SPA populate) then check whether the page rendered
+    // any visible content — a heavy client-side app finishes loading but builds ~nothing on the CPU interpreter.
+    // m_loadGen invalidates the check if the user navigated away during the grace period.
+    static constexpr int kRenderTimeoutMs = 13000;  // after load-start: time to give a heavy page to paint
+    static constexpr int kBlankSamples = 8;         // fewer than this many non-white frame samples = ~blank
+    struct RenderCheckMsg { WpeEngine *self; guint gen; };
+    void scheduleRenderCheck() {
+        auto *m = new RenderCheckMsg{ this, m_loadGen };
+        GSource *s = g_timeout_source_new(kRenderTimeoutMs);
+        g_source_set_callback(s, [](gpointer d) -> gboolean {
+            auto *msg = static_cast<RenderCheckMsg*>(d);
+            WpeEngine *self = msg->self;
+            // Same load, not in reader: if the latest web frame is essentially WHITE, the page rendered no
+            // visible content (a heavy SPA whose JS the CPU can't run). Flag it so the shell shows a notice.
+            // Pixel-based (not DOM): an SPA shell has DOM nodes but paints nothing, so DOM heuristics lie.
+            // A later non-white frame auto-clears the flag in onBuffer (a slow-but-rendering site recovers).
+            if (self->m_loadGen == msg->gen && !self->m_readerMode) {
+                const bool blank = self->m_lastNonWhite < kBlankSamples;
+                qInfo("[render] nonWhite=%d blank=%d", self->m_lastNonWhite, blank);
+                self->m_renderFailedState = blank;
+                Q_EMIT self->renderFailed(blank);
+            }
+            return G_SOURCE_REMOVE; }, m, [](gpointer d) { delete static_cast<RenderCheckMsg*>(d); });
+        g_source_attach(s, m_ctx);
+        g_source_unref(s);
+    }
+
     void loadInitial() {
         if (m_url.isEmpty()) webkit_web_view_load_html(m_view, kTestPage, nullptr);
         else                 webkit_web_view_load_uri(m_view, m_url.toUtf8().constData());
@@ -460,9 +488,13 @@ private:
     static void onLoadChanged(WebKitWebView *view, WebKitLoadEvent ev, gpointer data) {
         auto *self = static_cast<WpeEngine*>(data);
         if (ev == WEBKIT_LOAD_STARTED) {
+            self->m_loadGen++;                          // invalidate any pending render-check from a prior load
+            self->m_renderFailedState = false;
             qInfo("[t] load started @%.0fms", msSince(self->m_startUs));
             Q_EMIT self->loadingChanged(true);
+            Q_EMIT self->renderFailed(false);           // new load -> clear any "couldn't render" notice
             Q_EMIT self->tlsChanged(true, QString());   // optimistic; onTlsError flips it on a cert failure
+            self->scheduleRenderCheck();                // LOAD_STARTED always fires -> robust blank-check trigger
         }
         if (ev == WEBKIT_LOAD_FINISHED) {
             self->m_reloadAttempts = 0;                  // a good load refills the crash auto-reload budget
@@ -545,9 +577,18 @@ private:
         // Cheap sparse content fingerprint (FNV-1a over a pixel grid) — proves whether consecutive frames
         // actually differ in pixels (diagnosing "the panel refreshed but the image didn't change").
         unsigned sig = 2166136261u;
+        int nonWhite = 0;
         for (int yy = 0; yy < h; yy += 40) {
             const uchar *row = pix + static_cast<gsize>(yy) * stride;
-            for (int xx = 0; xx < w; xx += 40) sig = (sig ^ row[xx * 4]) * 16777619u;
+            for (int xx = 0; xx < w; xx += 40) {
+                const uchar b = row[xx * 4];
+                sig = (sig ^ b) * 16777619u;
+                if (b < 245) ++nonWhite;              // non-white sample => the page painted visible content
+            }
+        }
+        self->m_lastNonWhite = nonWhite;              // latest frame's content density (low => ~blank render)
+        if (nonWhite >= kBlankSamples && self->m_renderFailedState) {   // content finally painted -> clear notice
+            self->m_renderFailedState = false; Q_EMIT self->renderFailed(false);
         }
         // Skip identical frames: WebKit re-submits the same composited buffer on its idle heartbeat, and
         // the rAF page-turn pulse yields several identical ticks. Only repaint the e-ink when pixels change
@@ -580,7 +621,10 @@ private:
     gint64 m_lastBufUs = 0;   // previous buffer-rendered time — gives the inter-frame interval
     gint64 m_pageUs = 0;      // last page-flip dispatch time — gives swipe -> rendered-frame latency
     unsigned m_lastSig = 0;   // fingerprint of the last emitted frame — to drop identical (dup) frames
+    int m_lastNonWhite = 9999; // non-white grid samples in the latest frame (low => ~blank => render failed)
+    bool m_renderFailedState = false; // currently flagged blank (so a later content frame can auto-clear it)
     int m_reloadAttempts = 0; // WebProcess-crash auto-reload budget (reset on a successful load)
+    guint m_loadGen = 0;           // bumped on each load start -> a stale render-check (grace timer) is skipped
     bool m_readerMode = false;     // reader view currently applied (vs the original page)
     bool m_readerApplying = false; // an applyReader() JS eval is in flight (gates re-entrant Reader taps)
     std::string m_readabilityJs;   // vendored Readability.js, lazily slurped + cached
@@ -614,7 +658,7 @@ public:
         else                 p->fillRect(QRectF(0, 0, w, h), Qt::white);
         // "Working hard" indicator while a page loads (over the frame, below the chrome bar): an hourglass +
         // "Загрузка NN%" from the real load progress — so a slow/blank heavy page reads as busy, not frozen.
-        if (m_loading) {
+        if (m_loading && !m_renderFailed) {   // a never-finishing blank SPA stays "loading" -> notice wins
             const QString lbl = QStringLiteral("Загрузка %1%").arg(int(m_loadProgress * 100));
             QFont lf = p->font(); lf.setPixelSize(40); p->setFont(lf);
             const qreal tw = p->fontMetrics().horizontalAdvance(lbl);
@@ -628,6 +672,31 @@ public:
             p->setBrush(Qt::black); p->drawPolygon(top); p->drawPolygon(bot);
             p->setBrush(Qt::NoBrush); p->setPen(Qt::black);
             p->drawText(QRectF(ix + iconW + gap, by, tw + 6, bh), Qt::AlignVCenter | Qt::AlignLeft, lbl);
+        }
+        else if (m_renderFailed) {
+            // Load finished but the page rendered ~nothing (a heavy JS app the CPU can't run). Tell the user;
+            // options (cloud reader, etc.) come later. A "(!)" badge + two lines, centred in the upper third.
+            const QString t1 = QStringLiteral("Не удалось отобразить страницу");
+            const QString t2 = QStringLiteral("тяжёлый сайт или веб-приложение");
+            QFont f1 = p->font(); f1.setPixelSize(46);
+            QFont f2 = p->font(); f2.setPixelSize(34);
+            p->setFont(f1); const qreal w1 = p->fontMetrics().horizontalAdvance(t1);
+            p->setFont(f2); const qreal w2 = p->fontMetrics().horizontalAdvance(t2);
+            const qreal icon = 64, padX = 44, gap = 30, textW = qMax(w1, w2), bh = 210;
+            const qreal bw = padX + icon + gap + textW + padX, bx = (w - bw) / 2, by = h * 0.30;
+            p->setPen(Qt::black); p->setBrush(Qt::white);
+            p->drawRoundedRect(QRectF(bx, by, bw, bh), 20, 20);
+            const qreal cx = bx + padX + icon / 2, cy = by + bh / 2;       // warning icon: a circle with "!"
+            QPen wp(Qt::black); wp.setWidth(4); p->setPen(wp); p->setBrush(Qt::NoBrush);
+            p->drawEllipse(QPointF(cx, cy), icon / 2, icon / 2);
+            QFont fi = f1; fi.setBold(true); p->setFont(fi); p->setPen(Qt::black);
+            p->drawText(QRectF(cx - icon / 2, cy - icon / 2, icon, icon), Qt::AlignCenter, "!");
+            const qreal tx = bx + padX + icon + gap;
+            p->setFont(f1); p->setPen(Qt::black);
+            p->drawText(QRectF(tx, by + 44, textW, 60), Qt::AlignLeft | Qt::AlignVCenter, t1);
+            p->setFont(f2); p->setPen(QColor(90, 90, 90));
+            p->drawText(QRectF(tx, by + 116, textW, 50), Qt::AlignLeft | Qt::AlignVCenter, t2);
+            p->setPen(Qt::black);
         }
         if (!m_chromeOn) return;
         // B2: the browser chrome is painted straight into the WpeView's frame — this is what reaches the
@@ -711,6 +780,7 @@ public Q_SLOTS:
         const bool step = int(p * 10) != int(m_loadProgress * 10);
         m_loadProgress = p; if (step && m_loading) schedule();
     }
+    void setRenderFailed(bool v)   { if (v != m_renderFailed) { m_renderFailed = v; schedule(); } }
     void setAddr(const QString &s) { if (s != m_addr)     { m_addr     = s; schedule(); } }
     void setReaderMode(bool v)     { if (v != m_readerMode)  { m_readerMode  = v; schedule(); } }
     void setReaderable(bool v)     { if (v != m_readerable) { m_readerable = v; schedule(); } }
@@ -752,6 +822,7 @@ private:
     static const int kBarH = 104, kBackX = 170, kFwdX = 340, kRelX = 560, kReaderW = 190;
     bool m_chromeOn = true, m_canBack = false, m_canFwd = false, m_loading = false;
     qreal m_loadProgress = 0.0;          // 0..1 estimated load progress (drives the loading badge)
+    bool m_renderFailed = false;         // load finished but the page is ~blank (heavy SPA) -> show a notice
     bool m_readerMode = false, m_readerable = false;
     QString m_addr;
     bool m_editing = false;             // URL-entry mode: the on-screen keyboard is shown over the page
@@ -1002,6 +1073,7 @@ int main(int argc, char **argv) {
         QObject::connect(&engine, &WpeEngine::urlChanged,     view, &WpeView::setAddr);
         QObject::connect(&engine, &WpeEngine::readerModeChanged, view, &WpeView::setReaderMode);
         QObject::connect(&engine, &WpeEngine::readerableChanged, view, &WpeView::setReaderable);
+        QObject::connect(&engine, &WpeEngine::renderFailed,      view, &WpeView::setRenderFailed);
         // URL entry: the on-screen keyboard's Go (WpeView::urlEntered) -> load it (engine.loadUrl normalizes).
         QObject::connect(view, &WpeView::urlEntered, &app, [&engine](const QString &u){ engine.loadUrl(u); });
 
