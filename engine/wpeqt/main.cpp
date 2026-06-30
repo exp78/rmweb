@@ -163,11 +163,20 @@ public Q_SLOTS:
         m_view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW,
             "display", display, "user-content-manager", m_ucm, nullptr));
         WPEView *wpeView = webkit_web_view_get_wpe_view(m_view);
+        // Readability: lay the page out at device-pixel-ratio `dpr` so the CSS viewport is narrower
+        // (panel/dpr) -> responsive sites reflow to a readable, fits-width layout. Toplevel sizes are
+        // LOGICAL; the buffer is logical*dpr (~= the physical panel), so the display path is unchanged.
+        // Tunable via RMWEB_DPR (default 1.0 = current behaviour; ~2.0 = readable). See zoom-readability.md.
+        double dpr = qgetenv("RMWEB_DPR").toDouble(); if (dpr < 1.0 || dpr > 3.0) dpr = 2.0;
+        const int logW = static_cast<int>(m_w / dpr), logH = static_cast<int>(m_h / dpr);
         // Size the toplevel first (headless default is 0x0 -> empty paints), then force a real
         // visible FALSE->TRUE transition so the view MAPS (WebKit only keeps painting while mapped).
-        if (WPEToplevel *top = wpe_view_get_toplevel(wpeView))
-            wpe_toplevel_resize(top, m_w, m_h);
-        wpe_view_resized(wpeView, m_w, m_h);
+        if (WPEToplevel *top = wpe_view_get_toplevel(wpeView)) {
+            if (dpr != 1.0) wpe_toplevel_scale_changed(top, dpr);
+            wpe_toplevel_resize(top, logW, logH);
+        }
+        wpe_view_resized(wpeView, logW, logH);
+        qInfo("[t] dpr=%.2f logical=%dx%d", dpr, logW, logH);
         g_signal_connect(wpeView, "buffer-rendered", G_CALLBACK(&WpeEngine::onBuffer), this);
         wpe_view_set_visible(wpeView, FALSE);
         wpe_view_set_visible(wpeView, TRUE);
@@ -268,7 +277,7 @@ private:
             // lands in ~90 ms, so one frame per turn is enough. (The earlier requestAnimationFrame burst was a
             // workaround for softpipe's ~6 s composite; it also flooded the e-ink panel with ~20 presents/turn.)
             gchar *js = g_strdup_printf(
-                "window.scrollBy(0,%d);"
+                "window.scrollBy(0,%d>0?Math.round(innerHeight*0.92):-Math.round(innerHeight*0.92));"
                 "var m=document.getElementById('__r');"
                 "if(!m){m=document.createElement('span');m.id='__r';"
                 "m.style.cssText='position:fixed;left:-9999px;top:0';document.body.appendChild(m);}"

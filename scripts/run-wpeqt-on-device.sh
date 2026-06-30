@@ -11,7 +11,7 @@ MODE="${1:-save}"; URL="${2:-}"
 
 scp -q build/rmweb-wpeqt "$DUSER@$HOST:/home/root/rmweb/bin/rmweb-wpeqt"
 
-ssh "$DUSER@$HOST" "MODE='$MODE' URL='$URL' SHOW_SECS='${SHOW_SECS:-40}' RMWEB_AUTOPAGE_MS='${RMWEB_AUTOPAGE_MS:-}' WEBKIT_DEBUG='${WEBKIT_DEBUG:-}' RMWEB_FULL_EVERY='${RMWEB_FULL_EVERY:-}' RMWEB_DEBUG_TAP='${RMWEB_DEBUG_TAP:-}' RMWEB_DEBUG_NAV='${RMWEB_DEBUG_NAV:-}' RMWEB_JIT='${RMWEB_JIT:-}' RMWEB_JSC_OPTS='${RMWEB_JSC_OPTS:-}' RMWEB_BLOCK='${RMWEB_BLOCK:-}' RMWEB_SIMPLE_QML='${RMWEB_SIMPLE_QML:-}' RMWEB_QUICK_BACKEND='${RMWEB_QUICK_BACKEND:-}' RMWEB_GRAB_MS='${RMWEB_GRAB_MS:-}' RMWEB_MANUAL_PRESENT='${RMWEB_MANUAL_PRESENT:-}' RMWEB_PRESENT_DWELL='${RMWEB_PRESENT_DWELL:-}' bash -s" <<'EOS'
+ssh "$DUSER@$HOST" "MODE='$MODE' URL='$URL' SHOW_SECS='${SHOW_SECS:-40}' RMWEB_AUTOPAGE_MS='${RMWEB_AUTOPAGE_MS:-}' WEBKIT_DEBUG='${WEBKIT_DEBUG:-}' RMWEB_FULL_EVERY='${RMWEB_FULL_EVERY:-}' RMWEB_DEBUG_TAP='${RMWEB_DEBUG_TAP:-}' RMWEB_DEBUG_NAV='${RMWEB_DEBUG_NAV:-}' RMWEB_JIT='${RMWEB_JIT:-}' RMWEB_JSC_OPTS='${RMWEB_JSC_OPTS:-}' RMWEB_BLOCK='${RMWEB_BLOCK:-}' RMWEB_SIMPLE_QML='${RMWEB_SIMPLE_QML:-}' RMWEB_QUICK_BACKEND='${RMWEB_QUICK_BACKEND:-}' RMWEB_GRAB_MS='${RMWEB_GRAB_MS:-}' RMWEB_MANUAL_PRESENT='${RMWEB_MANUAL_PRESENT:-}' RMWEB_PRESENT_DWELL='${RMWEB_PRESENT_DWELL:-}' RMWEB_DPR='${RMWEB_DPR:-}' bash -s" <<'EOS'
 set -e
 R=/home/root/rmweb
 # WPE spawns helpers from the baked /usr/libexec/wpe-webkit-2.0 and / is read-only -> overlay it.
@@ -67,6 +67,7 @@ if [ "$MODE" = show ]; then
   export QT_PLUGIN_PATH="$R/plugins:${QT_PLUGIN_PATH:-/usr/lib/plugins}"
   export RMWEB_AUTOPAGE_MS   # diagnostic: if set, the app auto-turns pages at this interval (ms)
   export RMWEB_PRESENT_DWELL # A6: min present spacing (ms) for the frameSwapped-gated serializer
+  export RMWEB_DPR           # readability: device-pixel-ratio (CSS viewport = panel/dpr); ~2.0 = readable
   export RMWEB_FULL_EVERY    # e-ink: full colour anti-ghost flash every N page-turns (<=0 = grayscale only, least flicker)
   export RMWEB_DEBUG_TAP     # diagnostic: fire one synthetic click into the debug box (touch->mouse bridge proof)
   export RMWEB_DEBUG_NAV     # diagnostic: drive a load B -> goBack -> goForward sequence to verify navigation
