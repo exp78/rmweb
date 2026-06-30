@@ -357,7 +357,7 @@ private:
                 "m.style.cssText='position:fixed;left:-9999px;top:0';document.body.appendChild(m);}"
                 "m.textContent=((+m.textContent||0)+1);window.scrollY",
                 static_cast<int>(m->dy));
-            webkit_web_view_evaluate_javascript(self->m_view, js, -1, nullptr, nullptr, nullptr,
+            webkit_web_view_evaluate_javascript(self->m_view, js, -1, nullptr, nullptr, self->m_cancel,
                                                 &WpeEngine::onJsDone, self);
             g_free(js);
             qInfo("[t] pageBy(%d) @%.0fms", static_cast<int>(m->dy), msSince(self->m_startUs));
@@ -365,13 +365,22 @@ private:
         return G_SOURCE_REMOVE;
     }
 
-    static void onJsDone(GObject *obj, GAsyncResult *res, gpointer data) {
-        auto *self = static_cast<WpeEngine*>(data);
+    // Finish an evaluate_javascript call: returns the JSCValue (caller unrefs) or nullptr; sets *cancelled
+    // when the engine is tearing down (m_cancel fired) so the caller touches nothing (self may be gone).
+    static JSCValue *finishJsEval(GObject *obj, GAsyncResult *res, bool *cancelled) {
+        *cancelled = false;
         GError *err = nullptr;
         JSCValue *v = webkit_web_view_evaluate_javascript_finish(WEBKIT_WEB_VIEW(obj), res, &err);
+        if (err && g_error_matches(err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) { *cancelled = true; g_clear_error(&err); return nullptr; }
+        if (!v) g_clear_error(&err);
+        return v;
+    }
+    static void onJsDone(GObject *obj, GAsyncResult *res, gpointer data) {
+        bool cancelled; JSCValue *v = finishJsEval(obj, res, &cancelled);
+        if (cancelled) return;
+        auto *self = static_cast<WpeEngine*>(data);
         double scrollY = -1;
         if (v) { if (jsc_value_is_number(v)) scrollY = jsc_value_to_double(v); g_object_unref(v); }
-        else g_clear_error(&err);
         if (self) qInfo("[t] page JS done scrollY=%.0f @%.0fms", scrollY, msSince(self->m_startUs));
     }
 
@@ -416,13 +425,11 @@ private:
                                             &WpeEngine::onReaderableChecked, this);
     }
     static void onReaderableChecked(GObject *obj, GAsyncResult *res, gpointer data) {
-        GError *err = nullptr;
-        JSCValue *v = webkit_web_view_evaluate_javascript_finish(WEBKIT_WEB_VIEW(obj), res, &err);
-        if (err && g_error_matches(err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) { g_clear_error(&err); return; }
+        bool cancelled; JSCValue *v = finishJsEval(obj, res, &cancelled);
+        if (cancelled) return;
         auto *self = static_cast<WpeEngine*>(data);
         bool can = false;
         if (v) { if (jsc_value_is_boolean(v)) can = jsc_value_to_boolean(v); g_object_unref(v); }
-        else g_clear_error(&err);
         if (!self) return;
         qInfo("[reader] readerable=%d", can);
         Q_EMIT self->readerableChanged(can);
@@ -490,6 +497,7 @@ private:
         if (ev == WEBKIT_LOAD_STARTED) {
             self->m_loadGen++;                          // invalidate any pending render-check from a prior load
             self->m_renderFailedState = false;
+            self->m_lastNonWhite = 0;                   // no frames yet => blank until onBuffer proves otherwise
             qInfo("[t] load started @%.0fms", msSince(self->m_startUs));
             Q_EMIT self->loadingChanged(true);
             Q_EMIT self->renderFailed(false);           // new load -> clear any "couldn't render" notice
@@ -581,9 +589,10 @@ private:
         for (int yy = 0; yy < h; yy += 40) {
             const uchar *row = pix + static_cast<gsize>(yy) * stride;
             for (int xx = 0; xx < w; xx += 40) {
-                const uchar b = row[xx * 4];
-                sig = (sig ^ b) * 16777619u;
-                if (b < 245) ++nonWhite;              // non-white sample => the page painted visible content
+                const uchar *px = row + xx * 4;        // BGRA: [0]=B [1]=G [2]=R — fingerprint on luminance,
+                const uchar lum = static_cast<uchar>((px[2] * 299u + px[1] * 587u + px[0] * 114u) / 1000u);
+                sig = (sig ^ lum) * 16777619u;         // not one channel (else red<->green frames look identical)
+                if (lum < 245) ++nonWhite;             // darker-than-white sample => the page painted content
             }
         }
         self->m_lastNonWhite = nonWhite;              // latest frame's content density (low => ~blank render)
@@ -656,84 +665,12 @@ public:
         const qreal w = width(), h = height();
         if (!m_img.isNull()) p->drawImage(QRectF(0, 0, w, h), m_img);
         else                 p->fillRect(QRectF(0, 0, w, h), Qt::white);
-        // "Working hard" indicator while a page loads (over the frame, below the chrome bar): an hourglass +
-        // "Загрузка NN%" from the real load progress — so a slow/blank heavy page reads as busy, not frozen.
-        if (m_loading && !m_renderFailed) {   // a never-finishing blank SPA stays "loading" -> notice wins
-            const QString lbl = QStringLiteral("Загрузка %1%").arg(int(m_loadProgress * 100));
-            QFont lf = p->font(); lf.setPixelSize(40); p->setFont(lf);
-            const qreal tw = p->fontMetrics().horizontalAdvance(lbl);
-            const qreal iconW = 34, pad = 30, gap = 18, bh = 96, bw = pad + iconW + gap + tw + pad;
-            const qreal bx = (w - bw) / 2, by = kBarH + 50, ix = bx + pad, iy = by + (bh - 48) / 2;
-            p->setPen(Qt::black); p->setBrush(Qt::white);
-            p->drawRoundedRect(QRectF(bx, by, bw, bh), 18, 18);
-            QPolygonF top, bot;                                          // hourglass = two triangles
-            top << QPointF(ix, iy) << QPointF(ix + iconW, iy) << QPointF(ix + iconW / 2, iy + 24);
-            bot << QPointF(ix + iconW / 2, iy + 24) << QPointF(ix, iy + 48) << QPointF(ix + iconW, iy + 48);
-            p->setBrush(Qt::black); p->drawPolygon(top); p->drawPolygon(bot);
-            p->setBrush(Qt::NoBrush); p->setPen(Qt::black);
-            p->drawText(QRectF(ix + iconW + gap, by, tw + 6, bh), Qt::AlignVCenter | Qt::AlignLeft, lbl);
-        }
-        else if (m_renderFailed) {
-            // Load finished but the page rendered ~nothing (a heavy JS app the CPU can't run). Tell the user;
-            // options (cloud reader, etc.) come later. A "(!)" badge + two lines, centred in the upper third.
-            const QString t1 = QStringLiteral("Не удалось отобразить страницу");
-            const QString t2 = QStringLiteral("тяжёлый сайт или веб-приложение");
-            QFont f1 = p->font(); f1.setPixelSize(46);
-            QFont f2 = p->font(); f2.setPixelSize(34);
-            p->setFont(f1); const qreal w1 = p->fontMetrics().horizontalAdvance(t1);
-            p->setFont(f2); const qreal w2 = p->fontMetrics().horizontalAdvance(t2);
-            const qreal icon = 64, padX = 44, gap = 30, textW = qMax(w1, w2), bh = 210;
-            const qreal bw = padX + icon + gap + textW + padX, bx = (w - bw) / 2, by = h * 0.30;
-            p->setPen(Qt::black); p->setBrush(Qt::white);
-            p->drawRoundedRect(QRectF(bx, by, bw, bh), 20, 20);
-            const qreal cx = bx + padX + icon / 2, cy = by + bh / 2;       // warning icon: a circle with "!"
-            QPen wp(Qt::black); wp.setWidth(4); p->setPen(wp); p->setBrush(Qt::NoBrush);
-            p->drawEllipse(QPointF(cx, cy), icon / 2, icon / 2);
-            QFont fi = f1; fi.setBold(true); p->setFont(fi); p->setPen(Qt::black);
-            p->drawText(QRectF(cx - icon / 2, cy - icon / 2, icon, icon), Qt::AlignCenter, "!");
-            const qreal tx = bx + padX + icon + gap;
-            p->setFont(f1); p->setPen(Qt::black);
-            p->drawText(QRectF(tx, by + 44, textW, 60), Qt::AlignLeft | Qt::AlignVCenter, t1);
-            p->setFont(f2); p->setPen(QColor(90, 90, 90));
-            p->drawText(QRectF(tx, by + 116, textW, 50), Qt::AlignLeft | Qt::AlignVCenter, t2);
-            p->setPen(Qt::black);
-        }
-        if (!m_chromeOn) return;
-        // B2: the browser chrome is painted straight into the WpeView's frame — this is what reaches the
-        // e-ink panel (QtQuick chrome does NOT composite over it; see docs/research/epaper-chrome-compositing.md).
-        p->fillRect(QRectF(0, 0, w, kBarH), Qt::white);
-        p->fillRect(QRectF(0, kBarH - 3, w, 3), Qt::black);
-        QFont bf = p->font(); bf.setPixelSize(44); p->setFont(bf);
-        auto btn = [&](qreal x0, qreal x1, const QString &t, bool on) {
-            p->setPen(on ? Qt::black : QColor(170, 170, 170));
-            p->drawText(QRectF(x0, 0, x1 - x0, kBarH), Qt::AlignCenter, t);
-        };
-        btn(0,      kBackX, "Back", m_canBack);
-        btn(kBackX, kFwdX,  "Fwd",  m_canFwd);
-        btn(kFwdX,  kRelX,  m_loading ? "Stop" : "Reload", true);
-        const qreal rx = w - kReaderW;
-        QFont af = p->font(); af.setPixelSize(34); p->setFont(af); p->setPen(Qt::black);
-        const QString addrText = m_editing ? (m_editBuf + "|") : m_addr;   // editing -> typed buffer + caret
-        const auto elide = m_editing ? Qt::ElideLeft : Qt::ElideRight;     // keep the caret end visible while typing
-        const QString a = p->fontMetrics().elidedText(addrText, elide, int(rx - kRelX - 40));
-        p->drawText(QRectF(kRelX + 20, 0, rx - kRelX - 40, kBarH), Qt::AlignVCenter, a);
-        // Reader toggle: inverted (black fill, white text) when active; greyed when the page isn't an article.
-        QFont rf = p->font(); rf.setPixelSize(40); p->setFont(rf);
-        if (m_readerMode) { p->fillRect(QRectF(rx, 6, kReaderW - 6, kBarH - 12), Qt::black); p->setPen(Qt::white); }
-        else              { p->setPen(m_readerable ? Qt::black : QColor(170, 170, 170)); }
-        p->drawText(QRectF(rx, 0, kReaderW, kBarH), Qt::AlignCenter, "Reader");
-        if (!m_editing) return;
-        // On-screen URL keyboard, drawn into the frame (B2: a QtQuick keyboard does not composite here). Taps
-        // are routed to handleEditTap() (keyboard.h hitKey) by the tap router in main() while editing.
-        p->fillRect(QRectF(0, kKbTopY, w, h - kKbTopY), Qt::white);
-        p->fillRect(QRectF(0, kKbTopY, w, 2), Qt::black);
-        QFont kf = p->font(); kf.setPixelSize(44); p->setFont(kf);
-        for (const rmweb::Key &k : m_keys) {
-            const QRectF r(k.x, k.y, k.w, k.h);
-            if (k.kind == rmweb::KeyKind::Go) { p->fillRect(r.adjusted(3, 3, -3, -3), Qt::black); p->setPen(Qt::white); }
-            else { p->setPen(Qt::black); p->drawRect(r.adjusted(2, 2, -2, -2)); }
-            p->drawText(r, Qt::AlignCenter, QString::fromStdString(k.label));
-        }
+        if (m_loading && !m_renderFailed) drawLoadingBadge(p, w);    // a never-finishing blank SPA stays
+        else if (m_renderFailed)          drawRenderNotice(p, w, h); // "loading" -> notice wins over the badge
+        if (!m_chromeOn) return;                                     // reader-fullscreen: nothing below the bar
+        drawChromeBar(p, w);
+        if (!m_editing) return;          // the keyboard shows only during URL entry (entered via the Address
+        drawKeyboard(p, w, h);           // hit, which needs chrome on -> editing always implies the bar shows)
     }
     // Hit-test a tap against the chrome bar (panel px); returns the control, or None (off / below the bar).
     enum Hit { None, Back, Fwd, Reload, Address, Reader };
@@ -800,6 +737,84 @@ private Q_SLOTS:
         else releaseGate();
     }
 private:
+    // --- B2 frame painters (called by paint(); kept here so paint() stays a short orchestrator) -------------
+    // "Working hard" indicator while a page loads: an hourglass + "Загрузка NN%" from the real load progress.
+    void drawLoadingBadge(QPainter *p, qreal w) const {
+        const QString lbl = QStringLiteral("Загрузка %1%").arg(int(m_loadProgress * 100));
+        QFont lf = p->font(); lf.setPixelSize(40); p->setFont(lf);
+        const qreal tw = p->fontMetrics().horizontalAdvance(lbl);
+        const qreal iconW = 34, pad = 30, gap = 18, bh = 96, bw = pad + iconW + gap + tw + pad;
+        const qreal bx = (w - bw) / 2, by = kBarH + 50, ix = bx + pad, iy = by + (bh - 48) / 2;
+        p->setPen(Qt::black); p->setBrush(Qt::white);
+        p->drawRoundedRect(QRectF(bx, by, bw, bh), 18, 18);
+        QPolygonF top, bot;                                          // hourglass = two triangles
+        top << QPointF(ix, iy) << QPointF(ix + iconW, iy) << QPointF(ix + iconW / 2, iy + 24);
+        bot << QPointF(ix + iconW / 2, iy + 24) << QPointF(ix, iy + 48) << QPointF(ix + iconW, iy + 48);
+        p->setBrush(Qt::black); p->drawPolygon(top); p->drawPolygon(bot);
+        p->setBrush(Qt::NoBrush); p->setPen(Qt::black);
+        p->drawText(QRectF(ix + iconW + gap, by, tw + 6, bh), Qt::AlignVCenter | Qt::AlignLeft, lbl);
+    }
+    // Load finished but the page rendered ~nothing (a heavy JS app the CPU can't run). "(!)" + two lines.
+    void drawRenderNotice(QPainter *p, qreal w, qreal h) const {
+        const QString t1 = QStringLiteral("Не удалось отобразить страницу");
+        const QString t2 = QStringLiteral("тяжёлый сайт или веб-приложение");
+        QFont f1 = p->font(); f1.setPixelSize(46);
+        QFont f2 = p->font(); f2.setPixelSize(34);
+        p->setFont(f1); const qreal w1 = p->fontMetrics().horizontalAdvance(t1);
+        p->setFont(f2); const qreal w2 = p->fontMetrics().horizontalAdvance(t2);
+        const qreal icon = 64, padX = 44, gap = 30, textW = qMax(w1, w2), bh = 210;
+        const qreal bw = padX + icon + gap + textW + padX, bx = (w - bw) / 2, by = h * 0.30;
+        p->setPen(Qt::black); p->setBrush(Qt::white);
+        p->drawRoundedRect(QRectF(bx, by, bw, bh), 20, 20);
+        const qreal cx = bx + padX + icon / 2, cy = by + bh / 2;       // warning icon: a circle with "!"
+        QPen wp(Qt::black); wp.setWidth(4); p->setPen(wp); p->setBrush(Qt::NoBrush);
+        p->drawEllipse(QPointF(cx, cy), icon / 2, icon / 2);
+        QFont fi = f1; fi.setBold(true); p->setFont(fi); p->setPen(Qt::black);
+        p->drawText(QRectF(cx - icon / 2, cy - icon / 2, icon, icon), Qt::AlignCenter, "!");
+        const qreal tx = bx + padX + icon + gap;
+        p->setFont(f1); p->setPen(Qt::black);
+        p->drawText(QRectF(tx, by + 44, textW, 60), Qt::AlignLeft | Qt::AlignVCenter, t1);
+        p->setFont(f2); p->setPen(QColor(90, 90, 90));
+        p->drawText(QRectF(tx, by + 116, textW, 50), Qt::AlignLeft | Qt::AlignVCenter, t2);
+        p->setPen(Qt::black);
+    }
+    // B2 browser chrome painted straight into the frame (QtQuick chrome does NOT composite over it; see
+    // docs/research/epaper-chrome-compositing.md): Back/Fwd/Reload + address(+caret while editing) + Reader.
+    void drawChromeBar(QPainter *p, qreal w) const {
+        p->fillRect(QRectF(0, 0, w, kBarH), Qt::white);
+        p->fillRect(QRectF(0, kBarH - 3, w, 3), Qt::black);
+        QFont bf = p->font(); bf.setPixelSize(44); p->setFont(bf);
+        auto btn = [&](qreal x0, qreal x1, const QString &t, bool on) {
+            p->setPen(on ? Qt::black : QColor(170, 170, 170));
+            p->drawText(QRectF(x0, 0, x1 - x0, kBarH), Qt::AlignCenter, t);
+        };
+        btn(0,      kBackX, "Back", m_canBack);
+        btn(kBackX, kFwdX,  "Fwd",  m_canFwd);
+        btn(kFwdX,  kRelX,  m_loading ? "Stop" : "Reload", true);
+        const qreal rx = w - kReaderW;
+        QFont af = p->font(); af.setPixelSize(34); p->setFont(af); p->setPen(Qt::black);
+        const QString addrText = m_editing ? (m_editBuf + "|") : m_addr;   // editing -> typed buffer + caret
+        const auto elide = m_editing ? Qt::ElideLeft : Qt::ElideRight;     // keep the caret end visible while typing
+        const QString a = p->fontMetrics().elidedText(addrText, elide, int(rx - kRelX - 40));
+        p->drawText(QRectF(kRelX + 20, 0, rx - kRelX - 40, kBarH), Qt::AlignVCenter, a);
+        // Reader toggle: inverted (black fill, white text) when active; greyed when the page isn't an article.
+        QFont rf = p->font(); rf.setPixelSize(40); p->setFont(rf);
+        if (m_readerMode) { p->fillRect(QRectF(rx, 6, kReaderW - 6, kBarH - 12), Qt::black); p->setPen(Qt::white); }
+        else              { p->setPen(m_readerable ? Qt::black : QColor(170, 170, 170)); }
+        p->drawText(QRectF(rx, 0, kReaderW, kBarH), Qt::AlignCenter, "Reader");
+    }
+    // On-screen URL keyboard, drawn into the frame (B2). Taps -> handleEditTap() (keyboard.h hitKey) via main().
+    void drawKeyboard(QPainter *p, qreal w, qreal h) const {
+        p->fillRect(QRectF(0, kKbTopY, w, h - kKbTopY), Qt::white);
+        p->fillRect(QRectF(0, kKbTopY, w, 2), Qt::black);
+        QFont kf = p->font(); kf.setPixelSize(44); p->setFont(kf);
+        for (const rmweb::Key &k : m_keys) {
+            const QRectF r(k.x, k.y, k.w, k.h);
+            if (k.kind == rmweb::KeyKind::Go) { p->fillRect(r.adjusted(3, 3, -3, -3), Qt::black); p->setPen(Qt::white); }
+            else { p->setPen(Qt::black); p->drawRect(r.adjusted(2, 2, -2, -2)); }
+            p->drawText(r, Qt::AlignCenter, QString::fromStdString(k.label));
+        }
+    }
     void schedule() { if (m_inFlight) m_dirty = true; else presentNext(); }
     void presentNext() {
         if (m_hasPending) { m_img = m_pending; m_hasPending = false; }   // newest frame (else re-present current)
