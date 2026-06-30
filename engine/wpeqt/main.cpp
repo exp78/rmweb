@@ -37,6 +37,7 @@
 #include <QPainter>
 #include <QPolygonF>
 #include <QElapsedTimer>
+#include <cmath>
 #include <qpa/qwindowsysteminterface.h>   // QWindowSystemInterface — inject taps into QtQuick's input path
 
 #include <wpe/webkit.h>
@@ -800,33 +801,63 @@ private:
         p->setPen(Qt::black);
     }
     // B2 browser chrome painted straight into the frame (QtQuick chrome does NOT composite over it; see
-    // docs/research/epaper-chrome-compositing.md): Back/Fwd/Reload + address(+caret while editing) + Reader.
+    // docs/research/epaper-chrome-compositing.md): Back/Fwd/Reload icons + address(+caret) + A-/A+ + Reader.
     void drawChromeBar(QPainter *p, qreal w) const {
         p->fillRect(QRectF(0, 0, w, kBarH), Qt::white);
         p->fillRect(QRectF(0, kBarH - 3, w, 3), Qt::black);
-        QFont bf = p->font(); bf.setPixelSize(44); p->setFont(bf);
-        auto btn = [&](qreal x0, qreal x1, const QString &t, bool on) {
-            p->setPen(on ? Qt::black : QColor(170, 170, 170));
-            p->drawText(QRectF(x0, 0, x1 - x0, kBarH), Qt::AlignCenter, t);
-        };
-        btn(0,      kBackX, "Back", m_canBack);
-        btn(kBackX, kFwdX,  "Fwd",  m_canFwd);
-        btn(kFwdX,  kRelX,  m_loading ? "Stop" : "Reload", true);
+        const qreal cy = kBarH / 2.0;
+        auto pen = [&](bool on) { p->setPen(on ? Qt::black : QColor(170, 170, 170)); p->setBrush(Qt::NoBrush); };
+        pen(m_canBack); iconBack(p, kBackX / 2.0, cy);
+        pen(m_canFwd);  iconFwd (p, (kBackX + kFwdX) / 2.0, cy);
+        pen(true);      m_loading ? iconStop(p, (kFwdX + kRelX) / 2.0, cy) : iconReload(p, (kFwdX + kRelX) / 2.0, cy);
         const qreal readerX = w - kReaderW, zInX = readerX - kZoomW, zOutX = zInX - kZoomW;
         QFont af = p->font(); af.setPixelSize(34); p->setFont(af); p->setPen(Qt::black);
         const QString addrText = m_editing ? (m_editBuf + "|") : m_addr;   // editing -> typed buffer + caret
         const auto elide = m_editing ? Qt::ElideLeft : Qt::ElideRight;     // keep the caret end visible while typing
         const QString a = p->fontMetrics().elidedText(addrText, elide, int(zOutX - kRelX - 40));
         p->drawText(QRectF(kRelX + 20, 0, zOutX - kRelX - 40, kBarH), Qt::AlignVCenter, a);
-        // Text size -/+ : page zoom in normal mode, reader font in reader mode (engine.zoomBy via the tap router).
-        QFont zf = p->font(); zf.setPixelSize(40); p->setFont(zf); p->setPen(Qt::black);
+        // Text size -/+ : page zoom normally, reader font in reader mode ("A-"/"A+" is the conventional size icon).
+        QFont zf = p->font(); zf.setPixelSize(40); zf.setBold(true); p->setFont(zf); p->setPen(Qt::black);
         p->drawText(QRectF(zOutX, 0, kZoomW, kBarH), Qt::AlignCenter, "A-");
         p->drawText(QRectF(zInX,  0, kZoomW, kBarH), Qt::AlignCenter, "A+");
-        // Reader toggle: inverted (black fill, white text) when active; greyed when the page isn't an article.
-        QFont rf = p->font(); rf.setPixelSize(40); p->setFont(rf);
-        if (m_readerMode) { p->fillRect(QRectF(readerX, 6, kReaderW - 6, kBarH - 12), Qt::black); p->setPen(Qt::white); }
-        else              { p->setPen(m_readerable ? Qt::black : QColor(170, 170, 170)); }
-        p->drawText(QRectF(readerX, 0, kReaderW, kBarH), Qt::AlignCenter, "Reader");
+        // Reader (document icon): inverted on a black pill when active; greyed when the page isn't an article.
+        const qreal rcx = readerX + kReaderW / 2.0;
+        if (m_readerMode) {
+            p->setBrush(Qt::black); p->setPen(Qt::NoPen);
+            p->drawRoundedRect(QRectF(readerX + 20, 12, kReaderW - 40, kBarH - 24), 12, 12);
+            p->setPen(Qt::white); p->setBrush(Qt::NoBrush); iconReader(p, rcx, cy);
+        } else { pen(m_readerable); iconReader(p, rcx, cy); }
+    }
+    // --- Vector chrome icons (drawn, not font glyphs -> crisp + font-independent on e-ink). Caller sets pen colour.
+    void iconBack(QPainter *p, qreal cx, qreal cy) const { drawArrow(p, cx, cy, -1); }
+    void iconFwd (QPainter *p, qreal cx, qreal cy) const { drawArrow(p, cx, cy, +1); }
+    void drawArrow(QPainter *p, qreal cx, qreal cy, int dir) const {       // dir: -1 left (Back), +1 right (Fwd)
+        QPen pn = p->pen(); pn.setWidthF(5); pn.setCapStyle(Qt::RoundCap); pn.setJoinStyle(Qt::RoundJoin); p->setPen(pn);
+        const qreal hw = 21, hd = 12, tip = cx + dir * hw;
+        p->drawLine(QPointF(cx - dir * hw, cy), QPointF(tip, cy));
+        p->drawLine(QPointF(tip, cy), QPointF(tip - dir * hd, cy - hd));
+        p->drawLine(QPointF(tip, cy), QPointF(tip - dir * hd, cy + hd));
+    }
+    void iconStop(QPainter *p, qreal cx, qreal cy) const {                 // filled rounded square
+        p->setBrush(p->pen().color()); p->setPen(Qt::NoPen);
+        p->drawRoundedRect(QRectF(cx - 15, cy - 15, 30, 30), 5, 5);
+        p->setBrush(Qt::NoBrush);
+    }
+    void iconReload(QPainter *p, qreal cx, qreal cy) const {               // ~circular arrow with an arrowhead
+        QPen pn = p->pen(); pn.setWidthF(5); pn.setCapStyle(Qt::RoundCap); p->setPen(pn); p->setBrush(Qt::NoBrush);
+        const qreal r = 16, deg = 55, pi = 3.14159265358979;
+        p->drawArc(QRectF(cx - r, cy - r, 2 * r, 2 * r), int(deg * 16), 280 * 16);   // gap at the lower-right
+        const qreal a = deg * pi / 180.0;                                 // arrowhead at the upper-right arc end
+        const QPointF t(cx + r * std::cos(a), cy - r * std::sin(a));
+        QPolygonF head; head << t << QPointF(t.x() - 15, t.y() - 4) << QPointF(t.x() - 2, t.y() - 17);
+        p->setBrush(p->pen().color()); p->setPen(Qt::NoPen); p->drawPolygon(head); p->setBrush(Qt::NoBrush);
+    }
+    void iconReader(QPainter *p, qreal cx, qreal cy) const {               // a document with text lines
+        QPen pn = p->pen(); pn.setWidthF(4); pn.setJoinStyle(Qt::RoundJoin); p->setPen(pn); p->setBrush(Qt::NoBrush);
+        const qreal hw = 15, ht = 20;
+        p->drawRoundedRect(QRectF(cx - hw, cy - ht, 2 * hw, 2 * ht), 4, 4);
+        QPen lp = p->pen(); lp.setWidthF(3); p->setPen(lp);
+        for (int i = -1; i <= 1; ++i) p->drawLine(QPointF(cx - hw + 7, cy + i * 9), QPointF(cx + hw - 7, cy + i * 9));
     }
     // On-screen URL keyboard, drawn into the frame (B2). Taps -> handleEditTap() (keyboard.h hitKey) via main().
     void drawKeyboard(QPainter *p, qreal w, qreal h) const {
