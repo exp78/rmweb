@@ -129,6 +129,14 @@ static const char *kMobileUA =
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
     "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
+// A tiny USER stylesheet injected into every page (raw browsing): keep wide media/tables from overflowing the
+// narrow e-ink viewport, so nothing forces a horizontal scroll. User-level !important beats the site's author
+// rules. (Reader mode is the fuller answer for article layout.) Toggle off with RMWEB_SITECSS=0.
+static const char *kSiteCss =
+    "img,video,iframe,table,pre,figure,canvas{max-width:100%!important}"
+    "img,video{height:auto!important}"
+    "html,body{overflow-x:hidden!important}";
+
 // --- Reader mode (Mozilla Readability, vendored under engine/wpeqt/reader) -------------------------------
 // On "Reader" we inject Readability.js + the glue below: it parses the article off a DOM *clone* (Readability
 // mutates what it's given) and replaces the page with ONE clean, reflowed column styled by kReaderCss — so it
@@ -227,6 +235,7 @@ Q_SIGNALS:
     void readerModeChanged(bool on);               // reader view applied/cleared -> toolbar button state
     void readerableChanged(bool can);              // current page looks like an article -> enable Reader
     void renderFailed(bool failed);                // load finished but the page rendered ~blank (heavy SPA)
+    void linkMissed();                             // a content tap hit no link -> GUI falls back to chrome toggle
 
 public Q_SLOTS:
     void start() {
@@ -243,6 +252,14 @@ public Q_SLOTS:
         qInfo("[t] display connected @%.0fms", msSince(m_startUs));
 
         m_ucm = webkit_user_content_manager_new();   // holds the content-blocking filter (added async below)
+        // Readability user stylesheet (kSiteCss): keep wide media/tables from forcing horizontal scroll on the
+        // narrow viewport. Applies to every page; reader mode replaces the DOM so it's harmless there too.
+        if (qgetenv("RMWEB_SITECSS") != "0") {
+            WebKitUserStyleSheet *ss = webkit_user_style_sheet_new(
+                kSiteCss, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_STYLE_LEVEL_USER, nullptr, nullptr);
+            webkit_user_content_manager_add_style_sheet(m_ucm, ss);
+            webkit_user_style_sheet_unref(ss);
+        }
         m_view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW,
             "display", display, "user-content-manager", m_ucm, nullptr));
         WPEView *wpeView = webkit_web_view_get_wpe_view(m_view);
@@ -251,6 +268,7 @@ public Q_SLOTS:
         // LOGICAL; the buffer is logical*dpr (~= the physical panel), so the display path is unchanged.
         // Tunable via RMWEB_DPR (default 1.0 = current behaviour; ~2.0 = readable). See zoom-readability.md.
         double dpr = qgetenv("RMWEB_DPR").toDouble(); if (dpr < 1.0 || dpr > 3.0) dpr = 2.0;
+        m_dpr = dpr;   // panel-px -> CSS-px factor, for elementFromPoint link hit-testing on a tap
         const int logW = static_cast<int>(m_w / dpr), logH = static_cast<int>(m_h / dpr);
         // Size the toplevel first (headless default is 0x0 -> empty paints), then force a real
         // visible FALSE->TRUE transition so the view MAPS (WebKit only keeps painting while mapped).
@@ -326,6 +344,21 @@ public Q_SLOTS:
     void goForward() { marshalToCtx([this] { if (m_view && webkit_web_view_can_go_forward(m_view)) webkit_web_view_go_forward(m_view); }); }
     void reload()    { marshalToCtx([this] { if (m_view) webkit_web_view_reload(m_view); }); }
     void stopLoading() { marshalToCtx([this] { if (m_view) webkit_web_view_stop_loading(m_view); }); }
+    // Follow a link at panel (x,y) if there is one (probe via elementFromPoint at CSS px = panel/dpr); else emit
+    // linkMissed so the GUI falls back to the chrome toggle. This is what makes us a browser: tap a link to go.
+    void tapLink(int x, int y) {
+        marshalToCtx([this, x, y] {
+            if (!m_view) return;
+            // Probe the tap point + a small neighbourhood (finger taps on tiny inline links are imprecise on e-ink).
+            gchar *js = g_strdup_printf(
+                "(function(x,y){var p=[[0,0],[0,-12],[0,12],[-12,0],[12,0],[-22,0],[22,0],[0,-22],[0,22]];"
+                "for(var i=0;i<p.length;i++){var e=document.elementFromPoint(x+p[i][0],y+p[i][1]);"
+                "var a=e&&e.closest?e.closest('a[href]'):0;if(a&&a.href){location.href=a.href;return true;}}return false;})(%d,%d)",
+                int(x / m_dpr), int(y / m_dpr));
+            webkit_web_view_evaluate_javascript(m_view, js, -1, nullptr, nullptr, m_cancel, &WpeEngine::onTapLink, this);
+            g_free(js);
+        });
+    }
     void pageNext()  { pageBy(kPageStepPx); }   // façade page-turn (wraps the scroll+repaint in pageBy)
     void pagePrev()  { pageBy(-kPageStepPx); }
     // Text size -/+ (the A-/A+ chrome buttons): page zoom in normal mode, reader font in reader mode.
@@ -404,7 +437,16 @@ private:
         if (v) { if (jsc_value_is_number(v)) scrollY = jsc_value_to_double(v); g_object_unref(v); }
         if (self) qInfo("[t] page JS done scrollY=%.0f @%.0fms", scrollY, msSince(self->m_startUs));
     }
-
+    static void onTapLink(GObject *obj, GAsyncResult *res, gpointer data) {
+        bool cancelled; JSCValue *v = finishJsEval(obj, res, &cancelled);
+        if (cancelled) return;
+        auto *self = static_cast<WpeEngine*>(data);
+        bool followed = false;
+        if (v) { if (jsc_value_is_boolean(v)) followed = jsc_value_to_boolean(v); g_object_unref(v); }
+        if (!self) return;
+        qInfo("[link] followed=%d", followed);
+        if (!followed) Q_EMIT self->linkMissed();
+    }
     // Build the apply script: the vendored Readability lib + our glue, with the reader CSS (font size from
     // RMWEB_READER_FONT, default 38) inlined. Injected in one shot so all symbols share the same scope.
     std::string buildReaderApplyJs() {
@@ -657,6 +699,7 @@ private:
     bool m_readerApplying = false; // an applyReader() JS eval is in flight (gates re-entrant Reader taps)
     std::string m_readabilityJs;   // vendored Readability.js, lazily slurped + cached
     std::string m_readerableJs;    // vendored isProbablyReaderable, lazily slurped + cached
+    double m_dpr = 2.0;            // panel-px -> CSS-px divisor (for elementFromPoint link hit-testing)
     double m_zoom = 1.0;           // page zoom level (A-/A+ in normal mode; webkit_web_view_set_zoom_level)
     int m_readerFont = 38;         // reader column font px (A-/A+ in reader mode; RMWEB_READER_FONT default)
 };
@@ -1187,14 +1230,20 @@ int main(int argc, char **argv) {
                     case WpeView::Address: view->beginEdit();  return;   // open the on-screen URL keyboard
                     case WpeView::None:    break;             // tap not on the bar
                 }
-                if (view->chromeOn()) { view->setChromeOn(false); return; }   // tap page -> hide chrome (read)
-                switch (rmweb::classifyTap(x, y, kPanelW, kPanelH)) {         // chrome hidden -> tap-zones
-                    case rmweb::TapAction::Next:         engine.pageNext(); break;
-                    case rmweb::TapAction::Prev:         engine.pagePrev(); break;
-                    case rmweb::TapAction::SummonChrome:
-                    case rmweb::TapAction::Content:      view->setChromeOn(true); break;
+                // Reading (chrome hidden): edge/top zones are fast gestures; the centre falls through to a link probe.
+                if (!view->chromeOn()) {
+                    switch (rmweb::classifyTap(x, y, kPanelW, kPanelH)) {
+                        case rmweb::TapAction::Next:         engine.pageNext();       return;
+                        case rmweb::TapAction::Prev:         engine.pagePrev();       return;
+                        case rmweb::TapAction::SummonChrome: view->setChromeOn(true); return;
+                        case rmweb::TapAction::Content:      break;   // centre -> probe for a link below
+                    }
                 }
+                engine.tapLink(x, y);   // follow a link at (x,y); on a miss engine.linkMissed -> toggle chrome
             }, Qt::QueuedConnection);
+        // A content tap with no link underneath -> the old behaviour: toggle the chrome (show <-> hide).
+        QObject::connect(&engine, &WpeEngine::linkMissed, win ? win : qobject_cast<QObject*>(&app),
+            [view]{ view->setChromeOn(!view->chromeOn()); }, Qt::QueuedConnection);
         touchThread.start();
 
         // DIAG: GUI event-loop heartbeat. If these "[gui] tick" lines stop, the GUI thread is blocked
