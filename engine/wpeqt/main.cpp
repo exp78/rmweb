@@ -737,14 +737,16 @@ public:
         drawKeyboard(p, w, h);           // hit, which needs chrome on -> editing always implies the bar shows)
     }
     // Hit-test a tap against the chrome bar (panel px); returns the control, or None (off / below the bar).
-    enum Hit { None, Back, Fwd, Reload, Address, ZoomOut, ZoomIn, Reader };
+    enum Hit { None, Back, Fwd, Reload, Address, ZoomOut, ZoomIn, Reader, Power };
     Hit hitChrome(int x, int y) const {
         if (!m_chromeOn || y >= kBarH) return None;
-        const int readerX = int(width()) - kReaderW;       // right cluster:  A- | A+ | Reader
+        const int powerX  = int(width()) - kPowerW;         // right cluster:  A- | A+ | Reader | Power
+        const int readerX = powerX - kReaderW;
         const int zInX = readerX - kZoomW, zOutX = zInX - kZoomW;
         if (x < kBackX)   return Back;
         if (x < kFwdX)    return Fwd;
         if (x < kRelX)    return Reload;
+        if (x >= powerX)  return Power;
         if (x >= readerX) return Reader;
         if (x >= zInX)    return ZoomIn;
         if (x >= zOutX)   return ZoomOut;
@@ -855,7 +857,7 @@ private:
         pen(m_canBack); iconBack(p, kBackX / 2.0, cy);
         pen(m_canFwd);  iconFwd (p, (kBackX + kFwdX) / 2.0, cy);
         pen(true);      m_loading ? iconStop(p, (kFwdX + kRelX) / 2.0, cy) : iconReload(p, (kFwdX + kRelX) / 2.0, cy);
-        const qreal readerX = w - kReaderW, zInX = readerX - kZoomW, zOutX = zInX - kZoomW;
+        const qreal powerX = w - kPowerW, readerX = powerX - kReaderW, zInX = readerX - kZoomW, zOutX = zInX - kZoomW;
         QFont af = p->font(); af.setPixelSize(34); p->setFont(af); p->setPen(Qt::black);
         const QString addrText = m_editing ? (m_editBuf + "|") : m_addr;   // editing -> typed buffer + caret
         const auto elide = m_editing ? Qt::ElideLeft : Qt::ElideRight;     // keep the caret end visible while typing
@@ -872,6 +874,13 @@ private:
             p->drawRoundedRect(QRectF(readerX + 20, 12, kReaderW - 40, kBarH - 24), 12, 12);
             p->setPen(Qt::white); p->setBrush(Qt::NoBrush); iconReader(p, rcx, cy);
         } else { pen(m_readerable); iconReader(p, rcx, cy); }
+        pen(true); iconPower(p, powerX + kPowerW / 2.0, cy);   // exit to the reMarkable menu
+    }
+    void iconPower(QPainter *p, qreal cx, qreal cy) const {                // power symbol: ring (gap at top) + bar
+        QPen pn = p->pen(); pn.setWidthF(5); pn.setCapStyle(Qt::RoundCap); p->setPen(pn); p->setBrush(Qt::NoBrush);
+        const qreal r = 17;
+        p->drawArc(QRectF(cx - r, cy - r, 2 * r, 2 * r), 120 * 16, 300 * 16);   // open at the top
+        p->drawLine(QPointF(cx, cy - r - 5), QPointF(cx, cy - 1));              // the "I" through the gap
     }
     // --- Vector chrome icons (drawn, not font glyphs -> crisp + font-independent on e-ink). Caller sets pen colour.
     void iconBack(QPainter *p, qreal cx, qreal cy) const { drawArrow(p, cx, cy, -1); }
@@ -935,7 +944,7 @@ private:
     QElapsedTimer m_clock;
     QTimer m_fallback;
     // chrome state, painted into the frame (reader-first: shown on launch, hidden by a content tap).
-    static const int kBarH = 104, kBackX = 170, kFwdX = 340, kRelX = 560, kReaderW = 190, kZoomW = 120;
+    static const int kBarH = 104, kBackX = 170, kFwdX = 340, kRelX = 560, kReaderW = 190, kZoomW = 120, kPowerW = 130;
     bool m_chromeOn = true, m_canBack = false, m_canFwd = false, m_loading = false;
     qreal m_loadProgress = 0.0;          // 0..1 estimated load progress (drives the loading badge)
     bool m_renderFailed = false;         // load finished but the page is ~blank (heavy SPA) -> show a notice
@@ -1228,6 +1237,7 @@ int main(int argc, char **argv) {
                     case WpeView::ZoomOut: engine.zoomBy(-1);   return;
                     case WpeView::ZoomIn:  engine.zoomBy(+1);   return;
                     case WpeView::Address: view->beginEdit();  return;   // open the on-screen URL keyboard
+                    case WpeView::Power:   std::_Exit(0);      return;   // quit to menu; launcher restores xochitl
                     case WpeView::None:    break;             // tap not on the bar
                 }
                 // Reading (chrome hidden): edge/top zones are fast gestures; the centre falls through to a link probe.
