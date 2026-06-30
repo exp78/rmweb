@@ -531,15 +531,17 @@ class WpeView : public QQuickPaintedItem {
     Q_OBJECT
 public:
     explicit WpeView(QQuickItem *parent = nullptr) : QQuickPaintedItem(parent) {
-        // Coalesce + rate-limit frames to ONE present per ~2 s. The vendor epaper present (EPRenderLoop)
-        // DEADLOCKS when a 2nd present overlaps the 1st (the panel refresh holds the framebuffer mutex);
-        // static/simple pages only worked because they emit a single frame. So present the LATEST frame,
-        // never faster than the panel can refresh -> presents never overlap -> no deadlock, content shows.
-        m_present.setSingleShot(true);
-        connect(&m_present, &QTimer::timeout, this, [this]{
-            m_img = m_pending; m_clock.restart(); update();
-            qInfo("[t][gui] present (rate-limited) %dx%d", m_img.width(), m_img.height());
-        });
+        // Completion-gated present serializer. The vendor epaper present (EPRenderLoop swapBuffers)
+        // DEADLOCKS if a 2nd present overlaps the 1st (the panel refresh holds the framebuffer mutex),
+        // so we present the LATEST frame and never start the next until the previous one has finished:
+        // we wait for QQuickWindow::frameSwapped (the present returned) PLUS a small waveform dwell
+        // (swapBuffers can return before the e-ink refresh physically settles). This replaces the old
+        // fixed 2 s gap, restoring ~120-250 ms turns. A fallback timer releases the gate if frameSwapped
+        // never arrives (e.g. the backend doesn't emit it) -> degrades to the old cadence, never freezes.
+        if (const int v = qEnvironmentVariableIntValue("RMWEB_PRESENT_DWELL"); v > 0) m_dwellMs = v;
+        m_fallback.setSingleShot(true);
+        connect(&m_fallback, &QTimer::timeout, this,
+                [this]{ qInfo("[t][gui] present fallback-release (no frameSwapped)"); releaseGate(); });
     }
     void paint(QPainter *p) override {
         if (m_img.isNull()) return;
@@ -547,16 +549,41 @@ public:
     }
 public Q_SLOTS:
     void setImage(const QImage &img) {
-        m_pending = img;
-        if (m_present.isActive()) return;                              // a present is already scheduled
-        const int since = m_clock.isValid() ? int(m_clock.elapsed()) : kPresentGapMs;
-        m_present.start(since >= kPresentGapMs ? 0 : kPresentGapMs - since);
+        m_pending = img; m_hasPending = true;
+        if (!m_inFlight) presentNext();          // idle -> present immediately; else coalesce to latest
+    }
+protected:
+    void itemChange(ItemChange ch, const ItemChangeData &d) override {
+        if (ch == ItemSceneChange && d.window)   // frameSwapped fires after the panel present returns
+            connect(d.window, &QQuickWindow::frameSwapped, this, &WpeView::onFrameSwapped, Qt::UniqueConnection);
+        QQuickPaintedItem::itemChange(ch, d);
+    }
+private Q_SLOTS:
+    void onFrameSwapped() {
+        if (!m_inFlight) return;
+        const int ms = m_clock.isValid() ? int(m_clock.elapsed()) : 0;
+        qInfo("[t][gui] frameSwapped @%dms (dwell=%d)", ms, m_dwellMs);
+        const int wait = m_dwellMs - ms;         // hold the rest of the dwell so the next can't overlap
+        if (wait > 0) QTimer::singleShot(wait, this, [this]{ releaseGate(); });
+        else releaseGate();
     }
 private:
-    static const int kPresentGapMs = 2000;   // >= panel refresh, so successive presents never overlap
+    void presentNext() {
+        m_img = m_pending; m_hasPending = false; m_inFlight = true;
+        m_clock.restart();
+        update();                                // -> scene render -> EPRenderLoop present to panel
+        m_fallback.start(kFallbackMs);
+    }
+    void releaseGate() {
+        m_fallback.stop(); m_inFlight = false;
+        if (m_hasPending) presentNext();         // a newer frame queued while presenting -> show it now
+    }
+    static const int kFallbackMs = 2500;         // release even if frameSwapped never fires (>= worst refresh)
+    int m_dwellMs = 200;                         // min present spacing, ms (RMWEB_PRESENT_DWELL overrides)
+    bool m_hasPending = false, m_inFlight = false;
     QImage m_img, m_pending;
     QElapsedTimer m_clock;
-    QTimer m_present;
+    QTimer m_fallback;
 };
 
 // ---------------------------------------------------------------------------
