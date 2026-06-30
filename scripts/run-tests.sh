@@ -12,4 +12,18 @@ for t in tests/*_test.cpp; do
     echo "FAIL (compile): $name"; fail=1
   fi
 done
+# Shell unit tests (launcher / installer no-brick logic) — pure bash + stubbed systemctl/mount.
+for t in tests/*_test.sh; do
+  [ -e "$t" ] || continue
+  name="$(basename "$t" .sh)"
+  if bash "$t"; then :; else echo "FAIL (shell): $name"; fail=1; fi
+done
+# Optional lint of the shipped shell (skip cleanly if shellcheck isn't installed).
+if command -v shellcheck >/dev/null 2>&1; then
+  for f in device/rmweb device/rmweb-env.sh device/install.sh; do
+    [ -e "$f" ] && { shellcheck -s sh "$f" || { echo "FAIL (shellcheck): $f"; fail=1; }; }
+  done
+else
+  echo "[tests] shellcheck not found — skipping shell lint"
+fi
 if [ "$fail" = 0 ]; then echo "ALL HOST TESTS OK"; else echo "SOME TESTS FAILED"; exit 1; fi
