@@ -11,7 +11,7 @@ MODE="${1:-save}"; URL="${2:-}"
 
 scp -q build/rmweb-wpeqt "$DUSER@$HOST:/home/root/rmweb/bin/rmweb-wpeqt"
 
-ssh "$DUSER@$HOST" "MODE='$MODE' URL='$URL' SHOW_SECS='${SHOW_SECS:-40}' RMWEB_AUTOPAGE_MS='${RMWEB_AUTOPAGE_MS:-}' WEBKIT_DEBUG='${WEBKIT_DEBUG:-}' RMWEB_FULL_EVERY='${RMWEB_FULL_EVERY:-}' RMWEB_DEBUG_TAP='${RMWEB_DEBUG_TAP:-}' RMWEB_DEBUG_NAV='${RMWEB_DEBUG_NAV:-}' RMWEB_JIT='${RMWEB_JIT:-}' RMWEB_JSC_OPTS='${RMWEB_JSC_OPTS:-}' RMWEB_BLOCK='${RMWEB_BLOCK:-}' RMWEB_SIMPLE_QML='${RMWEB_SIMPLE_QML:-}' RMWEB_QUICK_BACKEND='${RMWEB_QUICK_BACKEND:-}' RMWEB_GRAB_MS='${RMWEB_GRAB_MS:-}' RMWEB_MANUAL_PRESENT='${RMWEB_MANUAL_PRESENT:-}' RMWEB_PRESENT_DWELL='${RMWEB_PRESENT_DWELL:-}' RMWEB_DPR='${RMWEB_DPR:-}' bash -s" <<'EOS'
+ssh "$DUSER@$HOST" "MODE='$MODE' URL='$URL' SHOW_SECS='${SHOW_SECS:-40}' RMWEB_AUTOPAGE_MS='${RMWEB_AUTOPAGE_MS:-}' WEBKIT_DEBUG='${WEBKIT_DEBUG:-}' RMWEB_FULL_EVERY='${RMWEB_FULL_EVERY:-}' RMWEB_DEBUG_TAP='${RMWEB_DEBUG_TAP:-}' RMWEB_DEBUG_NAV='${RMWEB_DEBUG_NAV:-}' RMWEB_DEBUG_READER='${RMWEB_DEBUG_READER:-}' RMWEB_JIT='${RMWEB_JIT:-}' RMWEB_JSC_OPTS='${RMWEB_JSC_OPTS:-}' RMWEB_BLOCK='${RMWEB_BLOCK:-}' RMWEB_SIMPLE_QML='${RMWEB_SIMPLE_QML:-}' RMWEB_QUICK_BACKEND='${RMWEB_QUICK_BACKEND:-}' RMWEB_GRAB_MS='${RMWEB_GRAB_MS:-}' RMWEB_MANUAL_PRESENT='${RMWEB_MANUAL_PRESENT:-}' RMWEB_PRESENT_DWELL='${RMWEB_PRESENT_DWELL:-}' RMWEB_DPR='${RMWEB_DPR:-}' RMWEB_READER_FONT='${RMWEB_READER_FONT:-}' bash -s" <<'EOS'
 set -e
 R=/home/root/rmweb
 # WPE spawns helpers from the baked /usr/libexec/wpe-webkit-2.0 and / is read-only -> overlay it.
@@ -68,9 +68,11 @@ if [ "$MODE" = show ]; then
   export RMWEB_AUTOPAGE_MS   # diagnostic: if set, the app auto-turns pages at this interval (ms)
   export RMWEB_PRESENT_DWELL # A6: min present spacing (ms) for the frameSwapped-gated serializer
   export RMWEB_DPR           # readability: device-pixel-ratio (CSS viewport = panel/dpr); ~2.0 = readable
+  export RMWEB_READER_FONT   # reader mode: base font size px in the reflowed column (default 38; live-tunable)
   export RMWEB_FULL_EVERY    # e-ink: full colour anti-ghost flash every N page-turns (<=0 = grayscale only, least flicker)
   export RMWEB_DEBUG_TAP     # diagnostic: fire one synthetic click into the debug box (touch->mouse bridge proof)
   export RMWEB_DEBUG_NAV     # diagnostic: drive a load B -> goBack -> goForward sequence to verify navigation
+  export RMWEB_DEBUG_READER  # diagnostic: auto-toggle reader mode once after N ms (verify reflow w/ RMWEB_GRAB_MS)
   # Force WebKit's 60 fps software vblank timer instead of the DRM hardware vblank: the headless view may
   # still bind the e-ink panel's DRM CRTC, whose vblank ticks at the panel's slow rate (~0.16 Hz => the
   # observed ~6 s render cadence). The timer monitor decouples WebKit's frame clock from the panel.
