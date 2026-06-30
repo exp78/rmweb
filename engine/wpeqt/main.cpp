@@ -119,6 +119,14 @@ static const char *kBlockRules =
      "{\"trigger\":{\"url-filter\":\".*\",\"resource-type\":[\"media\",\"font\"],\"load-type\":[\"third-party\"]},"
        "\"action\":{\"type\":\"block\"}}]";
 
+// User-Agent: present as mainstream mobile Safari so sites serve their lighter MOBILE layout (less JS, built
+// for weak devices — a big win on this CPU-only device) and to dodge some anti-bot walls. WPE is a WebKit/
+// Safari-family engine, so an iPhone Safari UA is an honest fit. Override via RMWEB_UA ("off" = the WPE
+// default; any other non-empty value sets that exact string).
+static const char *kMobileUA =
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+
 // --- Reader mode (Mozilla Readability, vendored under engine/wpeqt/reader) -------------------------------
 // On "Reader" we inject Readability.js + the glue below: it parses the article off a DOM *clone* (Readability
 // mutates what it's given) and replaces the page with ONE clean, reflowed column styled by kReaderCss — so it
@@ -258,6 +266,14 @@ public Q_SLOTS:
         g_signal_connect(m_view, "notify::estimated-load-progress", G_CALLBACK(&WpeEngine::onProgress), this);
         g_signal_connect(m_view, "load-failed-with-tls-errors", G_CALLBACK(&WpeEngine::onTlsError), this);
         g_signal_connect(m_view, "web-process-terminated", G_CALLBACK(&WpeEngine::onWebProcessTerminated), this);
+
+        // User-Agent: serve lighter mobile pages (see kMobileUA), set before the first load. RMWEB_UA=off
+        // keeps the WPE default; any other non-empty RMWEB_UA overrides the string (for A/B testing).
+        if (const char *uaEnv = getenv("RMWEB_UA"); !(uaEnv && std::string(uaEnv) == "off")) {
+            const char *ua = (uaEnv && *uaEnv) ? uaEnv : kMobileUA;
+            webkit_settings_set_user_agent(webkit_web_view_get_settings(m_view), ua);
+            qInfo("[ua] %s", ua);
+        }
 
         // Content blocking (RMWEB_BLOCK!=0, default on): compile the WKContentRuleList, add it, THEN load —
         // so it applies to the very first resource loads. The compile is async; loadInitial() runs from its
