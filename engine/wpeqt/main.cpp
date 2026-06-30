@@ -35,6 +35,7 @@
 #include <QQuickPaintedItem>
 #include <QQuickWindow>
 #include <QPainter>
+#include <QPolygonF>
 #include <QElapsedTimer>
 #include <qpa/qwindowsysteminterface.h>   // QWindowSystemInterface — inject taps into QtQuick's input path
 
@@ -611,6 +612,23 @@ public:
         const qreal w = width(), h = height();
         if (!m_img.isNull()) p->drawImage(QRectF(0, 0, w, h), m_img);
         else                 p->fillRect(QRectF(0, 0, w, h), Qt::white);
+        // "Working hard" indicator while a page loads (over the frame, below the chrome bar): an hourglass +
+        // "Загрузка NN%" from the real load progress — so a slow/blank heavy page reads as busy, not frozen.
+        if (m_loading) {
+            const QString lbl = QStringLiteral("Загрузка %1%").arg(int(m_loadProgress * 100));
+            QFont lf = p->font(); lf.setPixelSize(40); p->setFont(lf);
+            const qreal tw = p->fontMetrics().horizontalAdvance(lbl);
+            const qreal iconW = 34, pad = 30, gap = 18, bh = 96, bw = pad + iconW + gap + tw + pad;
+            const qreal bx = (w - bw) / 2, by = kBarH + 50, ix = bx + pad, iy = by + (bh - 48) / 2;
+            p->setPen(Qt::black); p->setBrush(Qt::white);
+            p->drawRoundedRect(QRectF(bx, by, bw, bh), 18, 18);
+            QPolygonF top, bot;                                          // hourglass = two triangles
+            top << QPointF(ix, iy) << QPointF(ix + iconW, iy) << QPointF(ix + iconW / 2, iy + 24);
+            bot << QPointF(ix + iconW / 2, iy + 24) << QPointF(ix, iy + 48) << QPointF(ix + iconW, iy + 48);
+            p->setBrush(Qt::black); p->drawPolygon(top); p->drawPolygon(bot);
+            p->setBrush(Qt::NoBrush); p->setPen(Qt::black);
+            p->drawText(QRectF(ix + iconW + gap, by, tw + 6, bh), Qt::AlignVCenter | Qt::AlignLeft, lbl);
+        }
         if (!m_chromeOn) return;
         // B2: the browser chrome is painted straight into the WpeView's frame — this is what reaches the
         // e-ink panel (QtQuick chrome does NOT composite over it; see docs/research/epaper-chrome-compositing.md).
@@ -688,7 +706,11 @@ public Q_SLOTS:
     void setChromeOn(bool v)       { if (v != m_chromeOn) { m_chromeOn = v; schedule(); } }
     void setCanBack(bool v)        { if (v != m_canBack)  { m_canBack  = v; schedule(); } }
     void setCanFwd(bool v)         { if (v != m_canFwd)   { m_canFwd   = v; schedule(); } }
-    void setLoading(bool v)        { if (v != m_loading)  { m_loading  = v; schedule(); } }
+    void setLoading(bool v)        { if (v != m_loading)  { m_loading  = v; if (v) m_loadProgress = 0.0; schedule(); } }
+    void setLoadProgress(double p) {                       // throttle repaints to ~10% steps (limit e-ink flicker)
+        const bool step = int(p * 10) != int(m_loadProgress * 10);
+        m_loadProgress = p; if (step && m_loading) schedule();
+    }
     void setAddr(const QString &s) { if (s != m_addr)     { m_addr     = s; schedule(); } }
     void setReaderMode(bool v)     { if (v != m_readerMode)  { m_readerMode  = v; schedule(); } }
     void setReaderable(bool v)     { if (v != m_readerable) { m_readerable = v; schedule(); } }
@@ -729,6 +751,7 @@ private:
     // chrome state, painted into the frame (reader-first: shown on launch, hidden by a content tap).
     static const int kBarH = 104, kBackX = 170, kFwdX = 340, kRelX = 560, kReaderW = 190;
     bool m_chromeOn = true, m_canBack = false, m_canFwd = false, m_loading = false;
+    qreal m_loadProgress = 0.0;          // 0..1 estimated load progress (drives the loading badge)
     bool m_readerMode = false, m_readerable = false;
     QString m_addr;
     bool m_editing = false;             // URL-entry mode: the on-screen keyboard is shown over the page
@@ -975,6 +998,7 @@ int main(int argc, char **argv) {
         QObject::connect(&engine, &WpeEngine::canGoBack,      view, &WpeView::setCanBack);
         QObject::connect(&engine, &WpeEngine::canGoForward,   view, &WpeView::setCanFwd);
         QObject::connect(&engine, &WpeEngine::loadingChanged, view, &WpeView::setLoading);
+        QObject::connect(&engine, &WpeEngine::loadProgressChanged, view, &WpeView::setLoadProgress);
         QObject::connect(&engine, &WpeEngine::urlChanged,     view, &WpeView::setAddr);
         QObject::connect(&engine, &WpeEngine::readerModeChanged, view, &WpeView::setReaderMode);
         QObject::connect(&engine, &WpeEngine::readerableChanged, view, &WpeView::setReaderable);
