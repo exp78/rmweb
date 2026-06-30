@@ -18,6 +18,7 @@ cp "$ROOT_REPO/device/rmweb" "$ROOT_REPO/device/rmweb-env.sh" "$ROOT_REPO/device
 RMWEB_ROOT="$R" sh "$INSTALL" >/dev/null 2>&1; rc=$?
 [ "$rc" = 0 ] || { echo "  FAIL: expected success, got rc=$rc"; fails=$((fails+1)); }
 [ -f "$R/VERSION" ] || { echo "  FAIL: VERSION not written"; fails=$((fails+1)); }
+[ "$(cat "$R/VERSION")" = "0.5.0" ] || { echo "  FAIL: VERSION content wrong (expected 0.5.0)"; fails=$((fails+1)); }
 [ -x "$R/rmweb" ]   || { echo "  FAIL: launcher not executable"; fails=$((fails+1)); }
 
 if [ "$fails" = 0 ]; then echo "install_test: OK"; else echo "install_test: $fails FAIL"; exit 1; fi
