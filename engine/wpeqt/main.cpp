@@ -201,7 +201,9 @@ public:
     WpeEngine(QString url, int w, int h)
         : m_url(std::move(url)), m_w(w), m_h(h),
           m_ctx(g_main_context_new()), m_loop(g_main_loop_new(m_ctx, FALSE)),
-          m_cancel(g_cancellable_new()) {}
+          m_cancel(g_cancellable_new()) {
+        if (const char *e = getenv("RMWEB_READER_FONT")) { const int v = atoi(e); if (v >= 16 && v <= 96) m_readerFont = v; }
+    }
 
     ~WpeEngine() {
         // main() joins the worker thread before destroying us, so the loop has exited and m_view is already
@@ -323,6 +325,22 @@ public Q_SLOTS:
     void stopLoading() { marshalToCtx([this] { if (m_view) webkit_web_view_stop_loading(m_view); }); }
     void pageNext()  { pageBy(kPageStepPx); }   // façade page-turn (wraps the scroll+repaint in pageBy)
     void pagePrev()  { pageBy(-kPageStepPx); }
+    // Text size -/+ (the A-/A+ chrome buttons): page zoom in normal mode, reader font in reader mode.
+    void zoomBy(int dir) {
+        marshalToCtx([this, dir] {
+            if (!m_view) return;
+            if (m_readerMode) {
+                m_readerFont = std::clamp(m_readerFont + (dir > 0 ? 4 : -4), 22, 64);   // reader column font px
+                gchar *js = g_strdup_printf("var r=document.getElementById('rmweb-reader');if(r)r.style.fontSize='%dpx';", m_readerFont);
+                webkit_web_view_evaluate_javascript(m_view, js, -1, nullptr, nullptr, m_cancel, nullptr, nullptr);
+                g_free(js);
+            } else {
+                m_zoom = std::clamp(m_zoom * (dir > 0 ? 1.2 : 1.0 / 1.2), 0.5, 3.0);     // page zoom level
+                webkit_web_view_set_zoom_level(m_view, m_zoom);
+            }
+            qInfo("[zoom] reader=%d zoom=%.2f font=%d", m_readerMode, m_zoom, m_readerFont);
+        });
+    }
     // Reader mode: inject Readability + reflow the article into one clean column; toggle off = reload original.
     void toggleReader() {
         marshalToCtx([this] {
@@ -387,9 +405,7 @@ private:
     // Build the apply script: the vendored Readability lib + our glue, with the reader CSS (font size from
     // RMWEB_READER_FONT, default 38) inlined. Injected in one shot so all symbols share the same scope.
     std::string buildReaderApplyJs() {
-        int fs = 38;
-        if (const char *e = getenv("RMWEB_READER_FONT")) { const int v = atoi(e); if (v >= 16 && v <= 96) fs = v; }
-        std::string css = kReaderCss;  replaceAll(css, "__FS__", std::to_string(fs));
+        std::string css = kReaderCss;  replaceAll(css, "__FS__", std::to_string(m_readerFont));   // A-/A+ adjustable
         std::string glue = kReaderGlue; replaceAll(glue, "__CSS__", css);
         return m_readabilityJs + "\n" + glue;
     }
@@ -638,6 +654,8 @@ private:
     bool m_readerApplying = false; // an applyReader() JS eval is in flight (gates re-entrant Reader taps)
     std::string m_readabilityJs;   // vendored Readability.js, lazily slurped + cached
     std::string m_readerableJs;    // vendored isProbablyReaderable, lazily slurped + cached
+    double m_zoom = 1.0;           // page zoom level (A-/A+ in normal mode; webkit_web_view_set_zoom_level)
+    int m_readerFont = 38;         // reader column font px (A-/A+ in reader mode; RMWEB_READER_FONT default)
 };
 
 // ---------------------------------------------------------------------------
@@ -673,14 +691,17 @@ public:
         drawKeyboard(p, w, h);           // hit, which needs chrome on -> editing always implies the bar shows)
     }
     // Hit-test a tap against the chrome bar (panel px); returns the control, or None (off / below the bar).
-    enum Hit { None, Back, Fwd, Reload, Address, Reader };
+    enum Hit { None, Back, Fwd, Reload, Address, ZoomOut, ZoomIn, Reader };
     Hit hitChrome(int x, int y) const {
         if (!m_chromeOn || y >= kBarH) return None;
-        const int rx = int(width()) - kReaderW;            // Reader button occupies the right edge of the bar
-        if (x < kBackX) return Back;
-        if (x < kFwdX)  return Fwd;
-        if (x < kRelX)  return Reload;
-        if (x >= rx)    return Reader;
+        const int readerX = int(width()) - kReaderW;       // right cluster:  A- | A+ | Reader
+        const int zInX = readerX - kZoomW, zOutX = zInX - kZoomW;
+        if (x < kBackX)   return Back;
+        if (x < kFwdX)    return Fwd;
+        if (x < kRelX)    return Reload;
+        if (x >= readerX) return Reader;
+        if (x >= zInX)    return ZoomIn;
+        if (x >= zOutX)   return ZoomOut;
         return Address;
     }
     bool chromeOn()  const { return m_chromeOn; }
@@ -791,17 +812,21 @@ private:
         btn(0,      kBackX, "Back", m_canBack);
         btn(kBackX, kFwdX,  "Fwd",  m_canFwd);
         btn(kFwdX,  kRelX,  m_loading ? "Stop" : "Reload", true);
-        const qreal rx = w - kReaderW;
+        const qreal readerX = w - kReaderW, zInX = readerX - kZoomW, zOutX = zInX - kZoomW;
         QFont af = p->font(); af.setPixelSize(34); p->setFont(af); p->setPen(Qt::black);
         const QString addrText = m_editing ? (m_editBuf + "|") : m_addr;   // editing -> typed buffer + caret
         const auto elide = m_editing ? Qt::ElideLeft : Qt::ElideRight;     // keep the caret end visible while typing
-        const QString a = p->fontMetrics().elidedText(addrText, elide, int(rx - kRelX - 40));
-        p->drawText(QRectF(kRelX + 20, 0, rx - kRelX - 40, kBarH), Qt::AlignVCenter, a);
+        const QString a = p->fontMetrics().elidedText(addrText, elide, int(zOutX - kRelX - 40));
+        p->drawText(QRectF(kRelX + 20, 0, zOutX - kRelX - 40, kBarH), Qt::AlignVCenter, a);
+        // Text size -/+ : page zoom in normal mode, reader font in reader mode (engine.zoomBy via the tap router).
+        QFont zf = p->font(); zf.setPixelSize(40); p->setFont(zf); p->setPen(Qt::black);
+        p->drawText(QRectF(zOutX, 0, kZoomW, kBarH), Qt::AlignCenter, "A-");
+        p->drawText(QRectF(zInX,  0, kZoomW, kBarH), Qt::AlignCenter, "A+");
         // Reader toggle: inverted (black fill, white text) when active; greyed when the page isn't an article.
         QFont rf = p->font(); rf.setPixelSize(40); p->setFont(rf);
-        if (m_readerMode) { p->fillRect(QRectF(rx, 6, kReaderW - 6, kBarH - 12), Qt::black); p->setPen(Qt::white); }
+        if (m_readerMode) { p->fillRect(QRectF(readerX, 6, kReaderW - 6, kBarH - 12), Qt::black); p->setPen(Qt::white); }
         else              { p->setPen(m_readerable ? Qt::black : QColor(170, 170, 170)); }
-        p->drawText(QRectF(rx, 0, kReaderW, kBarH), Qt::AlignCenter, "Reader");
+        p->drawText(QRectF(readerX, 0, kReaderW, kBarH), Qt::AlignCenter, "Reader");
     }
     // On-screen URL keyboard, drawn into the frame (B2). Taps -> handleEditTap() (keyboard.h hitKey) via main().
     void drawKeyboard(QPainter *p, qreal w, qreal h) const {
@@ -834,7 +859,7 @@ private:
     QElapsedTimer m_clock;
     QTimer m_fallback;
     // chrome state, painted into the frame (reader-first: shown on launch, hidden by a content tap).
-    static const int kBarH = 104, kBackX = 170, kFwdX = 340, kRelX = 560, kReaderW = 190;
+    static const int kBarH = 104, kBackX = 170, kFwdX = 340, kRelX = 560, kReaderW = 190, kZoomW = 120;
     bool m_chromeOn = true, m_canBack = false, m_canFwd = false, m_loading = false;
     qreal m_loadProgress = 0.0;          // 0..1 estimated load progress (drives the loading badge)
     bool m_renderFailed = false;         // load finished but the page is ~blank (heavy SPA) -> show a notice
@@ -1124,6 +1149,8 @@ int main(int argc, char **argv) {
                     case WpeView::Fwd:     engine.goForward(); return;
                     case WpeView::Reload:  view->isLoading() ? engine.stopLoading() : engine.reload(); return;
                     case WpeView::Reader:  engine.toggleReader(); return;
+                    case WpeView::ZoomOut: engine.zoomBy(-1);   return;
+                    case WpeView::ZoomIn:  engine.zoomBy(+1);   return;
                     case WpeView::Address: view->beginEdit();  return;   // open the on-screen URL keyboard
                     case WpeView::None:    break;             // tap not on the bar
                 }
@@ -1162,6 +1189,11 @@ int main(int argc, char **argv) {
         // DIAG (RMWEB_DEBUG_KB): open the URL keyboard after N ms so its rendering can be grabbed (RMWEB_GRAB_MS).
         if (const int kbMs = qEnvironmentVariableIntValue("RMWEB_DEBUG_KB"); kbMs > 0) {
             QTimer::singleShot(kbMs, &app, [view]{ qInfo("[kb][dbg] beginEdit"); view->beginEdit(); });
+        }
+
+        // DIAG (RMWEB_DEBUG_ZOOM): bump page zoom +2 steps after N ms (verify the scaling with RMWEB_GRAB_MS).
+        if (const int zMs = qEnvironmentVariableIntValue("RMWEB_DEBUG_ZOOM"); zMs > 0) {
+            QTimer::singleShot(zMs, &app, [&engine]{ qInfo("[zoom][dbg] +2"); engine.zoomBy(1); engine.zoomBy(1); });
         }
 
         // Diagnostic: auto-page every RMWEB_AUTOPAGE_MS ms (alternating direction) through the exact same
