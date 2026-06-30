@@ -1,0 +1,54 @@
+#!/bin/sh
+# rmweb — production launcher (runs ON the reMarkable Paper Pro). Stops xochitl, sets up the WPE runtime,
+# runs the browser, and ALWAYS restores xochitl on exit (clean quit, crash, or kill) so the device is never
+# left with a blank panel. See docs/superpowers/specs/2026-06-30-rmweb-phase5-packaging-design.md.
+set -u
+R="${RMWEB_ROOT:-/home/root/rmweb}"
+LOCK="$R/.lock"
+LOG="$R/rmweb.log"
+log(){ echo "[rmweb] $*" >> "$LOG"; }
+
+DONE=
+cleanup(){
+  [ -n "$DONE" ] && return; DONE=1
+  [ -n "${APP:-}" ] && kill "$APP" 2>/dev/null                       # stop the app if still running
+  for n in rmweb-wpeqt WPEWebProcess WPENetworkProc WPEGPUProcess; do # + any lingering WPE subprocesses
+    # shellcheck disable=SC2046
+    # word-splitting is intentional: pgrep returns space-separated PIDs, one kill per PID
+    for p in $(pgrep "$n" 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
+  done
+  [ -n "${STOPPED:-}" ] && { log "restarting xochitl"; systemctl start xochitl; }  # home UI back FIRST
+  [ -n "${MOUNTED:-}" ] && umount /usr/libexec 2>/dev/null
+  rmdir "$LOCK" 2>/dev/null
+}
+trap 'cleanup' EXIT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 130' INT
+
+# Single instance (mkdir is atomic on BusyBox). If the lock exists, another run owns xochitl — bail without
+# touching it (DONE=1 so the EXIT trap's cleanup is a no-op and won't restart xochitl under the other run).
+if ! mkdir "$LOCK" 2>/dev/null; then
+  echo "[rmweb] already running (or stale $LOCK; remove it if no rmweb is running)" >&2
+  DONE=1; exit 1
+fi
+
+log "start"
+if systemctl is-active --quiet xochitl; then log "stopping xochitl"; systemctl stop xochitl && STOPPED=1; fi
+
+# WPE spawns helpers from the baked /usr/libexec/wpe-webkit-2.0 and / is read-only -> overlay it. Drop any
+# stale overlay from a hard-killed prior run first, so we always mount our fresh helpers.
+umount /usr/libexec 2>/dev/null || true
+if [ ! -e /usr/libexec/wpe-webkit-2.0 ]; then
+  rm -rf "$R/ovl"; mkdir -p "$R/ovl/upper/wpe-webkit-2.0" "$R/ovl/work"
+  cp -a "$R/libexec/wpe-webkit-2.0/." "$R/ovl/upper/wpe-webkit-2.0/"
+  mount -t overlay overlay -o lowerdir=/usr/libexec,upperdir="$R/ovl/upper",workdir="$R/ovl/work" /usr/libexec && MOUNTED=1
+fi
+
+. "$R/rmweb-env.sh"
+
+log "launch rmweb-wpeqt $*"
+"$R/bin/rmweb-wpeqt" "$@" >> "$LOG" 2>&1 &
+APP=$!
+wait "$APP"
+log "rmweb-wpeqt exited rc=$?"
+# EXIT trap -> cleanup -> restores xochitl.
