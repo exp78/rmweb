@@ -53,7 +53,7 @@ export JSC_useJIT="${RMWEB_JIT:-0}"   # RMWEB_JIT=1 enables the JIT (works — s
 [ "${RMWEB_JIT:-0}" = 1 ] && export JSC_usePollingTraps=1
 for opt in ${RMWEB_JSC_OPTS:-}; do export "$opt"; done   # extra JSC_* options for experiments (space-separated, word-split safely)
 export RMWEB_BLOCK   # content-blocking: unset/!=0 => on (drop third-party scripts/ads); RMWEB_BLOCK=0 => off
-export RMWEB_UA      # User-Agent: unset => mobile Safari (lighter pages); RMWEB_UA=off => WPE default; else custom
+export RMWEB_UA      # User-Agent: unset => WPE default (renders Wikipedia/content); RMWEB_UA=mobile => mobile layout (heavy JS-apps); else custom string
 
 if [ "$MODE" = show ]; then
   echo "[device] stopping xochitl"; systemctl stop xochitl && STOPPED=1

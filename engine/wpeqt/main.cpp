@@ -121,10 +121,10 @@ static const char *kBlockRules =
      "{\"trigger\":{\"url-filter\":\".*\",\"resource-type\":[\"media\",\"font\"],\"load-type\":[\"third-party\"]},"
        "\"action\":{\"type\":\"block\"}}]";
 
-// User-Agent: present as mainstream mobile Safari so sites serve their lighter MOBILE layout (less JS, built
-// for weak devices — a big win on this CPU-only device) and to dodge some anti-bot walls. WPE is a WebKit/
-// Safari-family engine, so an iPhone Safari UA is an honest fit. Override via RMWEB_UA ("off" = the WPE
-// default; any other non-empty value sets that exact string).
+// Optional mobile User-Agent (opt-in via RMWEB_UA=mobile): makes heavy JS-app sites (e.g. a heavy SPA site) serve their
+// lighter MOBILE layout, which renders where the desktop one stays blank. NOT the default — a mobile UA makes
+// server-rendered content sites (Wikipedia & co.) serve a JS-only mobile skin that paints blank on this CPU
+// engine. iPhone Safari is an honest fit (WPE is WebKit/Safari-family).
 static const char *kMobileUA =
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
     "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
@@ -272,10 +272,12 @@ public Q_SLOTS:
         g_signal_connect(m_view, "load-failed-with-tls-errors", G_CALLBACK(&WpeEngine::onTlsError), this);
         g_signal_connect(m_view, "web-process-terminated", G_CALLBACK(&WpeEngine::onWebProcessTerminated), this);
 
-        // User-Agent: serve lighter mobile pages (see kMobileUA), set before the first load. RMWEB_UA=off
-        // keeps the WPE default; any other non-empty RMWEB_UA overrides the string (for A/B testing).
-        if (const char *uaEnv = getenv("RMWEB_UA"); !(uaEnv && std::string(uaEnv) == "off")) {
-            const char *ua = (uaEnv && *uaEnv) ? uaEnv : kMobileUA;
+        // User-Agent: DEFAULT = WPE's own UA — it renders Wikipedia + server-rendered content sites (our
+        // primary reading targets). A mobile UA makes such sites serve a JS-only mobile skin that paints BLANK
+        // on this CPU engine (verified: Wikipedia blank under any mobile UA). RMWEB_UA=mobile opts into the
+        // lighter mobile layout for heavy JS-app sites (e.g. a heavy SPA site); any other non-empty value = that exact string.
+        if (const char *uaEnv = getenv("RMWEB_UA"); uaEnv && *uaEnv && std::string(uaEnv) != "off") {
+            const char *ua = (std::string(uaEnv) == "mobile") ? kMobileUA : uaEnv;
             webkit_settings_set_user_agent(webkit_web_view_get_settings(m_view), ua);
             qInfo("[ua] %s", ua);
         }
