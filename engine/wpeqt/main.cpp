@@ -53,6 +53,7 @@
 #include <atomic>
 #include <functional>
 #include <string>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <csignal>
@@ -116,6 +117,70 @@ static const char *kBlockRules =
      "{\"trigger\":{\"url-filter\":\".*\",\"resource-type\":[\"media\",\"font\"],\"load-type\":[\"third-party\"]},"
        "\"action\":{\"type\":\"block\"}}]";
 
+// --- Reader mode (Mozilla Readability, vendored under engine/wpeqt/reader) -------------------------------
+// On "Reader" we inject Readability.js + the glue below: it parses the article off a DOM *clone* (Readability
+// mutates what it's given) and replaces the page with ONE clean, reflowed column styled by kReaderCss — so it
+// fits the panel width with no horizontal scroll, big serif text, lots of air. Toggling off just reloads the
+// original page. The vendored JS ships to the device at RMWEB_READER_DIR. See docs/research/zoom-readability.md.
+
+// Read a whole file into a string ("" on failure) — loads the vendored JS at runtime (cached by the caller).
+static std::string slurp(const std::string &path) {
+    FILE *f = fopen(path.c_str(), "rb");
+    if (!f) return std::string();
+    std::string out; char buf[1 << 16]; size_t n;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0) out.append(buf, n);
+    fclose(f);
+    return out;
+}
+static std::string readerDir() {
+    const char *d = getenv("RMWEB_READER_DIR");
+    return (d && *d) ? std::string(d) : std::string("/home/root/rmweb/share/reader");
+}
+static void replaceAll(std::string &s, const std::string &from, const std::string &to) {
+    for (size_t p = 0; (p = s.find(from, p)) != std::string::npos; p += to.size())
+        s.replace(p, from.size(), to);
+}
+// Reader stylesheet (one line, NO double-quotes/backslashes -> safe inside the JS double-quoted string below).
+// Laid out in the DPR-scaled CSS viewport (panel/dpr ~= 810px), so __FS__px is a comfortable e-ink reading size.
+static const char *kReaderCss =
+    "html{background:#fff;-webkit-text-size-adjust:none}body{margin:0;background:#fff}"
+    "#rmweb-reader{max-width:46em;margin:0 auto;padding:1.1em 1.1em 4em;"
+        "font-family:Georgia,'Times New Roman',serif;font-size:__FS__px;line-height:1.6;color:#111;"
+        "word-wrap:break-word;overflow-wrap:break-word}"
+    "#rmweb-reader .rmweb-title{font-size:1.5em;line-height:1.2;margin:0 0 .3em;font-weight:700}"
+    "#rmweb-reader .rmweb-byline{font-size:.7em;color:#555;font-style:italic;margin:0 0 1.4em}"
+    "#rmweb-reader p{margin:0 0 .9em}#rmweb-reader li{margin:.25em 0}"
+    "#rmweb-reader ul,#rmweb-reader ol{margin:0 0 .9em 1.2em;padding:0}"
+    "#rmweb-reader img,#rmweb-reader figure,#rmweb-reader video{max-width:100%;height:auto}"
+    "#rmweb-reader figure{margin:1em 0}#rmweb-reader figcaption{font-size:.7em;color:#555;text-align:center}"
+    "#rmweb-reader h1,#rmweb-reader h2,#rmweb-reader h3{line-height:1.25;margin:1.1em 0 .4em}"
+    "#rmweb-reader h2{font-size:1.25em}#rmweb-reader h3{font-size:1.1em}"
+    "#rmweb-reader a{color:#111;text-decoration:underline}"
+    "#rmweb-reader blockquote{margin:.8em 0;padding-left:.8em;border-left:4px solid #bbb;color:#333}"
+    "#rmweb-reader pre{white-space:pre-wrap;word-wrap:break-word;background:#f3f3f3;padding:.6em;font-size:.8em}"
+    "#rmweb-reader code{font-family:'DejaVu Sans Mono',monospace;font-size:.85em}"
+    "#rmweb-reader hr{border:none;border-top:1px solid #ccc;margin:1.2em 0}"
+    "#rmweb-reader table{max-width:100%;border-collapse:collapse}";
+// Glue: assumes Readability (injected before it) is in scope; returns 'ok' / 'noarticle' / 'error:...'.
+static const char *kReaderGlue = R"JS(
+(function(){
+  try{
+    if(typeof Readability!=='function') return 'noReadability';
+    var art=new Readability(document.cloneNode(true)).parse();
+    if(!art||!art.content) return 'noarticle';
+    function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+    var css="__CSS__";
+    var h='<div id="rmweb-reader"><h1 class="rmweb-title">'+esc(art.title||document.title)+'</h1>';
+    if(art.byline) h+='<p class="rmweb-byline">'+esc(art.byline)+'</p>';
+    h+='<div class="rmweb-content">'+art.content+'</div></div>';
+    document.documentElement.innerHTML='<head><meta charset="utf-8"><style>'+css+'</style></head><body>'+h+'</body>';
+    document.documentElement.setAttribute('data-rmweb-reader','1');
+    window.scrollTo(0,0);
+    return 'ok';
+  }catch(e){return 'error:'+(e&&e.message?e.message:e);}
+})()
+)JS";
+
 // ---------------------------------------------------------------------------
 // WpeEngine — owns all WPE/WebKit objects on its worker thread.
 // ---------------------------------------------------------------------------
@@ -145,6 +210,8 @@ Q_SIGNALS:
     void loadingChanged(bool loading);
     void tlsChanged(bool ok, const QString &host); // false = TLS error -> broken-lock indicator
     void processCrashed();                         // WebProcess died (auto-reload attempted)
+    void readerModeChanged(bool on);               // reader view applied/cleared -> toolbar button state
+    void readerableChanged(bool can);              // current page looks like an article -> enable Reader
 
 public Q_SLOTS:
     void start() {
@@ -250,6 +317,14 @@ public Q_SLOTS:
     void stopLoading() { marshalToCtx([this] { if (m_view) webkit_web_view_stop_loading(m_view); }); }
     void pageNext()  { pageBy(kPageStepPx); }   // façade page-turn (wraps the scroll+repaint in pageBy)
     void pagePrev()  { pageBy(-kPageStepPx); }
+    // Reader mode: inject Readability + reflow the article into one clean column; toggle off = reload original.
+    void toggleReader() {
+        marshalToCtx([this] {
+            if (!m_view) return;
+            if (m_readerMode) { webkit_web_view_reload(m_view); return; }   // off: reload (COMMITTED clears state)
+            applyReader();
+        });
+    }
 
 private:
     // Run fn on the worker thread's GMainContext (g_main_context_invoke_full is MT-safe).
@@ -302,6 +377,51 @@ private:
         if (self) qInfo("[t] page JS done scrollY=%.0f @%.0fms", scrollY, msSince(self->m_startUs));
     }
 
+    // Build the apply script: the vendored Readability lib + our glue, with the reader CSS (font size from
+    // RMWEB_READER_FONT, default 38) inlined. Injected in one shot so all symbols share the same scope.
+    std::string buildReaderApplyJs() {
+        int fs = 38;
+        if (const char *e = getenv("RMWEB_READER_FONT")) { const int v = atoi(e); if (v >= 16 && v <= 96) fs = v; }
+        std::string css = kReaderCss;  replaceAll(css, "__FS__", std::to_string(fs));
+        std::string glue = kReaderGlue; replaceAll(glue, "__CSS__", css);
+        return m_readabilityJs + "\n" + glue;
+    }
+    void applyReader() {
+        if (m_readabilityJs.empty()) m_readabilityJs = slurp(readerDir() + "/Readability.js");
+        if (m_readabilityJs.empty()) { qWarning("[reader] Readability.js missing in %s", readerDir().c_str()); return; }
+        const std::string js = buildReaderApplyJs();
+        webkit_web_view_evaluate_javascript(m_view, js.c_str(), -1, nullptr, nullptr, nullptr,
+                                            &WpeEngine::onReaderApplied, this);
+    }
+    static void onReaderApplied(GObject *obj, GAsyncResult *res, gpointer data) {
+        auto *self = static_cast<WpeEngine*>(data);
+        GError *err = nullptr;
+        JSCValue *v = webkit_web_view_evaluate_javascript_finish(WEBKIT_WEB_VIEW(obj), res, &err);
+        std::string st = "error";
+        if (v) { if (jsc_value_is_string(v)) { char *s = jsc_value_to_string(v); st = s ? s : ""; g_free(s); } g_object_unref(v); }
+        else { st = err ? err->message : "?"; g_clear_error(&err); }
+        if (st == "ok") { self->m_readerMode = true; Q_EMIT self->readerModeChanged(true); qInfo("[reader] applied"); }
+        else qWarning("[reader] not applied: %s", st.c_str());
+    }
+    // After each load: does the page look like an article? -> enable/disable the Reader button.
+    void checkReaderable() {
+        if (m_readerableJs.empty()) m_readerableJs = slurp(readerDir() + "/Readability-readerable.js");
+        if (m_readerableJs.empty()) return;   // can't tell -> leave the button as it is
+        const std::string js = m_readerableJs + "\nisProbablyReaderable(document);";
+        webkit_web_view_evaluate_javascript(m_view, js.c_str(), -1, nullptr, nullptr, nullptr,
+                                            &WpeEngine::onReaderableChecked, this);
+    }
+    static void onReaderableChecked(GObject *obj, GAsyncResult *res, gpointer data) {
+        auto *self = static_cast<WpeEngine*>(data);
+        GError *err = nullptr;
+        JSCValue *v = webkit_web_view_evaluate_javascript_finish(WEBKIT_WEB_VIEW(obj), res, &err);
+        bool can = false;
+        if (v) { if (jsc_value_is_boolean(v)) can = jsc_value_to_boolean(v); g_object_unref(v); }
+        else g_clear_error(&err);
+        qInfo("[reader] readerable=%d", can);
+        Q_EMIT self->readerableChanged(can);
+    }
+
     void loadInitial() {
         if (m_url.isEmpty()) webkit_web_view_load_html(m_view, kTestPage, nullptr);
         else                 webkit_web_view_load_uri(m_view, m_url.toUtf8().constData());
@@ -342,9 +462,12 @@ private:
         if (ev == WEBKIT_LOAD_FINISHED) {
             self->m_reloadAttempts = 0;                  // a good load refills the crash auto-reload budget
             Q_EMIT self->loadingChanged(false);
+            self->checkReaderable();                     // article? -> enable/disable the Reader button
             qInfo("[t] load finished @%.0fms", msSince(self->m_startUs));
         }
         if (ev == WEBKIT_LOAD_COMMITTED) {
+            // A real navigation/reload landed fresh original content -> any reader view is gone; reset its state.
+            if (self->m_readerMode) { self->m_readerMode = false; Q_EMIT self->readerModeChanged(false); }
             // Passive TLS indicator: get_tls_info flags https + cert errors even when the page still
             // loaded (lock shows broken for a bad cert, plain for http), independent of tls-errors-policy.
             GTlsCertificate *cert = nullptr; GTlsCertificateFlags errs = (GTlsCertificateFlags)0;
@@ -453,6 +576,9 @@ private:
     gint64 m_pageUs = 0;      // last page-flip dispatch time — gives swipe -> rendered-frame latency
     unsigned m_lastSig = 0;   // fingerprint of the last emitted frame — to drop identical (dup) frames
     int m_reloadAttempts = 0; // WebProcess-crash auto-reload budget (reset on a successful load)
+    bool m_readerMode = false;     // reader view currently applied (vs the original page)
+    std::string m_readabilityJs;   // vendored Readability.js, lazily slurped + cached
+    std::string m_readerableJs;    // vendored isProbablyReaderable, lazily slurped + cached
 };
 
 // ---------------------------------------------------------------------------
@@ -495,8 +621,8 @@ public Q_SLOTS:
     void loadUrl(const QString &u) { m_engine->loadUrl(u); }
     void pageNext()                { m_engine->pageNext(); }
     void pagePrev()                { m_engine->pagePrev(); }
+    void readerToggle()                  { m_engine->toggleReader(); }
     // Phase B/D stubs — present now so the QML contract is stable; wired in later phases.
-    void readerToggle()                  {}
     void setReaderStyle(const QString &) {}
     void findText(const QString &)       {}
     void findNext()                      {}
@@ -514,6 +640,8 @@ public Q_SLOTS:
     void onEngineLoading(bool l)                { if (l != m_loading) { m_loading = l; Q_EMIT loadingChanged(); } }
     void onEngineTls(bool ok, const QString &h) { if (ok != m_tlsOk || h != m_tlsHost) { m_tlsOk = ok; m_tlsHost = h; Q_EMIT tlsChanged(); } }
     void onEngineCrashed()                      { Q_EMIT processCrashed(); }
+    void onEngineReaderMode(bool on)            { if (on != m_readerMode)  { m_readerMode  = on;  Q_EMIT readerModeChanged(); } }
+    void onEngineReaderable(bool can)           { if (can != m_readerable) { m_readerable = can; Q_EMIT readerableChanged(); } }
 Q_SIGNALS:
     void urlChanged();
     void titleChanged();
@@ -570,17 +698,25 @@ public:
         btn(0,      kBackX, "Back", m_canBack);
         btn(kBackX, kFwdX,  "Fwd",  m_canFwd);
         btn(kFwdX,  kRelX,  m_loading ? "Stop" : "Reload", true);
+        const qreal rx = w - kReaderW;
         QFont af = p->font(); af.setPixelSize(34); p->setFont(af); p->setPen(Qt::black);
-        const QString a = p->fontMetrics().elidedText(m_addr, Qt::ElideRight, int(w - kRelX - 40));
-        p->drawText(QRectF(kRelX + 20, 0, w - kRelX - 40, kBarH), Qt::AlignVCenter, a);
+        const QString a = p->fontMetrics().elidedText(m_addr, Qt::ElideRight, int(rx - kRelX - 40));
+        p->drawText(QRectF(kRelX + 20, 0, rx - kRelX - 40, kBarH), Qt::AlignVCenter, a);
+        // Reader toggle: inverted (black fill, white text) when active; greyed when the page isn't an article.
+        QFont rf = p->font(); rf.setPixelSize(40); p->setFont(rf);
+        if (m_readerMode) { p->fillRect(QRectF(rx, 6, kReaderW - 6, kBarH - 12), Qt::black); p->setPen(Qt::white); }
+        else              { p->setPen(m_readerable ? Qt::black : QColor(170, 170, 170)); }
+        p->drawText(QRectF(rx, 0, kReaderW, kBarH), Qt::AlignCenter, "Reader");
     }
     // Hit-test a tap against the chrome bar (panel px); returns the control, or None (off / below the bar).
-    enum Hit { None, Back, Fwd, Reload, Address };
+    enum Hit { None, Back, Fwd, Reload, Address, Reader };
     Hit hitChrome(int x, int y) const {
         if (!m_chromeOn || y >= kBarH) return None;
+        const int rx = int(width()) - kReaderW;            // Reader button occupies the right edge of the bar
         if (x < kBackX) return Back;
         if (x < kFwdX)  return Fwd;
         if (x < kRelX)  return Reload;
+        if (x >= rx)    return Reader;
         return Address;
     }
     bool chromeOn()  const { return m_chromeOn; }
@@ -594,6 +730,8 @@ public Q_SLOTS:
     void setCanFwd(bool v)         { if (v != m_canFwd)   { m_canFwd   = v; schedule(); } }
     void setLoading(bool v)        { if (v != m_loading)  { m_loading  = v; schedule(); } }
     void setAddr(const QString &s) { if (s != m_addr)     { m_addr     = s; schedule(); } }
+    void setReaderMode(bool v)     { if (v != m_readerMode)  { m_readerMode  = v; schedule(); } }
+    void setReaderable(bool v)     { if (v != m_readerable) { m_readerable = v; schedule(); } }
 protected:
     void itemChange(ItemChange ch, const ItemChangeData &d) override {
         if (ch == ItemSceneChange && d.window)   // frameSwapped fires after the panel present returns
@@ -629,8 +767,9 @@ private:
     QElapsedTimer m_clock;
     QTimer m_fallback;
     // chrome state, painted into the frame (reader-first: shown on launch, hidden by a content tap).
-    static const int kBarH = 104, kBackX = 170, kFwdX = 340, kRelX = 560;
+    static const int kBarH = 104, kBackX = 170, kFwdX = 340, kRelX = 560, kReaderW = 190;
     bool m_chromeOn = true, m_canBack = false, m_canFwd = false, m_loading = false;
+    bool m_readerMode = false, m_readerable = false;
     QString m_addr;
 };
 
@@ -907,6 +1046,8 @@ int main(int argc, char **argv) {
         QObject::connect(&engine, &WpeEngine::loadingChanged,      &bridge, &ShellBridge::onEngineLoading);
         QObject::connect(&engine, &WpeEngine::tlsChanged,          &bridge, &ShellBridge::onEngineTls);
         QObject::connect(&engine, &WpeEngine::processCrashed,      &bridge, &ShellBridge::onEngineCrashed);
+        QObject::connect(&engine, &WpeEngine::readerModeChanged,   &bridge, &ShellBridge::onEngineReaderMode);
+        QObject::connect(&engine, &WpeEngine::readerableChanged,   &bridge, &ShellBridge::onEngineReaderable);
         auto *comp = new QQmlComponent(qmlEngine, qmlEngine);
         comp->setData(qEnvironmentVariableIsSet("RMWEB_SIMPLE_QML") ? kQmlSimple : kQml,
                       QUrl(QStringLiteral("inline.qml")));
@@ -931,6 +1072,8 @@ int main(int argc, char **argv) {
         QObject::connect(&engine, &WpeEngine::canGoForward,   view, &WpeView::setCanFwd);
         QObject::connect(&engine, &WpeEngine::loadingChanged, view, &WpeView::setLoading);
         QObject::connect(&engine, &WpeEngine::urlChanged,     view, &WpeView::setAddr);
+        QObject::connect(&engine, &WpeEngine::readerModeChanged, view, &WpeView::setReaderMode);
+        QObject::connect(&engine, &WpeEngine::readerableChanged, view, &WpeView::setReaderable);
 
         // Drive the e-ink panel ourselves so page turns show immediately (needs QSG_RENDER_LOOP=basic so
         // afterRendering fires on the GUI thread and the EPRenderLoop's slow auto-present is out of the way).
@@ -962,6 +1105,7 @@ int main(int argc, char **argv) {
                     case WpeView::Back:    engine.goBack();    return;
                     case WpeView::Fwd:     engine.goForward(); return;
                     case WpeView::Reload:  view->isLoading() ? engine.stopLoading() : engine.reload(); return;
+                    case WpeView::Reader:  engine.toggleReader(); return;
                     case WpeView::Address: return;            // URL entry comes later (drawn OSK / HTML chrome)
                     case WpeView::None:    break;             // tap not on the bar
                 }
@@ -989,6 +1133,12 @@ int main(int argc, char **argv) {
                 if (!g.isNull() && g.save("/home/root/rmweb/grab.png")) qInfo("[grab] saved %dx%d", g.width(), g.height());
                 else qInfo("[grab] FAILED null=%d", g.isNull());
             });
+        }
+
+        // DIAG (RMWEB_DEBUG_READER): auto-toggle reader mode once after N ms, so the reflow can be verified
+        // (pair with RMWEB_GRAB_MS to capture the result) without a human tap on the Reader button.
+        if (const int rdMs = qEnvironmentVariableIntValue("RMWEB_DEBUG_READER"); rdMs > 0) {
+            QTimer::singleShot(rdMs, &app, [&engine]{ qInfo("[reader][dbg] toggleReader"); engine.toggleReader(); });
         }
 
         // Diagnostic: auto-page every RMWEB_AUTOPAGE_MS ms (alternating direction) through the exact same

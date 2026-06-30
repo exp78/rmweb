@@ -45,6 +45,9 @@ fi
 cp -a "$S"/libexec/wpe-webkit-2.0   "$B/libexec/"
 cp -a "$S"/lib/wpe-webkit-2.0       "$B/lib/"                        2>/dev/null || true   # injected-bundle
 cp -a "$S"/share/wpe-webkit-2.0     "$B/share/"                      2>/dev/null || true   # resources
+# Reader mode: vendored Mozilla Readability.js (+ isProbablyReaderable), injected on "Reader" (Apache-2.0).
+mkdir -p "$B/share/reader"
+cp -a engine/wpeqt/reader/Readability.js engine/wpeqt/reader/Readability-readerable.js "$B/share/reader/"
 cp -a build/wpe_render              "$B/bin/"
 
 echo "[bundle] local size:"; du -sh "$B"
