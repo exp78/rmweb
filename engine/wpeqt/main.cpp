@@ -61,6 +61,7 @@
 
 #include "gesture.h"   // pure tap/swipe classifier (unit-tested in tests/gesture_test.cpp)
 #include "url.h"       // pure URL normalizer (unit-tested in tests/url_test.cpp)
+#include "tapzone.h"   // pure tap-zone classifier (unit-tested in tests/tapzone_test.cpp)
 using rmweb::Gesture;
 using rmweb::classifyGesture;
 
@@ -553,24 +554,46 @@ public:
                 [this]{ qInfo("[t][gui] present fallback-release (no frameSwapped)"); releaseGate(); });
     }
     void paint(QPainter *p) override {
-        if (m_img.isNull()) return;
-        p->drawImage(QRectF(0, 0, width(), height()), m_img);
-        // B2: draw the browser chrome straight into the WpeView's painted content — THIS is the frame
-        // that reaches the e-ink panel (verified: grabWindow only ever captures this item, and every
-        // QtQuick overlay/header did NOT composite over it). So the toolbar is painted here, not in QML.
-        // FOUNDATION (verified on device): an always-on bar overlaid at the top. Next: wire the buttons
-        // to engine state + C++ hit-testing, position the web image below the bar, and a reader-first toggle.
-        const qreal w = width(); const qreal bh = 120;
-        p->fillRect(QRectF(0, 0, w, bh), Qt::white);
-        p->fillRect(QRectF(0, bh - 3, w, 3), Qt::black);
-        QFont f = p->font(); f.setPixelSize(52); p->setFont(f); p->setPen(Qt::black);
-        p->drawText(QRectF(24, 0, w - 48, bh), Qt::AlignVCenter, "< Back      > Fwd      R Reload");
+        const qreal w = width(), h = height();
+        if (!m_img.isNull()) p->drawImage(QRectF(0, 0, w, h), m_img);
+        else                 p->fillRect(QRectF(0, 0, w, h), Qt::white);
+        if (!m_chromeOn) return;
+        // B2: the browser chrome is painted straight into the WpeView's frame — this is what reaches the
+        // e-ink panel (QtQuick chrome does NOT composite over it; see docs/research/epaper-chrome-compositing.md).
+        p->fillRect(QRectF(0, 0, w, kBarH), Qt::white);
+        p->fillRect(QRectF(0, kBarH - 3, w, 3), Qt::black);
+        QFont bf = p->font(); bf.setPixelSize(44); p->setFont(bf);
+        auto btn = [&](qreal x0, qreal x1, const QString &t, bool on) {
+            p->setPen(on ? Qt::black : QColor(170, 170, 170));
+            p->drawText(QRectF(x0, 0, x1 - x0, kBarH), Qt::AlignCenter, t);
+        };
+        btn(0,      kBackX, "Back", m_canBack);
+        btn(kBackX, kFwdX,  "Fwd",  m_canFwd);
+        btn(kFwdX,  kRelX,  m_loading ? "Stop" : "Reload", true);
+        QFont af = p->font(); af.setPixelSize(34); p->setFont(af); p->setPen(Qt::black);
+        const QString a = p->fontMetrics().elidedText(m_addr, Qt::ElideRight, int(w - kRelX - 40));
+        p->drawText(QRectF(kRelX + 20, 0, w - kRelX - 40, kBarH), Qt::AlignVCenter, a);
     }
+    // Hit-test a tap against the chrome bar (panel px); returns the control, or None (off / below the bar).
+    enum Hit { None, Back, Fwd, Reload, Address };
+    Hit hitChrome(int x, int y) const {
+        if (!m_chromeOn || y >= kBarH) return None;
+        if (x < kBackX) return Back;
+        if (x < kFwdX)  return Fwd;
+        if (x < kRelX)  return Reload;
+        return Address;
+    }
+    bool chromeOn()  const { return m_chromeOn; }
+    bool isLoading() const { return m_loading; }
 public Q_SLOTS:
-    void setImage(const QImage &img) {
-        m_pending = img; m_hasPending = true;
-        if (!m_inFlight) presentNext();          // idle -> present immediately; else coalesce to latest
-    }
+    void setImage(const QImage &img) { m_pending = img; m_hasPending = true; schedule(); }
+    // Chrome state (fed by engine signals on the GUI thread). Each re-presents the current frame with the
+    // new chrome via the SAME serializer — never a bare update() (that would risk an overlapping present).
+    void setChromeOn(bool v)       { if (v != m_chromeOn) { m_chromeOn = v; schedule(); } }
+    void setCanBack(bool v)        { if (v != m_canBack)  { m_canBack  = v; schedule(); } }
+    void setCanFwd(bool v)         { if (v != m_canFwd)   { m_canFwd   = v; schedule(); } }
+    void setLoading(bool v)        { if (v != m_loading)  { m_loading  = v; schedule(); } }
+    void setAddr(const QString &s) { if (s != m_addr)     { m_addr     = s; schedule(); } }
 protected:
     void itemChange(ItemChange ch, const ItemChangeData &d) override {
         if (ch == ItemSceneChange && d.window)   // frameSwapped fires after the panel present returns
@@ -587,22 +610,28 @@ private Q_SLOTS:
         else releaseGate();
     }
 private:
+    void schedule() { if (m_inFlight) m_dirty = true; else presentNext(); }
     void presentNext() {
-        m_img = m_pending; m_hasPending = false; m_inFlight = true;
+        if (m_hasPending) { m_img = m_pending; m_hasPending = false; }   // newest frame (else re-present current)
+        m_dirty = false; m_inFlight = true;
         m_clock.restart();
         update();                                // -> scene render -> EPRenderLoop present to panel
         m_fallback.start(kFallbackMs);
     }
     void releaseGate() {
         m_fallback.stop(); m_inFlight = false;
-        if (m_hasPending) presentNext();         // a newer frame queued while presenting -> show it now
+        if (m_hasPending || m_dirty) presentNext();   // newer frame or a chrome change queued -> present it
     }
     static const int kFallbackMs = 2500;         // release even if frameSwapped never fires (>= worst refresh)
     int m_dwellMs = 200;                         // min present spacing, ms (RMWEB_PRESENT_DWELL overrides)
-    bool m_hasPending = false, m_inFlight = false;
+    bool m_hasPending = false, m_inFlight = false, m_dirty = false;
     QImage m_img, m_pending;
     QElapsedTimer m_clock;
     QTimer m_fallback;
+    // chrome state, painted into the frame (reader-first: shown on launch, hidden by a content tap).
+    static const int kBarH = 104, kBackX = 170, kFwdX = 340, kRelX = 560;
+    bool m_chromeOn = true, m_canBack = false, m_canFwd = false, m_loading = false;
+    QString m_addr;
 };
 
 // ---------------------------------------------------------------------------
@@ -897,6 +926,11 @@ int main(int argc, char **argv) {
             qInfo("[t][gui] frame %d -> setImage %.1fms  %dx%d", frame,
                   (g_get_monotonic_time() - t) / 1000.0, img.width(), img.height());
         });
+        // Engine state -> the C++ chrome painted into the frame (queued worker->GUI).
+        QObject::connect(&engine, &WpeEngine::canGoBack,      view, &WpeView::setCanBack);
+        QObject::connect(&engine, &WpeEngine::canGoForward,   view, &WpeView::setCanFwd);
+        QObject::connect(&engine, &WpeEngine::loadingChanged, view, &WpeView::setLoading);
+        QObject::connect(&engine, &WpeEngine::urlChanged,     view, &WpeView::setAddr);
 
         // Drive the e-ink panel ourselves so page turns show immediately (needs QSG_RENDER_LOOP=basic so
         // afterRendering fires on the GUI thread and the EPRenderLoop's slow auto-present is out of the way).
@@ -918,24 +952,27 @@ int main(int argc, char **argv) {
         QObject::connect(&touchReader, &TouchReader::swipe, &app, [&engine](int dir) {
             if (dir > 0) engine.pageNext(); else engine.pagePrev();
         });
-        // Touch->mouse bridge: a tap becomes a synthetic left click delivered to the QQuickWindow on the
-        // GUI thread, so Qt Quick Controls (toolbar buttons, address field, keyboard) hit-test and handle
-        // it natively — no bespoke chrome hit-testing. tap(x,y) is in panel px == QML scene coords.
-        auto sendClick = [win](int x, int y) {
-            if (!win) return;
-            const QPointF pt(x, y);   // panel px == QML scene coords; window is full-screen at origin
-            QWindowSystemInterface::handleMouseEvent(win, pt, pt, Qt::LeftButton, Qt::LeftButton,
-                                                     QEvent::MouseButtonPress,  Qt::NoModifier);
-            QWindowSystemInterface::handleMouseEvent(win, pt, pt, Qt::NoButton,  Qt::LeftButton,
-                                                     QEvent::MouseButtonRelease, Qt::NoModifier);
-            // Flush now so the press+release is delivered exactly once, here — otherwise the QPA queue
-            // is flushed at an unpredictable later point (observed: 0 deliveries before exit, or a
-            // burst of duplicates). One tap -> one click.
-            QWindowSystemInterface::flushWindowSystemEvents();
-        };
-        // Queued onto win's (GUI) thread: TouchReader emits tap from its own thread.
+        // Reader-first tap routing (queued worker->GUI). The chrome is painted INTO the frame (B2), so we
+        // hit-test it in C++: a tap on the bar runs its button; a tap on the page toggles chrome (hide when
+        // shown -> read fullscreen, summon when hidden); with chrome hidden the tap-zones (tapzone.h) turn
+        // pages at the edges. tap(x,y) is in panel px.
         QObject::connect(&touchReader, &TouchReader::tap, win ? win : qobject_cast<QObject*>(&app),
-                         sendClick, Qt::QueuedConnection);
+            [&engine, view](int x, int y) {
+                switch (view->hitChrome(x, y)) {
+                    case WpeView::Back:    engine.goBack();    return;
+                    case WpeView::Fwd:     engine.goForward(); return;
+                    case WpeView::Reload:  view->isLoading() ? engine.stopLoading() : engine.reload(); return;
+                    case WpeView::Address: return;            // URL entry comes later (drawn OSK / HTML chrome)
+                    case WpeView::None:    break;             // tap not on the bar
+                }
+                if (view->chromeOn()) { view->setChromeOn(false); return; }   // tap page -> hide chrome (read)
+                switch (rmweb::classifyTap(x, y, kPanelW, kPanelH)) {         // chrome hidden -> tap-zones
+                    case rmweb::TapAction::Next:         engine.pageNext(); break;
+                    case rmweb::TapAction::Prev:         engine.pagePrev(); break;
+                    case rmweb::TapAction::SummonChrome:
+                    case rmweb::TapAction::Content:      view->setChromeOn(true); break;
+                }
+            }, Qt::QueuedConnection);
         touchThread.start();
 
         // DIAG: GUI event-loop heartbeat. If these "[gui] tick" lines stop, the GUI thread is blocked
