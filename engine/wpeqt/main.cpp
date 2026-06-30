@@ -20,7 +20,8 @@
 //   * display mode (no argv[2])     : show the page; swipe up = next page, swipe down = previous.
 //
 // Timing: every milestone logs "[t] ... @Xms" (ms since engine start) so we can see where time goes.
-// NOTE: launcher sets JSC_useJIT=0 (interpreter) — a JS page segfaulted with the JIT on this device.
+// NOTE: launcher runs JSC in the interpreter (JSC_useJIT=0) by default. RMWEB_JIT=1 enables the JIT, which
+// works here via JSC_usePollingTraps=1 (the earlier "JIT segfault" was a signal conflict — see the launcher).
 #include <QGuiApplication>
 #include <QThread>
 #include <QImage>
@@ -158,7 +159,7 @@ static const char *kReaderCss =
     "#rmweb-reader a{color:#111;text-decoration:underline}"
     "#rmweb-reader blockquote{margin:.8em 0;padding-left:.8em;border-left:4px solid #bbb;color:#333}"
     "#rmweb-reader pre{white-space:pre-wrap;word-wrap:break-word;background:#f3f3f3;padding:.6em;font-size:.8em}"
-    "#rmweb-reader code{font-family:'DejaVu Sans Mono',monospace;font-size:.85em}"
+    "#rmweb-reader code{font-family:monospace;font-size:.85em}"
     "#rmweb-reader hr{border:none;border-top:1px solid #ccc;margin:1.2em 0}"
     "#rmweb-reader table{max-width:100%;border-collapse:collapse}";
 // Glue: assumes Readability (injected before it) is in scope; returns 'ok' / 'noarticle' / 'error:...'.
@@ -269,20 +270,6 @@ public Q_SLOTS:
             loadInitial();
         }
 
-        // Diagnostic (RMWEB_DEBUG_NAV): drive a back/forward sequence so navigation + the canGo/url signals
-        // can be verified before the toolbar/URL entry exist (Tasks 4/8). A(initial) -> B -> back -> forward.
-        if (qEnvironmentVariableIntValue("RMWEB_DEBUG_NAV") > 0) {
-            scheduleOnCtx(4000, [](gpointer d) -> gboolean {
-                auto *self = static_cast<WpeEngine*>(d); qInfo("[nav][dbg] load B example.org");
-                webkit_web_view_load_uri(self->m_view, "https://example.org"); return G_SOURCE_REMOVE; });
-            scheduleOnCtx(8000, [](gpointer d) -> gboolean {
-                auto *self = static_cast<WpeEngine*>(d); qInfo("[nav][dbg] goBack");
-                if (webkit_web_view_can_go_back(self->m_view)) webkit_web_view_go_back(self->m_view); return G_SOURCE_REMOVE; });
-            scheduleOnCtx(12000, [](gpointer d) -> gboolean {
-                auto *self = static_cast<WpeEngine*>(d); qInfo("[nav][dbg] goForward");
-                if (webkit_web_view_can_go_forward(self->m_view)) webkit_web_view_go_forward(self->m_view); return G_SOURCE_REMOVE; });
-        }
-
         g_main_loop_run(m_loop);  // pumps WPE on this thread until stop()
 
         // Loop exited (engine.stop()): release the web view here, on its own thread, BEFORE ~WpeEngine —
@@ -320,7 +307,7 @@ public Q_SLOTS:
     // Reader mode: inject Readability + reflow the article into one clean column; toggle off = reload original.
     void toggleReader() {
         marshalToCtx([this] {
-            if (!m_view) return;
+            if (!m_view || m_readerApplying) return;                        // ignore taps while a parse is in flight
             if (m_readerMode) { webkit_web_view_reload(m_view); return; }   // off: reload (COMMITTED clears state)
             applyReader();
         });
@@ -333,14 +320,6 @@ private:
         g_main_context_invoke_full(m_ctx, G_PRIORITY_DEFAULT,
             [](gpointer d) -> gboolean { (*static_cast<std::function<void()>*>(d))(); return G_SOURCE_REMOVE; },
             f, [](gpointer d) { delete static_cast<std::function<void()>*>(d); });
-    }
-    // Attach a one-shot timeout to the WORKER context. g_timeout_add* would attach to the GLOBAL default
-    // context (which our worker loop never runs) and never fire — we must g_source_attach to m_ctx. Diag only.
-    void scheduleOnCtx(guint ms, GSourceFunc fn) {
-        GSource *s = g_timeout_source_new(ms);
-        g_source_set_callback(s, fn, this, nullptr);
-        g_source_attach(s, m_ctx);
-        g_source_unref(s);
     }
     struct PageMsg { WpeEngine *self; double dy; };
     static gboolean onPage(gpointer d) {
@@ -390,16 +369,22 @@ private:
         if (m_readabilityJs.empty()) m_readabilityJs = slurp(readerDir() + "/Readability.js");
         if (m_readabilityJs.empty()) { qWarning("[reader] Readability.js missing in %s", readerDir().c_str()); return; }
         const std::string js = buildReaderApplyJs();
-        webkit_web_view_evaluate_javascript(m_view, js.c_str(), -1, nullptr, nullptr, nullptr,
+        m_readerApplying = true;   // gate re-entrant Reader taps until onReaderApplied clears it
+        // Pass m_cancel so a shutdown (stop() cancels it) aborts an in-flight eval — same pattern as onFilterSaved.
+        webkit_web_view_evaluate_javascript(m_view, js.c_str(), -1, nullptr, nullptr, m_cancel,
                                             &WpeEngine::onReaderApplied, this);
     }
     static void onReaderApplied(GObject *obj, GAsyncResult *res, gpointer data) {
-        auto *self = static_cast<WpeEngine*>(data);
         GError *err = nullptr;
         JSCValue *v = webkit_web_view_evaluate_javascript_finish(WEBKIT_WEB_VIEW(obj), res, &err);
+        // Cancelled => engine is tearing down (m_cancel fired): self may be gone — touch nothing.
+        if (err && g_error_matches(err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) { g_clear_error(&err); return; }
+        auto *self = static_cast<WpeEngine*>(data);
         std::string st = "error";
         if (v) { if (jsc_value_is_string(v)) { char *s = jsc_value_to_string(v); st = s ? s : ""; g_free(s); } g_object_unref(v); }
         else { st = err ? err->message : "?"; g_clear_error(&err); }
+        if (!self) return;
+        self->m_readerApplying = false;
         if (st == "ok") { self->m_readerMode = true; Q_EMIT self->readerModeChanged(true); qInfo("[reader] applied"); }
         else qWarning("[reader] not applied: %s", st.c_str());
     }
@@ -408,16 +393,18 @@ private:
         if (m_readerableJs.empty()) m_readerableJs = slurp(readerDir() + "/Readability-readerable.js");
         if (m_readerableJs.empty()) return;   // can't tell -> leave the button as it is
         const std::string js = m_readerableJs + "\nisProbablyReaderable(document);";
-        webkit_web_view_evaluate_javascript(m_view, js.c_str(), -1, nullptr, nullptr, nullptr,
+        webkit_web_view_evaluate_javascript(m_view, js.c_str(), -1, nullptr, nullptr, m_cancel,
                                             &WpeEngine::onReaderableChecked, this);
     }
     static void onReaderableChecked(GObject *obj, GAsyncResult *res, gpointer data) {
-        auto *self = static_cast<WpeEngine*>(data);
         GError *err = nullptr;
         JSCValue *v = webkit_web_view_evaluate_javascript_finish(WEBKIT_WEB_VIEW(obj), res, &err);
+        if (err && g_error_matches(err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) { g_clear_error(&err); return; }
+        auto *self = static_cast<WpeEngine*>(data);
         bool can = false;
         if (v) { if (jsc_value_is_boolean(v)) can = jsc_value_to_boolean(v); g_object_unref(v); }
         else g_clear_error(&err);
+        if (!self) return;
         qInfo("[reader] readerable=%d", can);
         Q_EMIT self->readerableChanged(can);
     }
@@ -577,88 +564,9 @@ private:
     unsigned m_lastSig = 0;   // fingerprint of the last emitted frame — to drop identical (dup) frames
     int m_reloadAttempts = 0; // WebProcess-crash auto-reload budget (reset on a successful load)
     bool m_readerMode = false;     // reader view currently applied (vs the original page)
+    bool m_readerApplying = false; // an applyReader() JS eval is in flight (gates re-entrant Reader taps)
     std::string m_readabilityJs;   // vendored Readability.js, lazily slurped + cached
     std::string m_readerableJs;    // vendored isProbablyReaderable, lazily slurped + cached
-};
-
-// ---------------------------------------------------------------------------
-// ShellBridge — a GUI-thread proxy between QML and the worker-thread WpeEngine. QML cannot `Connections`-
-// connect to a QObject living in another thread (it aborts), so the toolbar talks to this bridge: button
-// taps forward to the engine's MT-safe nav slots, and engine signals are relayed here (queued worker->GUI)
-// so QML can bind to them. Exposed to QML as the "engine" context property.
-// ---------------------------------------------------------------------------
-class ShellBridge : public QObject {
-    Q_OBJECT
-    // Angelfish-style façade: the QML chrome binds to these properties; engine signals feed them.
-    Q_PROPERTY(QString url          READ url          NOTIFY urlChanged)
-    Q_PROPERTY(QString title        READ title        NOTIFY titleChanged)
-    Q_PROPERTY(bool    loading      READ loading      NOTIFY loadingChanged)
-    Q_PROPERTY(qreal   loadProgress READ loadProgress NOTIFY loadProgressChanged)
-    Q_PROPERTY(bool    canGoBack    READ canGoBack    NOTIFY canGoBackChanged)
-    Q_PROPERTY(bool    canGoForward READ canGoForward NOTIFY canGoForwardChanged)
-    Q_PROPERTY(bool    readerable   READ readerable   NOTIFY readerableChanged)
-    Q_PROPERTY(bool    readerMode   READ readerMode   NOTIFY readerModeChanged)
-    Q_PROPERTY(bool    tlsOk        READ tlsOk        NOTIFY tlsChanged)
-    Q_PROPERTY(QString tlsHost      READ tlsHost      NOTIFY tlsChanged)
-public:
-    explicit ShellBridge(WpeEngine *e, QObject *parent = nullptr) : QObject(parent), m_engine(e) {}
-    QString url() const          { return m_url; }
-    QString title() const        { return m_title; }
-    bool    loading() const      { return m_loading; }
-    qreal   loadProgress() const { return m_loadProgress; }
-    bool    canGoBack() const    { return m_canGoBack; }
-    bool    canGoForward() const { return m_canGoForward; }
-    bool    readerable() const   { return m_readerable; }
-    bool    readerMode() const   { return m_readerMode; }
-    bool    tlsOk() const        { return m_tlsOk; }
-    QString tlsHost() const      { return m_tlsHost; }
-public Q_SLOTS:
-    // Chrome -> engine (forwarded to the MT-safe engine slots).
-    void goBack()                  { m_engine->goBack(); }
-    void goForward()               { m_engine->goForward(); }
-    void reload()                  { m_engine->reload(); }
-    void stopLoading()             { m_engine->stopLoading(); }
-    void loadUrl(const QString &u) { m_engine->loadUrl(u); }
-    void pageNext()                { m_engine->pageNext(); }
-    void pagePrev()                { m_engine->pagePrev(); }
-    void readerToggle()                  { m_engine->toggleReader(); }
-    // Phase B/D stubs — present now so the QML contract is stable; wired in later phases.
-    void setReaderStyle(const QString &) {}
-    void findText(const QString &)       {}
-    void findNext()                      {}
-    void findPrev()                      {}
-    void findClear()                     {}
-    void setJsEnabled(bool)              {}
-    void hintStart()                     {}
-    void hintFollow(const QString &)     {}
-    // Engine signals -> property updates (relayed worker->GUI, then NOTIFY for QML bindings).
-    void onEngineUrl(const QString &u) { if (u != m_url) { m_url = u; Q_EMIT urlChanged(); } }
-    void onEngineCanGoBack(bool b)     { if (b != m_canGoBack)    { m_canGoBack = b;    Q_EMIT canGoBackChanged(); } }
-    void onEngineCanGoForward(bool b)  { if (b != m_canGoForward) { m_canGoForward = b; Q_EMIT canGoForwardChanged(); } }
-    void onEngineTitle(const QString &t)        { if (t != m_title) { m_title = t; Q_EMIT titleChanged(); } }
-    void onEngineLoadProgress(double p)         { if (p != m_loadProgress) { m_loadProgress = p; Q_EMIT loadProgressChanged(); } }
-    void onEngineLoading(bool l)                { if (l != m_loading) { m_loading = l; Q_EMIT loadingChanged(); } }
-    void onEngineTls(bool ok, const QString &h) { if (ok != m_tlsOk || h != m_tlsHost) { m_tlsOk = ok; m_tlsHost = h; Q_EMIT tlsChanged(); } }
-    void onEngineCrashed()                      { Q_EMIT processCrashed(); }
-    void onEngineReaderMode(bool on)            { if (on != m_readerMode)  { m_readerMode  = on;  Q_EMIT readerModeChanged(); } }
-    void onEngineReaderable(bool can)           { if (can != m_readerable) { m_readerable = can; Q_EMIT readerableChanged(); } }
-Q_SIGNALS:
-    void urlChanged();
-    void titleChanged();
-    void loadingChanged();
-    void loadProgressChanged();
-    void canGoBackChanged();
-    void canGoForwardChanged();
-    void readerableChanged();
-    void readerModeChanged();
-    void tlsChanged();
-    void processCrashed();
-private:
-    WpeEngine *m_engine;
-    QString m_url, m_title, m_tlsHost;
-    qreal   m_loadProgress = 0.0;
-    bool    m_loading = false, m_canGoBack = false, m_canGoForward = false;
-    bool    m_readerable = false, m_readerMode = false, m_tlsOk = true;
 };
 
 // ---------------------------------------------------------------------------
@@ -938,59 +846,11 @@ private:
     gint64 m_lastPresentUs = 0;
 };
 
-// Reading-shell chrome: a top toolbar (Qt Quick Controls, Basic style = flat/high-contrast for e-ink)
-// over the full-screen web view. Buttons call the engine's nav slots directly (engine is a context
-// property); Connections reflect engine state (address text + Back/Forward enabled). Button glyphs are
-// literal UTF-8 in the source (U+25C0/25B6 arrows, U+27F3 reload) — GCC reads UTF-8 and passes the bytes
-// to QML. Tap (x,y)==scene coords, so the touch->mouse bridge routes taps to whichever item is under it.
+// Reading-shell host: a bare full-screen Window holding the WpeView. The browser chrome is hand-painted
+// INTO the WpeView frame (the "B2" approach) — a QtQuick toolbar does NOT composite under the epaper QPA, so
+// there is no QML chrome here; taps are hit-tested in C++ (the tap router in main()). Size to Screen.* (the
+// official recipe — don't force geometry from C++); objectName "view" is how main() finds the item.
 static const char *kQml = R"QML(
-import QtQuick
-import QtQuick.Window
-import QtQuick.Controls.Basic
-import QtQuick.Layouts
-import QtQuick.VirtualKeyboard
-import rmweb 1.0
-ApplicationWindow {
-    id: win
-    width: Screen.width; height: Screen.height
-    visible: true; color: "white"
-    ColumnLayout {
-        anchors.fill: parent; spacing: 0
-        ToolBar {
-            Layout.fillWidth: true; implicitHeight: 104
-            background: Rectangle { color: "white"; border.color: "black"; border.width: 2 }
-            RowLayout {
-                anchors.fill: parent; anchors.margins: 6; spacing: 8
-                Button { id: back; text: "◀"; font.pixelSize: 40; implicitWidth: 104; implicitHeight: 88; enabled: engine.canGoBack;    onClicked: engine.goBack() }
-                Button { id: fwd;  text: "▶"; font.pixelSize: 40; implicitWidth: 104; implicitHeight: 88; enabled: engine.canGoForward; onClicked: engine.goForward() }
-                Button { id: rel;  text: "⟳"; font.pixelSize: 40; implicitWidth: 104; implicitHeight: 88;                 onClicked: engine.reload() }
-                TextField {
-                    id: address; Layout.fillWidth: true; implicitHeight: 88; font.pixelSize: 34
-                    verticalAlignment: TextInput.AlignVCenter
-                    inputMethodHints: Qt.ImhUrlCharactersOnly | Qt.ImhNoAutoUppercase | Qt.ImhNoPredictiveText
-                    onAccepted: { engine.loadUrl(text); focus = false }   // load + dismiss keyboard
-                }
-                Button { id: clr; text: "✕"; font.pixelSize: 32; implicitWidth: 88; implicitHeight: 88
-                    onClicked: { address.text = ""; address.forceActiveFocus() } }   // clear, keep focus + keyboard
-            }
-        }
-        WpeView { objectName: "view"; Layout.fillWidth: true; Layout.fillHeight: true }
-    }
-    Connections {
-        target: engine
-        function onUrlChanged() { if (!address.activeFocus) address.text = engine.url }
-    }
-    InputPanel {
-        id: inputPanel; z: 99
-        anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-        visible: active   // Qt Virtual Keyboard — shown only while a field has active focus
-    }
-}
-)QML";
-
-// DIAG (RMWEB_SIMPLE_QML): bare Window, no chrome — to bisect whether ApplicationWindow / Controls /
-// VirtualKeyboard is what stalls the GUI event loop (timers + async frames stop firing after startup).
-static const char *kQmlSimple = R"QML(
 import QtQuick
 import QtQuick.Window
 import rmweb 1.0
@@ -1015,7 +875,6 @@ int main(int argc, char **argv) {
     WpeEngine engine(url, 1620, 2160);
     engine.moveToThread(&thread);
     QObject::connect(&thread, &QThread::started, &engine, &WpeEngine::start);
-    ShellBridge bridge(&engine);   // GUI-thread proxy for QML (QML can't connect across threads to engine)
 
     QThread touchThread;
     TouchReader touchReader;
@@ -1037,20 +896,9 @@ int main(int argc, char **argv) {
         // --- display mode: paint frames into a full-screen QtQuick item (epaper QPA) ---
         qmlRegisterType<WpeView>("rmweb", 1, 0, "WpeView");
         auto *qmlEngine = new QQmlEngine(&app);
-        qmlEngine->rootContext()->setContextProperty("engine", &bridge);   // QML talks to the GUI-thread bridge
-        QObject::connect(&engine, &WpeEngine::urlChanged,   &bridge, &ShellBridge::onEngineUrl);
-        QObject::connect(&engine, &WpeEngine::canGoBack,    &bridge, &ShellBridge::onEngineCanGoBack);
-        QObject::connect(&engine, &WpeEngine::canGoForward, &bridge, &ShellBridge::onEngineCanGoForward);
-        QObject::connect(&engine, &WpeEngine::titleChanged,        &bridge, &ShellBridge::onEngineTitle);
-        QObject::connect(&engine, &WpeEngine::loadProgressChanged, &bridge, &ShellBridge::onEngineLoadProgress);
-        QObject::connect(&engine, &WpeEngine::loadingChanged,      &bridge, &ShellBridge::onEngineLoading);
-        QObject::connect(&engine, &WpeEngine::tlsChanged,          &bridge, &ShellBridge::onEngineTls);
-        QObject::connect(&engine, &WpeEngine::processCrashed,      &bridge, &ShellBridge::onEngineCrashed);
-        QObject::connect(&engine, &WpeEngine::readerModeChanged,   &bridge, &ShellBridge::onEngineReaderMode);
-        QObject::connect(&engine, &WpeEngine::readerableChanged,   &bridge, &ShellBridge::onEngineReaderable);
+        // No "engine" context property: the chrome is C++ (B2), and kQml doesn't reference engine.
         auto *comp = new QQmlComponent(qmlEngine, qmlEngine);
-        comp->setData(qEnvironmentVariableIsSet("RMWEB_SIMPLE_QML") ? kQmlSimple : kQml,
-                      QUrl(QStringLiteral("inline.qml")));
+        comp->setData(kQml, QUrl(QStringLiteral("inline.qml")));
         if (comp->status() != QQmlComponent::Ready) {
             qWarning() << "[qml]" << comp->errorString();
             return 2;
