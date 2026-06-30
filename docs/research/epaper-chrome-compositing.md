@@ -96,6 +96,25 @@ chrome (address bar, buttons) over the page?
 **We were not fundamentally wrong** — the engine path (A0/A4/A5/A6) is fine; only the chrome needs the
 proven epaper pattern or the HTML-chrome pivot.
 
+## Addendum (2026-06-30, on-device) — Option A FAILED for our live WpeView → go Option B; the QImage IS the panel
+Tested Option A across **every** variant on the device: `ColumnLayout`+`ToolBar`, `ApplicationWindow.header`
+(with `height` AND with `implicitHeight`), plain black `Rectangle`, a `z:1000` overlay `Rectangle`.
+**Chrome never appears — neither on the panel nor in `grabWindow()`.** Critically, `grabWindow()` under the
+epaper QPA only ever captures the **WpeView** (the `QQuickPaintedItem`); no sibling / overlay / header
+QtQuick item is in the grab, and the web content is never shifted down by a header. So the static-content
+`Eeems` template's success does NOT transfer: **our live `QQuickPaintedItem` + the A6 present is the ONLY
+thing reaching the panel; QtQuick chrome does not composite with it.** (The remaining untried A lever —
+feeding the frame through an `Image`/`QQuickImageProvider`/`QSGSimpleTextureNode` instead of
+`QQuickPaintedItem` — might change this, but is uncertain and was deprioritised.)
+
+**Conclusion: the WpeView's QImage IS what reaches the panel → draw the chrome INTO that QImage.**
+- **B2 (recommended — guaranteed + smallest): C++ `QPainter` chrome.** When chrome is summoned, paint a
+  toolbar (back / forward / reload + page/positions) onto the BGRA `QImage` before it is displayed;
+  hit-test taps in the toolbar rect in C++ → engine actions. **Guaranteed to render — it's literally the
+  frame.** URL entry: defer at first, or add a `QPainter`-drawn on-screen keyboard (hit-tested) later.
+- **B1 (fuller, later): two `WebKitWebView`s** — transparent HTML chrome over the content view (the
+  researched design); richer chrome + HTML OSK, at the cost of a 2nd WebProcess + compositing two buffers.
+
 ## Sources
 - WPE-Qt: WebKit `Source/WebKit/UIProcess/API/wpe/qt6/WPEQtView.cpp`; `github.com/nowrep/wpewebkit-qt`;
   base-art.net "Introducing WPEQt"; wpewebkit.org 2.51.90/2.52.2 notes; Igalia/meta-webkit discussion #236;
