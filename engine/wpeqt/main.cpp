@@ -26,6 +26,7 @@
 #include <QImage>
 #include <QTimer>
 #include <QDebug>
+#include <QUrl>
 #include <QQmlEngine>
 #include <QQmlComponent>
 #include <QQmlContext>
@@ -138,6 +139,11 @@ Q_SIGNALS:
     void urlChanged(const QString &url);   // current page URI (toolbar address field)
     void canGoBack(bool ok);               // toolbar Back button enabled-state
     void canGoForward(bool ok);            // toolbar Forward button enabled-state
+    void titleChanged(const QString &title);
+    void loadProgressChanged(double fraction);     // 0..1 estimated load progress
+    void loadingChanged(bool loading);
+    void tlsChanged(bool ok, const QString &host); // false = TLS error -> broken-lock indicator
+    void processCrashed();                         // WebProcess died (auto-reload attempted)
 
 public Q_SLOTS:
     void start() {
@@ -169,6 +175,10 @@ public Q_SLOTS:
               wpe_view_get_width(wpeView), wpe_view_get_height(wpeView), msSince(m_startUs));
         g_signal_connect(m_view, "load-changed", G_CALLBACK(&WpeEngine::onLoadChanged), this);
         g_signal_connect(m_view, "notify::uri", G_CALLBACK(&WpeEngine::onUri), this);
+        g_signal_connect(m_view, "notify::title", G_CALLBACK(&WpeEngine::onTitle), this);
+        g_signal_connect(m_view, "notify::estimated-load-progress", G_CALLBACK(&WpeEngine::onProgress), this);
+        g_signal_connect(m_view, "load-failed-with-tls-errors", G_CALLBACK(&WpeEngine::onTlsError), this);
+        g_signal_connect(m_view, "web-process-terminated", G_CALLBACK(&WpeEngine::onWebProcessTerminated), this);
 
         // Content blocking (RMWEB_BLOCK!=0, default on): compile the WKContentRuleList, add it, THEN load —
         // so it applies to the very first resource loads. The compile is async; loadInitial() runs from its
@@ -314,8 +324,25 @@ private:
 
     static void onLoadChanged(WebKitWebView *view, WebKitLoadEvent ev, gpointer data) {
         auto *self = static_cast<WpeEngine*>(data);
-        if (ev == WEBKIT_LOAD_FINISHED)
+        if (ev == WEBKIT_LOAD_STARTED) {
+            qInfo("[t] load started @%.0fms", msSince(self->m_startUs));
+            Q_EMIT self->loadingChanged(true);
+            Q_EMIT self->tlsChanged(true, QString());   // optimistic; onTlsError flips it on a cert failure
+        }
+        if (ev == WEBKIT_LOAD_FINISHED) {
+            self->m_reloadAttempts = 0;                  // a good load refills the crash auto-reload budget
+            Q_EMIT self->loadingChanged(false);
             qInfo("[t] load finished @%.0fms", msSince(self->m_startUs));
+        }
+        if (ev == WEBKIT_LOAD_COMMITTED) {
+            // Passive TLS indicator: get_tls_info flags https + cert errors even when the page still
+            // loaded (lock shows broken for a bad cert, plain for http), independent of tls-errors-policy.
+            GTlsCertificate *cert = nullptr; GTlsCertificateFlags errs = (GTlsCertificateFlags)0;
+            const gboolean secure = webkit_web_view_get_tls_info(view, &cert, &errs);
+            const char *cu = webkit_web_view_get_uri(view);
+            qInfo("[tls] secure=%d errs=0x%x", secure, (unsigned)errs);
+            Q_EMIT self->tlsChanged(secure && errs == 0, QUrl(QString::fromUtf8(cu ? cu : "")).host());
+        }
         // Refresh nav state on commit (snappy button enable/disable) and again on finish.
         if (ev == WEBKIT_LOAD_COMMITTED || ev == WEBKIT_LOAD_FINISHED) {
             const bool b = webkit_web_view_can_go_back(view);
@@ -324,6 +351,31 @@ private:
             Q_EMIT self->canGoBack(b);
             Q_EMIT self->canGoForward(f);
         }
+    }
+
+    static void onTitle(GObject *obj, GParamSpec *, gpointer data) {
+        auto *self = static_cast<WpeEngine*>(data);
+        const char *t = webkit_web_view_get_title(WEBKIT_WEB_VIEW(obj));
+        qInfo("[meta] title=%s", t ? t : "");
+        Q_EMIT self->titleChanged(QString::fromUtf8(t ? t : ""));
+    }
+    static void onProgress(GObject *obj, GParamSpec *, gpointer data) {
+        auto *self = static_cast<WpeEngine*>(data);
+        Q_EMIT self->loadProgressChanged(webkit_web_view_get_estimated_load_progress(WEBKIT_WEB_VIEW(obj)));
+    }
+    static gboolean onTlsError(WebKitWebView *, gchar *failing_uri, GTlsCertificate *,
+                               GTlsCertificateFlags, gpointer data) {
+        auto *self = static_cast<WpeEngine*>(data);
+        qWarning("[tls] cert error: %s", failing_uri ? failing_uri : "?");
+        Q_EMIT self->tlsChanged(false, QUrl(QString::fromUtf8(failing_uri ? failing_uri : "")).host());
+        return FALSE;   // don't proceed — WebKit fails the load; the shell shows a broken-lock indicator
+    }
+    static void onWebProcessTerminated(WebKitWebView *view, WebKitWebProcessTerminationReason reason, gpointer data) {
+        auto *self = static_cast<WpeEngine*>(data);
+        qWarning("[crash] WebProcess terminated (reason=%d), attempts=%d", reason, self->m_reloadAttempts);
+        Q_EMIT self->processCrashed();
+        if (self->m_reloadAttempts < 2) { self->m_reloadAttempts++; webkit_web_view_reload(view); }
+        else qWarning("[crash] giving up auto-reload after %d attempts", self->m_reloadAttempts);
     }
 
     static void onBuffer(WPEView *, WPEBuffer *buffer, gpointer data) {
@@ -390,6 +442,7 @@ private:
     gint64 m_lastBufUs = 0;   // previous buffer-rendered time — gives the inter-frame interval
     gint64 m_pageUs = 0;      // last page-flip dispatch time — gives swipe -> rendered-frame latency
     unsigned m_lastSig = 0;   // fingerprint of the last emitted frame — to drop identical (dup) frames
+    int m_reloadAttempts = 0; // WebProcess-crash auto-reload budget (reset on a successful load)
 };
 
 // ---------------------------------------------------------------------------
@@ -446,6 +499,11 @@ public Q_SLOTS:
     void onEngineUrl(const QString &u) { if (u != m_url) { m_url = u; Q_EMIT urlChanged(); } }
     void onEngineCanGoBack(bool b)     { if (b != m_canGoBack)    { m_canGoBack = b;    Q_EMIT canGoBackChanged(); } }
     void onEngineCanGoForward(bool b)  { if (b != m_canGoForward) { m_canGoForward = b; Q_EMIT canGoForwardChanged(); } }
+    void onEngineTitle(const QString &t)        { if (t != m_title) { m_title = t; Q_EMIT titleChanged(); } }
+    void onEngineLoadProgress(double p)         { if (p != m_loadProgress) { m_loadProgress = p; Q_EMIT loadProgressChanged(); } }
+    void onEngineLoading(bool l)                { if (l != m_loading) { m_loading = l; Q_EMIT loadingChanged(); } }
+    void onEngineTls(bool ok, const QString &h) { if (ok != m_tlsOk || h != m_tlsHost) { m_tlsOk = ok; m_tlsHost = h; Q_EMIT tlsChanged(); } }
+    void onEngineCrashed()                      { Q_EMIT processCrashed(); }
 Q_SIGNALS:
     void urlChanged();
     void titleChanged();
@@ -456,6 +514,7 @@ Q_SIGNALS:
     void readerableChanged();
     void readerModeChanged();
     void tlsChanged();
+    void processCrashed();
 private:
     WpeEngine *m_engine;
     QString m_url, m_title, m_tlsHost;
@@ -768,6 +827,11 @@ int main(int argc, char **argv) {
         QObject::connect(&engine, &WpeEngine::urlChanged,   &bridge, &ShellBridge::onEngineUrl);
         QObject::connect(&engine, &WpeEngine::canGoBack,    &bridge, &ShellBridge::onEngineCanGoBack);
         QObject::connect(&engine, &WpeEngine::canGoForward, &bridge, &ShellBridge::onEngineCanGoForward);
+        QObject::connect(&engine, &WpeEngine::titleChanged,        &bridge, &ShellBridge::onEngineTitle);
+        QObject::connect(&engine, &WpeEngine::loadProgressChanged, &bridge, &ShellBridge::onEngineLoadProgress);
+        QObject::connect(&engine, &WpeEngine::loadingChanged,      &bridge, &ShellBridge::onEngineLoading);
+        QObject::connect(&engine, &WpeEngine::tlsChanged,          &bridge, &ShellBridge::onEngineTls);
+        QObject::connect(&engine, &WpeEngine::processCrashed,      &bridge, &ShellBridge::onEngineCrashed);
         auto *comp = new QQmlComponent(qmlEngine, qmlEngine);
         comp->setData(qEnvironmentVariableIsSet("RMWEB_SIMPLE_QML") ? kQmlSimple : kQml,
                       QUrl(QStringLiteral("inline.qml")));
