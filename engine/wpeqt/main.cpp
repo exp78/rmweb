@@ -227,6 +227,9 @@ public Q_SLOTS:
     void goBack()    { marshalToCtx([this] { if (m_view && webkit_web_view_can_go_back(m_view))    webkit_web_view_go_back(m_view); }); }
     void goForward() { marshalToCtx([this] { if (m_view && webkit_web_view_can_go_forward(m_view)) webkit_web_view_go_forward(m_view); }); }
     void reload()    { marshalToCtx([this] { if (m_view) webkit_web_view_reload(m_view); }); }
+    void stopLoading() { marshalToCtx([this] { if (m_view) webkit_web_view_stop_loading(m_view); }); }
+    void pageNext()  { pageBy(kPageStepPx); }   // façade page-turn (wraps the scroll+repaint in pageBy)
+    void pagePrev()  { pageBy(-kPageStepPx); }
 
 private:
     // Run fn on the worker thread's GMainContext (g_main_context_invoke_full is MT-safe).
@@ -397,19 +400,68 @@ private:
 // ---------------------------------------------------------------------------
 class ShellBridge : public QObject {
     Q_OBJECT
+    // Angelfish-style façade: the QML chrome binds to these properties; engine signals feed them.
+    Q_PROPERTY(QString url          READ url          NOTIFY urlChanged)
+    Q_PROPERTY(QString title        READ title        NOTIFY titleChanged)
+    Q_PROPERTY(bool    loading      READ loading      NOTIFY loadingChanged)
+    Q_PROPERTY(qreal   loadProgress READ loadProgress NOTIFY loadProgressChanged)
+    Q_PROPERTY(bool    canGoBack    READ canGoBack    NOTIFY canGoBackChanged)
+    Q_PROPERTY(bool    canGoForward READ canGoForward NOTIFY canGoForwardChanged)
+    Q_PROPERTY(bool    readerable   READ readerable   NOTIFY readerableChanged)
+    Q_PROPERTY(bool    readerMode   READ readerMode   NOTIFY readerModeChanged)
+    Q_PROPERTY(bool    tlsOk        READ tlsOk        NOTIFY tlsChanged)
+    Q_PROPERTY(QString tlsHost      READ tlsHost      NOTIFY tlsChanged)
 public:
     explicit ShellBridge(WpeEngine *e, QObject *parent = nullptr) : QObject(parent), m_engine(e) {}
+    QString url() const          { return m_url; }
+    QString title() const        { return m_title; }
+    bool    loading() const      { return m_loading; }
+    qreal   loadProgress() const { return m_loadProgress; }
+    bool    canGoBack() const    { return m_canGoBack; }
+    bool    canGoForward() const { return m_canGoForward; }
+    bool    readerable() const   { return m_readerable; }
+    bool    readerMode() const   { return m_readerMode; }
+    bool    tlsOk() const        { return m_tlsOk; }
+    QString tlsHost() const      { return m_tlsHost; }
 public Q_SLOTS:
+    // Chrome -> engine (forwarded to the MT-safe engine slots).
     void goBack()                  { m_engine->goBack(); }
     void goForward()               { m_engine->goForward(); }
     void reload()                  { m_engine->reload(); }
+    void stopLoading()             { m_engine->stopLoading(); }
     void loadUrl(const QString &u) { m_engine->loadUrl(u); }
+    void pageNext()                { m_engine->pageNext(); }
+    void pagePrev()                { m_engine->pagePrev(); }
+    // Phase B/D stubs — present now so the QML contract is stable; wired in later phases.
+    void readerToggle()                  {}
+    void setReaderStyle(const QString &) {}
+    void findText(const QString &)       {}
+    void findNext()                      {}
+    void findPrev()                      {}
+    void findClear()                     {}
+    void setJsEnabled(bool)              {}
+    void hintStart()                     {}
+    void hintFollow(const QString &)     {}
+    // Engine signals -> property updates (relayed worker->GUI, then NOTIFY for QML bindings).
+    void onEngineUrl(const QString &u) { if (u != m_url) { m_url = u; Q_EMIT urlChanged(); } }
+    void onEngineCanGoBack(bool b)     { if (b != m_canGoBack)    { m_canGoBack = b;    Q_EMIT canGoBackChanged(); } }
+    void onEngineCanGoForward(bool b)  { if (b != m_canGoForward) { m_canGoForward = b; Q_EMIT canGoForwardChanged(); } }
 Q_SIGNALS:
-    void urlChanged(const QString &url);
-    void canGoBack(bool ok);
-    void canGoForward(bool ok);
+    void urlChanged();
+    void titleChanged();
+    void loadingChanged();
+    void loadProgressChanged();
+    void canGoBackChanged();
+    void canGoForwardChanged();
+    void readerableChanged();
+    void readerModeChanged();
+    void tlsChanged();
 private:
     WpeEngine *m_engine;
+    QString m_url, m_title, m_tlsHost;
+    qreal   m_loadProgress = 0.0;
+    bool    m_loading = false, m_canGoBack = false, m_canGoForward = false;
+    bool    m_readerable = false, m_readerMode = false, m_tlsOk = true;
 };
 
 // ---------------------------------------------------------------------------
@@ -636,8 +688,8 @@ ApplicationWindow {
             background: Rectangle { color: "white"; border.color: "black"; border.width: 2 }
             RowLayout {
                 anchors.fill: parent; anchors.margins: 6; spacing: 8
-                Button { id: back; text: "◀"; font.pixelSize: 40; implicitWidth: 104; implicitHeight: 88; enabled: false; onClicked: engine.goBack() }
-                Button { id: fwd;  text: "▶"; font.pixelSize: 40; implicitWidth: 104; implicitHeight: 88; enabled: false; onClicked: engine.goForward() }
+                Button { id: back; text: "◀"; font.pixelSize: 40; implicitWidth: 104; implicitHeight: 88; enabled: engine.canGoBack;    onClicked: engine.goBack() }
+                Button { id: fwd;  text: "▶"; font.pixelSize: 40; implicitWidth: 104; implicitHeight: 88; enabled: engine.canGoForward; onClicked: engine.goForward() }
                 Button { id: rel;  text: "⟳"; font.pixelSize: 40; implicitWidth: 104; implicitHeight: 88;                 onClicked: engine.reload() }
                 TextField {
                     id: address; Layout.fillWidth: true; implicitHeight: 88; font.pixelSize: 34
@@ -653,9 +705,7 @@ ApplicationWindow {
     }
     Connections {
         target: engine
-        function onUrlChanged(url)  { if (!address.activeFocus) address.text = url }
-        function onCanGoBack(ok)    { back.enabled = ok }
-        function onCanGoForward(ok) { fwd.enabled = ok }
+        function onUrlChanged() { if (!address.activeFocus) address.text = engine.url }
     }
     InputPanel {
         id: inputPanel; z: 99
@@ -715,9 +765,9 @@ int main(int argc, char **argv) {
         qmlRegisterType<WpeView>("rmweb", 1, 0, "WpeView");
         auto *qmlEngine = new QQmlEngine(&app);
         qmlEngine->rootContext()->setContextProperty("engine", &bridge);   // QML talks to the GUI-thread bridge
-        QObject::connect(&engine, &WpeEngine::urlChanged,   &bridge, &ShellBridge::urlChanged);
-        QObject::connect(&engine, &WpeEngine::canGoBack,    &bridge, &ShellBridge::canGoBack);
-        QObject::connect(&engine, &WpeEngine::canGoForward, &bridge, &ShellBridge::canGoForward);
+        QObject::connect(&engine, &WpeEngine::urlChanged,   &bridge, &ShellBridge::onEngineUrl);
+        QObject::connect(&engine, &WpeEngine::canGoBack,    &bridge, &ShellBridge::onEngineCanGoBack);
+        QObject::connect(&engine, &WpeEngine::canGoForward, &bridge, &ShellBridge::onEngineCanGoForward);
         auto *comp = new QQmlComponent(qmlEngine, qmlEngine);
         comp->setData(qEnvironmentVariableIsSet("RMWEB_SIMPLE_QML") ? kQmlSimple : kQml,
                       QUrl(QStringLiteral("inline.qml")));
@@ -756,7 +806,7 @@ int main(int argc, char **argv) {
         touchReader.moveToThread(&touchThread);
         QObject::connect(&touchThread, &QThread::started, &touchReader, &TouchReader::run);
         QObject::connect(&touchReader, &TouchReader::swipe, &app, [&engine](int dir) {
-            engine.pageBy(dir > 0 ? kPageStepPx : -kPageStepPx);
+            if (dir > 0) engine.pageNext(); else engine.pagePrev();
         });
         // Touch->mouse bridge: a tap becomes a synthetic left click delivered to the QQuickWindow on the
         // GUI thread, so Qt Quick Controls (toolbar buttons, address field, keyboard) hit-test and handle
