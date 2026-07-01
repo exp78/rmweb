@@ -67,7 +67,7 @@ is a Qt6 app (= WPE UIProcess); `WpeEngine` drives WPE headless on a worker thre
 build `scripts/build-wpeqt.sh`; run `scripts/run-wpeqt-on-device.sh {save|show}`. Engine also proven standalone
 on-device (3a: `scripts/render-on-device.sh`). All integration gotchas in research-reuse.md §8 (QT_NO_KEYWORDS,
 worker-thread GMainContext, BGRA==ARGB32, /usr/libexec overlay, BusyBox no-timeout).
-Phase 4 (scope A) 🔶 IN PROGRESS (2026-06-26): **finger touch + scroll work end-to-end on device.** Hard-won
+Phase 4 (scope A) ✅ DONE (2026-06-30): **finger touch + scroll + reading shell work end-to-end on device.** Hard-won
 facts, all verified on-device and written up in `docs/research/` (4 sourced docs):
 - **Touch:** the epaper QPA posts finger touch with a NULL window → Qt drops it (and that path crashes WebKit).
   So we read the finger digitizer **directly from evdev** — node **event3 = "Elan touch input"** (event2 = pen;
@@ -99,5 +99,23 @@ SIMD JIT) → frame render ~93 ms, page turns land on e-ink in **~120–250 ms**
 Bundle now ships `libLLVM-16.so.1` + deps (`engine/mesa-llvmpipe.incontainer.sh`); run with
 `GALLIUM_DRIVER=llvmpipe`. Present = one grayscale frame per turn (sig-dedup drops idle/duplicate renders;
 `RMWEB_FULL_EVERY=0` = no colour flash = least flicker). See the `six-second-render-softpipe` memory.
-Remaining for Phase 4: reading-shell chrome, HTTPS bundling, optional refresh flicker/ghost-clear tuning,
-then code-review + simplify.
+Phase 4 (scope A) shipped the reading shell: B2 chrome (hand-painted into the WPE frame + C++ hit-test),
+reader mode (Mozilla Readability), on-screen URL keyboard, page/reader zoom, tap-to-follow-links, loading +
+"couldn't render" indicators, mobile-UA-as-opt-in + readability CSS. Then code-review + simplify checkpoints.
+
+Phase 5 ✅ DONE (verified on device 2026-07-01): **rmweb is now a self-contained installable app under
+`/home/root/rmweb`.** On-device launcher `device/rmweb`: atomic-`mkdir` single-instance lock → stop xochitl →
+overlay-mount the WPE helpers → source the shared env → run the app; a `trap` **ALWAYS restores xochitl on
+every exit (clean/crash/TERM)** — the "no-brick" contract (host-tested with stubbed `systemctl`/`mount` in
+`tests/launcher_test.sh`; hardware-verified: TERM-kill and the ⏻-tap both restore xochitl with no lingering
+procs and no watchdog reboot; `kill -9` backstop = xochitl stays boot-`enabled`). Idempotent `device/install.sh`
+(integrity gate + chmod + VERSION `0.5.0` + optional rm-appload icon) is also the OTA-recovery step — everything
+lives under `/home` (survives OTA; nothing touches `/etc`). A **`⏻` exit button** in the chrome calls
+`std::_Exit(0)` (skips the WebKit teardown SIGABRT; exit 0 = no watchdog reboot) → the launcher restores xochitl
+(verified end-to-end: `tap @1596,46 → rmweb-wpeqt exited rc=0 → restarting xochitl`). The production env is DRY
+in `device/rmweb-env.sh` (sourced by both the launcher and the dev runner `scripts/run-wpeqt-on-device.sh`);
+`scripts/bundle.sh` ships launcher/env/installer/VERSION/icon; user docs in `docs/install.md`. Layer B
+(home-screen icon via XOVI + rm-appload: `device/appload/rmweb.draft` + `device/icon.svg`) auto-registers via
+`install.sh` when rm-appload is present, else degrades gracefully (rm-appload not installed on this device).
+Deferred: suspend/resume (sleep), GitHub publish. Design + plan:
+`docs/superpowers/{specs,plans}/2026-06-30-rmweb-phase5-packaging*`.
