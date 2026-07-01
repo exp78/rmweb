@@ -248,6 +248,7 @@ Q_SIGNALS:
     void readerModeChanged(bool on);               // reader view applied/cleared -> toolbar button state
     void readerableChanged(bool can);              // current page looks like an article -> enable Reader
     void renderFailed(bool failed);                // load finished but the page rendered ~blank (heavy SPA)
+    void renderingChanged(bool on);                // true at LOAD_FINISHED for http/https (compositing); false at first-content or fail
     void linkMissed();                             // a content tap hit no link -> GUI falls back to chrome toggle
     void bookmarkedChanged(bool on);               // current page bookmark state changed
 
@@ -591,6 +592,8 @@ private:
                 qInfo("[render] nonWhite=%d blank=%d", self->m_lastNonWhite, blank);
                 self->m_renderFailedState = blank;
                 Q_EMIT self->renderFailed(blank);
+                // renderFailed(true) = the page stayed blank -> clear the "Rendering…" badge too.
+                if (blank && self->m_renderingState) { self->m_renderingState = false; Q_EMIT self->renderingChanged(false); }
             }
             return G_SOURCE_REMOVE; }, m, [](gpointer d) { delete static_cast<RenderCheckMsg*>(d); });
         g_source_attach(s, m_ctx);
@@ -643,17 +646,38 @@ private:
             self->m_loadGen++;                          // invalidate any pending render-check from a prior load
             self->m_renderFailedState = false;
             self->m_lastNonWhite = 0;                   // no frames yet => blank until onBuffer proves otherwise
+            // [perf] instrumentation: record per-load origin and reset milestones/flags.
+            self->m_loadStartUs = g_get_monotonic_time();
+            self->m_firstContentLogged = false;
+            self->m_progressMilestone = 25;
+            // Cancel any active "Rendering…" state from the previous navigation.
+            if (self->m_renderingState) { self->m_renderingState = false; Q_EMIT self->renderingChanged(false); }
+            const char *startUri = webkit_web_view_get_uri(view);
             qInfo("[t] load started @%.0fms", msSince(self->m_startUs));
+            qInfo("[perf] load-started url=%s", startUri ? startUri : "");
             Q_EMIT self->loadingChanged(true);
             Q_EMIT self->renderFailed(false);           // new load -> clear any "couldn't render" notice
             Q_EMIT self->tlsChanged(true, QString());   // optimistic; onTlsError flips it on a cert failure
             self->scheduleRenderCheck();                // LOAD_STARTED always fires -> robust blank-check trigger
+        }
+        if (ev == WEBKIT_LOAD_COMMITTED) {
+            qInfo("[perf] load-committed @%.0fms", msSince(self->m_loadStartUs));
+            // A real navigation/reload landed fresh original content -> any reader view is gone; reset its state.
+            if (self->m_readerMode) { self->m_readerMode = false; Q_EMIT self->readerModeChanged(false); }
+            // Passive TLS indicator: get_tls_info flags https + cert errors even when the page still
+            // loaded (lock shows broken for a bad cert, plain for http), independent of tls-errors-policy.
+            GTlsCertificate *cert = nullptr; GTlsCertificateFlags errs = (GTlsCertificateFlags)0;
+            const gboolean secure = webkit_web_view_get_tls_info(view, &cert, &errs);
+            const char *cu = webkit_web_view_get_uri(view);
+            qInfo("[tls] secure=%d errs=0x%x", secure, (unsigned)errs);
+            Q_EMIT self->tlsChanged(secure && errs == 0, QUrl(QString::fromUtf8(cu ? cu : "")).host());
         }
         if (ev == WEBKIT_LOAD_FINISHED) {
             self->m_reloadAttempts = 0;                  // a good load refills the crash auto-reload budget
             Q_EMIT self->loadingChanged(false);
             self->checkReaderable();                     // article? -> enable/disable the Reader button
             qInfo("[t] load finished @%.0fms", msSince(self->m_startUs));
+            qInfo("[perf] load-finished @%.0fms", msSince(self->m_loadStartUs));
             // Record history for real web pages (not file:// start page, not reader-injected DOM).
             {
                 const char* u = webkit_web_view_get_uri(view);
@@ -664,22 +688,15 @@ private:
                     rmweb::addHistory(self->m_history, url, self->m_curTitle, (long)time(nullptr));
                     rmweb::saveHistory(self->m_profileDir, self->m_history);
                     Q_EMIT self->bookmarkedChanged(rmweb::isBookmarked(self->m_bookmarks, url));
+                    // "Rendering…" badge: show while the heavy page composites on llvmpipe after load.
+                    // Cleared by first non-blank content frame in onBuffer, or by renderFailed.
+                    if (!self->m_renderingState) { self->m_renderingState = true; Q_EMIT self->renderingChanged(true); }
                 } else {
                     self->m_curUrl.clear(); self->m_curTitle.clear();
                     Q_EMIT self->bookmarkedChanged(false);
+                    // file:// pages (start page) don't need the "Rendering…" badge.
                 }
             }
-        }
-        if (ev == WEBKIT_LOAD_COMMITTED) {
-            // A real navigation/reload landed fresh original content -> any reader view is gone; reset its state.
-            if (self->m_readerMode) { self->m_readerMode = false; Q_EMIT self->readerModeChanged(false); }
-            // Passive TLS indicator: get_tls_info flags https + cert errors even when the page still
-            // loaded (lock shows broken for a bad cert, plain for http), independent of tls-errors-policy.
-            GTlsCertificate *cert = nullptr; GTlsCertificateFlags errs = (GTlsCertificateFlags)0;
-            const gboolean secure = webkit_web_view_get_tls_info(view, &cert, &errs);
-            const char *cu = webkit_web_view_get_uri(view);
-            qInfo("[tls] secure=%d errs=0x%x", secure, (unsigned)errs);
-            Q_EMIT self->tlsChanged(secure && errs == 0, QUrl(QString::fromUtf8(cu ? cu : "")).host());
         }
         // Refresh nav state on commit (snappy button enable/disable) and again on finish.
         if (ev == WEBKIT_LOAD_COMMITTED || ev == WEBKIT_LOAD_FINISHED) {
@@ -699,7 +716,13 @@ private:
     }
     static void onProgress(GObject *obj, GParamSpec *, gpointer data) {
         auto *self = static_cast<WpeEngine*>(data);
-        Q_EMIT self->loadProgressChanged(webkit_web_view_get_estimated_load_progress(WEBKIT_WEB_VIEW(obj)));
+        const double p = webkit_web_view_get_estimated_load_progress(WEBKIT_WEB_VIEW(obj));
+        Q_EMIT self->loadProgressChanged(p);
+        // [perf] milestone logs at 25/50/75% (once each per load).
+        while (self->m_progressMilestone <= 75 && p >= self->m_progressMilestone / 100.0) {
+            qInfo("[perf] progress %d%% @%.0fms", self->m_progressMilestone, msSince(self->m_loadStartUs));
+            self->m_progressMilestone += 25;
+        }
     }
     static gboolean onTlsError(WebKitWebView *, gchar *failing_uri, GTlsCertificate *,
                                GTlsCertificateFlags, gpointer data) {
@@ -759,6 +782,13 @@ private:
         if (nonWhite >= kBlankSamples && self->m_renderFailedState) {   // content finally painted -> clear notice
             self->m_renderFailedState = false; Q_EMIT self->renderFailed(false);
         }
+        // [perf] first-content: the first non-blank frame after a load started (once per navigation).
+        // Also clears the "Rendering…" badge since visible content has arrived.
+        if (nonWhite >= kBlankSamples && !self->m_firstContentLogged) {
+            self->m_firstContentLogged = true;
+            qInfo("[perf] first-content @%.0fms (nonWhite=%d)", msSince(self->m_loadStartUs), nonWhite);
+            if (self->m_renderingState) { self->m_renderingState = false; Q_EMIT self->renderingChanged(false); }
+        }
         // Skip identical frames: WebKit re-submits the same composited buffer on its idle heartbeat, and
         // the rAF page-turn pulse yields several identical ticks. Only repaint the e-ink when pixels change
         // — this kills the wasteful periodic re-present and any flicker from the nudge.
@@ -794,6 +824,10 @@ private:
     bool m_renderFailedState = false; // currently flagged blank (so a later content frame can auto-clear it)
     int m_reloadAttempts = 0; // WebProcess-crash auto-reload budget (reset on a successful load)
     guint m_loadGen = 0;           // bumped on each load start -> a stale render-check (grace timer) is skipped
+    gint64 m_loadStartUs = 0;      // monotonic time of the current LOAD_STARTED (for [perf] ms offsets)
+    bool m_firstContentLogged = false; // true once [perf] first-content has been emitted for this load
+    int m_progressMilestone = 0;   // next progress milestone to log: 25, 50, 75 (reset per load)
+    bool m_renderingState = false; // true while compositing (LOAD_FINISHED -> first-content or renderFailed)
     bool m_readerMode = false;     // reader view currently applied (vs the original page)
     bool m_readerApplying = false; // an applyReader() JS eval is in flight (gates re-entrant Reader taps)
     std::string m_readabilityJs;   // vendored Readability.js, lazily slurped + cached
@@ -842,8 +876,10 @@ public:
         const qreal w = width(), h = height();
         if (!m_img.isNull()) p->drawImage(QRectF(0, 0, w, h), m_img);
         else                 p->fillRect(QRectF(0, 0, w, h), Qt::white);
-        if (m_loading && !m_renderFailed) drawLoadingBadge(p, w);    // a never-finishing blank SPA stays
-        else if (m_renderFailed)          drawRenderNotice(p, w, h); // "loading" -> notice wins over the badge
+        // Badge precedence: Loading > RenderFailed > Rendering > nothing.
+        if (m_loading && !m_renderFailed)          drawLoadingBadge(p, w);    // "Loading NN%" while page loads
+        else if (m_renderFailed)                   drawRenderNotice(p, w, h); // notice wins once we know it failed
+        else if (m_rendering && !m_renderFailed)   drawRenderingBadge(p, w);  // "Rendering…" while compositing
         if (!m_chromeOn) return;                                     // reader-fullscreen: nothing below the bar
         drawChromeBar(p, w);
         if (!m_editing) return;          // the keyboard shows only during URL entry (entered via the Address
@@ -903,6 +939,7 @@ public Q_SLOTS:
         m_loadProgress = p; if (step && m_loading) schedule();
     }
     void setRenderFailed(bool v)   { if (v != m_renderFailed) { m_renderFailed = v; schedule(); } }
+    void setRendering(bool v)      { if (v != m_rendering)  { m_rendering  = v; schedule(); } }
     void setAddr(const QString &s) { if (s != m_addr)     { m_addr     = s; schedule(); } }
     void setReaderMode(bool v)     { if (v != m_readerMode)  { m_readerMode  = v; schedule(); } }
     void setReaderable(bool v)     { if (v != m_readerable) { m_readerable = v; schedule(); } }
@@ -925,21 +962,34 @@ private Q_SLOTS:
     }
 private:
     // --- B2 frame painters (called by paint(); kept here so paint() stays a short orchestrator) -------------
+    // Shared pill: draws a centered rounded-rect badge with a text label at kBarH+50. Returns the pill rect.
+    QRectF drawTextPill(QPainter *p, qreal w, const QString &lbl, qreal extraLeftW = 0) const {
+        QFont lf = p->font(); lf.setPixelSize(40); p->setFont(lf);
+        const qreal tw = p->fontMetrics().horizontalAdvance(lbl);
+        const qreal pad = 30, bh = 96, bw = pad + extraLeftW + tw + pad;
+        const qreal bx = (w - bw) / 2, by = kBarH + 50;
+        p->setPen(Qt::black); p->setBrush(Qt::white);
+        p->drawRoundedRect(QRectF(bx, by, bw, bh), 18, 18);
+        p->setBrush(Qt::NoBrush); p->setPen(Qt::black);
+        p->drawText(QRectF(bx + pad + extraLeftW, by, tw + 6, bh), Qt::AlignVCenter | Qt::AlignLeft, lbl);
+        return QRectF(bx, by, bw, bh);
+    }
     // "Working hard" indicator while a page loads: an hourglass + "Loading NN%" from the real load progress.
     void drawLoadingBadge(QPainter *p, qreal w) const {
         const QString lbl = QStringLiteral("Loading %1%").arg(int(m_loadProgress * 100));
-        QFont lf = p->font(); lf.setPixelSize(40); p->setFont(lf);
-        const qreal tw = p->fontMetrics().horizontalAdvance(lbl);
-        const qreal iconW = 34, pad = 30, gap = 18, bh = 96, bw = pad + iconW + gap + tw + pad;
-        const qreal bx = (w - bw) / 2, by = kBarH + 50, ix = bx + pad, iy = by + (bh - 48) / 2;
-        p->setPen(Qt::black); p->setBrush(Qt::white);
-        p->drawRoundedRect(QRectF(bx, by, bw, bh), 18, 18);
-        QPolygonF top, bot;                                          // hourglass = two triangles
+        const qreal iconW = 34, gap = 18;
+        QRectF pill = drawTextPill(p, w, lbl, iconW + gap);
+        // Hourglass icon inside the left padding area of the pill.
+        const qreal ix = pill.x() + 30, iy = pill.y() + (pill.height() - 48) / 2;
+        QPolygonF top, bot;
         top << QPointF(ix, iy) << QPointF(ix + iconW, iy) << QPointF(ix + iconW / 2, iy + 24);
         bot << QPointF(ix + iconW / 2, iy + 24) << QPointF(ix, iy + 48) << QPointF(ix + iconW, iy + 48);
         p->setBrush(Qt::black); p->drawPolygon(top); p->drawPolygon(bot);
-        p->setBrush(Qt::NoBrush); p->setPen(Qt::black);
-        p->drawText(QRectF(ix + iconW + gap, by, tw + 6, bh), Qt::AlignVCenter | Qt::AlignLeft, lbl);
+        p->setBrush(Qt::NoBrush);
+    }
+    // "Rendering…" pill: shown after load-finished while llvmpipe composites the page (no progress data).
+    void drawRenderingBadge(QPainter *p, qreal w) const {
+        drawTextPill(p, w, QStringLiteral("Rendering…"));
     }
     // Load finished but the page rendered ~nothing (a heavy JS app the CPU can't run). "(!)" + two lines.
     void drawRenderNotice(QPainter *p, qreal w, qreal h) const {
@@ -1094,6 +1144,7 @@ private:
     bool m_chromeOn = true, m_canBack = false, m_canFwd = false, m_loading = false;
     qreal m_loadProgress = 0.0;          // 0..1 estimated load progress (drives the loading badge)
     bool m_renderFailed = false;         // load finished but the page is ~blank (heavy SPA) -> show a notice
+    bool m_rendering = false;            // load finished, page compositing on llvmpipe -> show "Rendering…" badge
     bool m_readerMode = false, m_readerable = false;
     bool m_bookmarked = false;   // current page is bookmarked -> filled star
     bool m_exitArmed = false;    // first ⏻ tap armed: show inverted pill; second tap within 3s actually exits
@@ -1352,6 +1403,8 @@ int main(int argc, char **argv) {
         QObject::connect(&engine, &WpeEngine::bookmarkedChanged, view,
                          [view](bool on){ view->setBookmarked(on); }, Qt::QueuedConnection);
         QObject::connect(&engine, &WpeEngine::renderFailed,      view, &WpeView::setRenderFailed);
+        QObject::connect(&engine, &WpeEngine::renderingChanged, view,
+                         [view](bool on){ view->setRendering(on); }, Qt::QueuedConnection);
         // URL entry: the on-screen keyboard's Go (WpeView::urlEntered) -> load it (engine.loadUrl normalizes).
         QObject::connect(view, &WpeView::urlEntered, &app, [&engine](const QString &u){ engine.loadUrl(u); });
 
