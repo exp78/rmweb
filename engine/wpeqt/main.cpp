@@ -67,6 +67,9 @@
 #include "url.h"       // pure URL normalizer (unit-tested in tests/url_test.cpp)
 #include "tapzone.h"   // pure tap-zone classifier (unit-tested in tests/tapzone_test.cpp)
 #include "keyboard.h"  // pure on-screen-keyboard layout + hit-test (unit-tested in tests/keyboard_test.cpp)
+#include "profile.h"   // persistent store: bookmarks / history / settings
+#include "startpage.h" // start-page HTML generator
+#include <ctime>
 using rmweb::Gesture;
 using rmweb::classifyGesture;
 
@@ -236,11 +239,23 @@ Q_SIGNALS:
     void readerableChanged(bool can);              // current page looks like an article -> enable Reader
     void renderFailed(bool failed);                // load finished but the page rendered ~blank (heavy SPA)
     void linkMissed();                             // a content tap hit no link -> GUI falls back to chrome toggle
+    void bookmarkedChanged(bool on);               // current page bookmark state changed
 
 public Q_SLOTS:
     void start() {
         g_main_context_push_thread_default(m_ctx);
         m_startUs = g_get_monotonic_time();
+
+        // Load persistent profile (bookmarks, history, settings) before any WebKit activity.
+        if (const char* p = getenv("RMWEB_PROFILE"); p && *p) m_profileDir = p; else m_profileDir = "/home/root/.rmweb";
+        { std::string mk = "mkdir -p '" + m_profileDir + "'"; (void)system(mk.c_str()); }
+        m_bookmarks = rmweb::loadBookmarks(m_profileDir);
+        m_history   = rmweb::loadHistory(m_profileDir);
+        m_settings  = rmweb::loadSettings(m_profileDir);
+        m_zoom = m_settings.zoom;
+        m_readerFont = m_settings.readerFont;
+        // RMWEB_READER_FONT env wins over persisted value (same guard as ctor, re-applied after settings load).
+        if (const char *e = getenv("RMWEB_READER_FONT")) { const int v = atoi(e); if (v >= 16 && v <= 96) m_readerFont = v; }
 
         GError *err = nullptr;
         WPEDisplay *display = wpe_display_headless_new();
@@ -289,16 +304,42 @@ public Q_SLOTS:
         g_signal_connect(m_view, "notify::estimated-load-progress", G_CALLBACK(&WpeEngine::onProgress), this);
         g_signal_connect(m_view, "load-failed-with-tls-errors", G_CALLBACK(&WpeEngine::onTlsError), this);
         g_signal_connect(m_view, "web-process-terminated", G_CALLBACK(&WpeEngine::onWebProcessTerminated), this);
+        g_signal_connect(m_view, "decide-policy", G_CALLBACK(+[](WebKitWebView*, WebKitPolicyDecision* dec,
+                                           WebKitPolicyDecisionType type, gpointer data) -> gboolean {
+            if (type != WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION) return FALSE;
+            auto* self = static_cast<WpeEngine*>(data);
+            auto* nav = WEBKIT_NAVIGATION_POLICY_DECISION(dec);
+            WebKitNavigationAction* act = webkit_navigation_policy_decision_get_navigation_action(nav);
+            WebKitURIRequest* req = webkit_navigation_action_get_request(act);
+            const char* uri = webkit_uri_request_get_uri(req);
+            if (uri && std::string(uri).rfind("rmweb:", 0) == 0) {
+                if (std::string(uri) == "rmweb:clear-history") {
+                    self->m_history.clear();
+                    rmweb::saveHistory(self->m_profileDir, self->m_history);
+                    self->goHome();
+                }
+                webkit_policy_decision_ignore(dec);
+                return TRUE;
+            }
+            return FALSE;
+        }), this);
 
-        // User-Agent: DEFAULT = WPE's own UA — it renders Wikipedia + server-rendered content sites (our
-        // primary reading targets). A mobile UA makes such sites serve a JS-only mobile skin that paints BLANK
-        // on this CPU engine (verified: Wikipedia blank under any mobile UA). RMWEB_UA=mobile opts into the
-        // lighter mobile layout for heavy JS-app sites (e.g. ixbt); any other non-empty value = that exact string.
-        if (const char *uaEnv = getenv("RMWEB_UA"); uaEnv && *uaEnv && std::string(uaEnv) != "off") {
-            const char *ua = (std::string(uaEnv) == "mobile") ? kMobileUA : uaEnv;
-            webkit_settings_set_user_agent(webkit_web_view_get_settings(m_view), ua);
-            qInfo("[ua] %s", ua);
+        // User-Agent: env overrides; else persisted setting; else WPE default.
+        // RMWEB_UA=mobile opts into lighter mobile layout for heavy JS-app sites; any other non-empty value =
+        // that exact string; "off" = use WPE default (also clears any persisted UA).
+        {
+            std::string ua = m_settings.ua;
+            if (const char *uaEnv = getenv("RMWEB_UA"); uaEnv && *uaEnv && std::string(uaEnv) != "off") ua = uaEnv;
+            else if (uaEnv && std::string(uaEnv) == "off") ua = "";
+            if (!ua.empty()) {
+                const char* real = (ua == "mobile") ? kMobileUA : ua.c_str();
+                webkit_settings_set_user_agent(webkit_web_view_get_settings(m_view), real);
+                qInfo("[ua] %s", real);
+            }
+            m_settings.ua = ua;
         }
+        // Apply persisted zoom (must be done after the view is fully set up).
+        webkit_web_view_set_zoom_level(m_view, m_zoom);
 
         // Content blocking (RMWEB_BLOCK!=0, default on): compile the WKContentRuleList, add it, THEN load —
         // so it applies to the very first resource loads. The compile is async; loadInitial() runs from its
@@ -340,6 +381,25 @@ public Q_SLOTS:
     // Safe to call from the GUI thread (g_main_context_invoke_full is MT-safe); QML calls these directly.
     void loadUrl(const QString &u) { const std::string s = rmweb::normalizeUrl(u.toStdString());
         marshalToCtx([this, s] { if (m_view) webkit_web_view_load_uri(m_view, s.c_str()); }); }
+    void goHome() {
+        // Marshalled: reads/writes m_bookmarks and m_history, which the worker-thread LOAD_FINISHED also touches.
+        marshalToCtx([this] {
+            const std::string html = rmweb::buildStartPage(m_bookmarks, firstN(m_history, 15));
+            const std::string path = m_profileDir + "/home.html";
+            rmweb::detail::atomicWrite(path, html);
+            loadUrl(QString::fromStdString("file://" + path));
+        });
+    }
+    void toggleBookmark() {
+        // Marshalled: reads/writes m_bookmarks, which the worker-thread LOAD_FINISHED also touches.
+        marshalToCtx([this] {
+            if (m_curUrl.empty()) return;
+            const bool on = rmweb::toggleBookmark(m_bookmarks, m_curUrl, m_curTitle);
+            rmweb::saveBookmarks(m_profileDir, m_bookmarks);
+            Q_EMIT bookmarkedChanged(on);
+        });
+    }
+    bool isCurrentBookmarked() const { return rmweb::isBookmarked(m_bookmarks, m_curUrl); }
     void goBack()    { marshalToCtx([this] { if (m_view && webkit_web_view_can_go_back(m_view))    webkit_web_view_go_back(m_view); }); }
     void goForward() { marshalToCtx([this] { if (m_view && webkit_web_view_can_go_forward(m_view)) webkit_web_view_go_forward(m_view); }); }
     void reload()    { marshalToCtx([this] { if (m_view) webkit_web_view_reload(m_view); }); }
@@ -375,6 +435,8 @@ public Q_SLOTS:
                 webkit_web_view_set_zoom_level(m_view, m_zoom);
             }
             qInfo("[zoom] reader=%d zoom=%.2f font=%d", m_readerMode, m_zoom, m_readerFont);
+            m_settings.zoom = m_zoom; m_settings.readerFont = m_readerFont;
+            rmweb::saveSettings(m_profileDir, m_settings);
         });
     }
     // Reader mode: inject Readability + reflow the article into one clean column; toggle off = reload original.
@@ -387,6 +449,9 @@ public Q_SLOTS:
     }
 
 private:
+    static std::vector<rmweb::HistoryEntry> firstN(const std::vector<rmweb::HistoryEntry>& v, size_t n) {
+        return { v.begin(), v.begin() + std::min(n, v.size()) };
+    }
     // Run fn on the worker thread's GMainContext (g_main_context_invoke_full is MT-safe).
     void marshalToCtx(std::function<void()> fn) {
         auto *f = new std::function<void()>(std::move(fn));
@@ -524,8 +589,18 @@ private:
     }
 
     void loadInitial() {
-        if (m_url.isEmpty()) webkit_web_view_load_html(m_view, kTestPage, nullptr);
-        else                 webkit_web_view_load_uri(m_view, m_url.toUtf8().constData());
+        if (m_url.isEmpty()) {
+            // No URL given: show the start page (bookmarks + recent history). goHome() is already
+            // marshalled to the worker context via marshalToCtx, which is safe to call from here
+            // (we ARE on the worker context, so the inner marshalToCtx re-posts to the same context —
+            // harmless, and keeps the identical dispatch path as a tap-router-initiated goHome()).
+            const std::string html = rmweb::buildStartPage(m_bookmarks, firstN(m_history, 15));
+            const std::string path = m_profileDir + "/home.html";
+            rmweb::detail::atomicWrite(path, html);
+            webkit_web_view_load_uri(m_view, ("file://" + path).c_str());
+        } else {
+            webkit_web_view_load_uri(m_view, m_url.toUtf8().constData());
+        }
         qInfo("[t] load dispatched @%.0fms", msSince(m_startUs));
     }
     // WKContentRuleList compiled -> add it to the UCM (now active for all loads), then kick off the page load.
@@ -570,6 +645,18 @@ private:
             Q_EMIT self->loadingChanged(false);
             self->checkReaderable();                     // article? -> enable/disable the Reader button
             qInfo("[t] load finished @%.0fms", msSince(self->m_startUs));
+            // Record history for real web pages (not file:// start page, not reader-injected DOM).
+            {
+                const char* u = webkit_web_view_get_uri(view);
+                const char* t = webkit_web_view_get_title(view);
+                std::string url = u ? u : "";
+                if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
+                    self->m_curUrl = url; self->m_curTitle = t ? t : "";
+                    rmweb::addHistory(self->m_history, url, self->m_curTitle, (long)time(nullptr));
+                    rmweb::saveHistory(self->m_profileDir, self->m_history);
+                    Q_EMIT self->bookmarkedChanged(rmweb::isBookmarked(self->m_bookmarks, url));
+                }
+            }
         }
         if (ev == WEBKIT_LOAD_COMMITTED) {
             // A real navigation/reload landed fresh original content -> any reader view is gone; reset its state.
@@ -702,6 +789,11 @@ private:
     double m_dpr = 2.0;            // panel-px -> CSS-px divisor (for elementFromPoint link hit-testing)
     double m_zoom = 1.0;           // page zoom level (A-/A+ in normal mode; webkit_web_view_set_zoom_level)
     int m_readerFont = 38;         // reader column font px (A-/A+ in reader mode; RMWEB_READER_FONT default)
+    std::string m_profileDir;                       // /home/root/.rmweb (or $RMWEB_PROFILE)
+    std::vector<rmweb::Bookmark> m_bookmarks;
+    std::vector<rmweb::HistoryEntry> m_history;
+    rmweb::Settings m_settings;
+    std::string m_curUrl, m_curTitle;               // current committed page (for history + bookmark)
 };
 
 // ---------------------------------------------------------------------------
