@@ -60,7 +60,7 @@ inline std::vector<Bookmark> loadBookmarks(const std::string& dir) {
     return out;
 }
 inline void saveBookmarks(const std::string& dir, const std::vector<Bookmark>& bm) {
-    std::string s; for (const auto& b : bm) s += b.url + "\t" + sanitizeField(b.title) + "\n";
+    std::string s; for (const auto& b : bm) s += sanitizeField(b.url) + "\t" + sanitizeField(b.title) + "\n";
     detail::atomicWrite(dir + "/bookmarks.txt", s);
 }
 inline std::vector<HistoryEntry> loadHistory(const std::string& dir) {
@@ -78,7 +78,7 @@ inline std::vector<HistoryEntry> loadHistory(const std::string& dir) {
 }
 inline void saveHistory(const std::string& dir, const std::vector<HistoryEntry>& h) {
     std::string s;
-    for (const auto& e : h) s += std::to_string(e.ts) + "\t" + e.url + "\t" + sanitizeField(e.title) + "\n";
+    for (const auto& e : h) s += std::to_string(e.ts) + "\t" + sanitizeField(e.url) + "\t" + sanitizeField(e.title) + "\n";
     detail::atomicWrite(dir + "/history.txt", s);
 }
 inline Settings loadSettings(const std::string& dir) {
