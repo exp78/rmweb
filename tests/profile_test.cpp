@@ -1,5 +1,4 @@
 #include "../engine/wpeqt/profile.h"
-#include <cassert>
 #include <cstdio>
 #include <string>
 using namespace rmweb;
@@ -25,12 +24,20 @@ int main() {
     for (int i = 0; i < 400; ++i) addHistory(h, "http://x" + std::to_string(i), "t", i);
     CHECK(h.size() == 300);                                // capped
 
+    // file round-trip in a temp dir for history
+    std::string dir = "/tmp/rmweb-profile-test";
+    std::string mk = "mkdir -p " + dir; (void)std::system(mk.c_str());
+    saveHistory(dir, h);
+    auto h2 = loadHistory(dir);
+    CHECK(h2.size() == 300);
+    CHECK(h2[0].url == h[0].url);
+    CHECK(h2[0].ts == h[0].ts);
+    CHECK(h2[0].title == h[0].title);
+
     // sanitizeField strips tab/newline
     CHECK(sanitizeField("a\tb\nc") == "a b c");
 
     // file round-trip in a temp dir
-    std::string dir = "/tmp/rmweb-profile-test";
-    std::string mk = "mkdir -p " + dir; (void)std::system(mk.c_str());
     std::vector<Bookmark> b2 = {{"http://x", "X title"}, {"http://y", "Y\ttab"}};
     saveBookmarks(dir, b2);
     auto b3 = loadBookmarks(dir);
