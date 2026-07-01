@@ -818,6 +818,15 @@ public:
         connect(&m_fallback, &QTimer::timeout, this,
                 [this]{ qInfo("[t][gui] present fallback-release (no frameSwapped)"); releaseGate(); });
         m_keys = rmweb::buildKeyboard(kPanelW, kPanelH, kKbTopY);   // URL keyboard, drawn into the frame (B2)
+        // Exit-guard disarm timer: if a second ⏻ tap doesn't arrive within 3 s, unarm silently.
+        m_exitDisarm.setSingleShot(true);
+        connect(&m_exitDisarm, &QTimer::timeout, this, [this]{ m_exitArmed = false; schedule(); });
+    }
+    // First tap on ⏻ "arms" exit (shown inverted on a black pill, 3 s window); a second tap actually exits.
+    // Returns true if this tap only armed (caller must NOT exit), false if already armed (caller should exit).
+    bool exitTapped() {
+        if (!m_exitArmed) { m_exitArmed = true; m_exitDisarm.start(3000); schedule(); return true; }
+        return false;
     }
     void paint(QPainter *p) override {
         const qreal w = width(), h = height();
@@ -976,7 +985,11 @@ private:
             p->setPen(Qt::white); p->setBrush(Qt::NoBrush); iconReader(p, rcx, cy);
         } else { pen(m_readerable); iconReader(p, rcx, cy); }
         pen(true); iconStar(p, starX + kStarW / 2.0, cy, m_bookmarked);
-        pen(true); iconPower(p, powerX + kPowerW / 2.0, cy);   // exit to the reMarkable menu
+        if (m_exitArmed) {                                     // armed: tap again within 3s to exit
+            p->setBrush(Qt::black); p->setPen(Qt::NoPen);
+            p->drawRoundedRect(QRectF(powerX + 20, 12, kPowerW - 40, kBarH - 24), 12, 12);
+            p->setPen(Qt::white); p->setBrush(Qt::NoBrush); iconPower(p, powerX + kPowerW / 2.0, cy);
+        } else { pen(true); iconPower(p, powerX + kPowerW / 2.0, cy); }   // exit to the reMarkable menu
     }
     void iconHome(QPainter *p, qreal cx, qreal cy) const {                 // a simple house
         QPen pn = p->pen(); pn.setWidthF(4); pn.setJoinStyle(Qt::RoundJoin); p->setPen(pn); p->setBrush(Qt::NoBrush);
@@ -1071,6 +1084,8 @@ private:
     bool m_renderFailed = false;         // load finished but the page is ~blank (heavy SPA) -> show a notice
     bool m_readerMode = false, m_readerable = false;
     bool m_bookmarked = false;   // current page is bookmarked -> filled star
+    bool m_exitArmed = false;    // first ⏻ tap armed: show inverted pill; second tap within 3s actually exits
+    QTimer m_exitDisarm;         // single-shot: disarms m_exitArmed after 3 s if no second tap arrives
     QString m_addr;
     bool m_editing = false;             // URL-entry mode: the on-screen keyboard is shown over the page
     QString m_editBuf;                  // the URL currently being typed
@@ -1363,7 +1378,7 @@ int main(int argc, char **argv) {
                     case WpeView::ZoomIn:  engine.zoomBy(+1);   return;
                     case WpeView::Address: view->beginEdit();  return;   // open the on-screen URL keyboard
                     case WpeView::Bookmark: engine.toggleBookmark(); return;
-                    case WpeView::Power:   std::_Exit(0);      return;   // quit to menu; launcher restores xochitl
+                    case WpeView::Power:   if (!view->exitTapped()) std::_Exit(0); return;   // quit to menu; launcher restores xochitl
                     case WpeView::None:    break;             // tap not on the bar
                 }
                 // Reading (chrome hidden): edge/top zones are fast gestures; the centre falls through to a link probe.
