@@ -81,6 +81,16 @@ static const double kPageStepPx = 2000.0;   // ~one screen of scroll per page tu
 // Milliseconds elapsed since a monotonic timestamp (for the "[t] ... @Xms" instrumentation).
 static inline double msSince(gint64 us) { return (g_get_monotonic_time() - us) / 1000.0; }
 
+// Touch is ignored until this monotonic time (µs). The e-ink refresh induces capacitive noise on the
+// digitizer -> phantom taps; we blank touch during a present + a tail. Set by the present path, read by TouchReader.
+static std::atomic<gint64> g_touchGuardUntilUs{0};
+static gint64 touchGuardTailUs() {
+    static const gint64 v = (getenv("RMWEB_TOUCH_GUARD_MS") ? atoi(getenv("RMWEB_TOUCH_GUARD_MS")) : 350) * 1000LL;
+    return v;
+}
+static void bumpTouchGuard() { g_touchGuardUntilUs.store(g_get_monotonic_time() + touchGuardTailUs(), std::memory_order_relaxed); }
+static bool touchGuarded()  { return g_get_monotonic_time() < g_touchGuardUntilUs.load(std::memory_order_relaxed); }
+
 // Print a native backtrace on a fatal signal (to stderr -> the persistent device log), then re-raise.
 // Our binary is unstripped, so addr2line on build/rmweb-wpeqt resolves the rmweb frames.
 extern "C" void crashHandler(int sig) {
@@ -908,6 +918,7 @@ private Q_SLOTS:
         if (!m_inFlight) return;
         const int ms = m_clock.isValid() ? int(m_clock.elapsed()) : 0;
         qInfo("[t][gui] frameSwapped @%dms (dwell=%d)", ms, m_dwellMs);
+        bumpTouchGuard();                        // present completed: waveform tail still induces noise
         const int wait = m_dwellMs - ms;         // hold the rest of the dwell so the next can't overlap
         if (wait > 0) QTimer::singleShot(wait, this, [this]{ releaseGate(); });
         else releaseGate();
@@ -1063,6 +1074,7 @@ private:
         if (m_hasPending) { m_img = m_pending; m_hasPending = false; }   // newest frame (else re-present current)
         m_dirty = false; m_inFlight = true;
         m_clock.restart();
+        bumpTouchGuard();                        // present issued: blank touch during refresh + tail
         update();                                // -> scene render -> EPRenderLoop present to panel
         m_fallback.start(kFallbackMs);
     }
@@ -1175,6 +1187,7 @@ private:
         switch (classifyGesture(dx, dy, dwellMs)) {
         case Gesture::Tap:
             if (m_lastTapUs && now - m_lastTapUs < 250000) return;       // debounce double-taps
+            if (touchGuarded()) { qInfo("[touch] dropped (refresh guard)"); return; }
             m_lastTapUs = now;
             qInfo("[touch] tap @ %d,%d", x, y);
             Q_EMIT tap(x, y);
@@ -1182,6 +1195,7 @@ private:
         case Gesture::SwipeUp:
         case Gesture::SwipeDown:
             if (m_lastSwipeUs && now - m_lastSwipeUs < 800000) return;   // <=1 turn / 0.8 s
+            if (touchGuarded()) { qInfo("[touch] dropped (refresh guard)"); return; }
             m_lastSwipeUs = now;
             if (dy < 0) { qInfo("[touch] swipe up -> next");   Q_EMIT swipe(+1); }
             else        { qInfo("[touch] swipe down -> prev"); Q_EMIT swipe(-1); }
