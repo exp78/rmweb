@@ -994,7 +994,7 @@ private:
             star << QPointF(cx + rad * std::cos(ang), cy + rad * std::sin(ang));
         }
         if (filled) { p->setBrush(p->pen().color()); p->drawPolygon(star); p->setBrush(Qt::NoBrush); }
-        else { p->setBrush(Qt::NoBrush); p->drawPolygon(star); }
+        else          p->drawPolygon(star);
     }
     void iconPower(QPainter *p, qreal cx, qreal cy) const {                // power symbol: ring (gap at top) + bar
         QPen pn = p->pen(); pn.setWidthF(5); pn.setCapStyle(Qt::RoundCap); p->setPen(pn); p->setBrush(Qt::NoBrush);
