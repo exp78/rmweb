@@ -654,6 +654,9 @@ private:
                     rmweb::addHistory(self->m_history, url, self->m_curTitle, (long)time(nullptr));
                     rmweb::saveHistory(self->m_profileDir, self->m_history);
                     Q_EMIT self->bookmarkedChanged(rmweb::isBookmarked(self->m_bookmarks, url));
+                } else {
+                    self->m_curUrl.clear(); self->m_curTitle.clear();
+                    Q_EMIT self->bookmarkedChanged(false);
                 }
             }
         }
