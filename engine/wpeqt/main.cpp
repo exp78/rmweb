@@ -399,7 +399,6 @@ public Q_SLOTS:
             Q_EMIT bookmarkedChanged(on);
         });
     }
-    bool isCurrentBookmarked() const { return rmweb::isBookmarked(m_bookmarks, m_curUrl); }
     void goBack()    { marshalToCtx([this] { if (m_view && webkit_web_view_can_go_back(m_view))    webkit_web_view_go_back(m_view); }); }
     void goForward() { marshalToCtx([this] { if (m_view && webkit_web_view_can_go_forward(m_view)) webkit_web_view_go_forward(m_view); }); }
     void reload()    { marshalToCtx([this] { if (m_view) webkit_web_view_reload(m_view); }); }
