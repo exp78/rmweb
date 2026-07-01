@@ -11,7 +11,7 @@ namespace rmweb {
 
 struct Bookmark { std::string url, title; };
 struct HistoryEntry { std::string url, title; long ts = 0; };
-struct Settings { double zoom = 1.0; int readerFont = 38; std::string ua; };
+struct Settings { double zoom = 1.0; int readerFont = 30; std::string ua; };
 
 // Strip tab/newline/control chars so a value can't corrupt the line-based store.
 inline std::string sanitizeField(const std::string& s) {
@@ -91,7 +91,7 @@ inline Settings loadSettings(const std::string& dir) {
         else if (k == "ua") s.ua = v;
     }
     if (!(s.zoom >= 0.5 && s.zoom <= 3.0)) s.zoom = 1.0;                 // clamp corrupt values
-    if (!(s.readerFont >= 16 && s.readerFont <= 96)) s.readerFont = 38;
+    if (!(s.readerFont >= 14 && s.readerFont <= 96)) s.readerFont = 30;
     return s;
 }
 inline void saveSettings(const std::string& dir, const Settings& s) {

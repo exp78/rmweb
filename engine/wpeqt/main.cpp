@@ -425,7 +425,7 @@ public Q_SLOTS:
         marshalToCtx([this, dir] {
             if (!m_view) return;
             if (m_readerMode) {
-                m_readerFont = std::clamp(m_readerFont + (dir > 0 ? 4 : -4), 22, 64);   // reader column font px
+                m_readerFont = std::clamp(m_readerFont + (dir > 0 ? 4 : -4), 14, 64);   // reader column font px
                 gchar *js = g_strdup_printf("var r=document.getElementById('rmweb-reader');if(r)r.style.fontSize='%dpx';", m_readerFont);
                 webkit_web_view_evaluate_javascript(m_view, js, -1, nullptr, nullptr, m_cancel, nullptr, nullptr);
                 g_free(js);
@@ -512,7 +512,7 @@ private:
         if (!followed) Q_EMIT self->linkMissed();
     }
     // Build the apply script: the vendored Readability lib + our glue, with the reader CSS (font size from
-    // RMWEB_READER_FONT, default 38) inlined. Injected in one shot so all symbols share the same scope.
+    // RMWEB_READER_FONT, default 30) inlined. Injected in one shot so all symbols share the same scope.
     std::string buildReaderApplyJs() {
         std::string css = kReaderCss;  replaceAll(css, "__FS__", std::to_string(m_readerFont));   // A-/A+ adjustable
         std::string glue = kReaderGlue; replaceAll(glue, "__CSS__", css);
@@ -790,7 +790,7 @@ private:
     std::string m_readerableJs;    // vendored isProbablyReaderable, lazily slurped + cached
     double m_dpr = 2.0;            // panel-px -> CSS-px divisor (for elementFromPoint link hit-testing)
     double m_zoom = 1.0;           // page zoom level (A-/A+ in normal mode; webkit_web_view_set_zoom_level)
-    int m_readerFont = 38;         // reader column font px (A-/A+ in reader mode; RMWEB_READER_FONT default)
+    int m_readerFont = 30;         // reader column font px (A-/A+ in reader mode; RMWEB_READER_FONT default)
     std::string m_profileDir;                       // /home/root/.rmweb (or $RMWEB_PROFILE)
     std::vector<rmweb::Bookmark> m_bookmarks;
     std::vector<rmweb::HistoryEntry> m_history;

@@ -49,7 +49,7 @@ int main() {
 
     // corrupt/missing -> defaults
     Settings s3 = loadSettings("/tmp/rmweb-does-not-exist");
-    CHECK(s3.zoom == 1.0); CHECK(s3.readerFont == 38); CHECK(s3.ua.empty());
+    CHECK(s3.zoom == 1.0); CHECK(s3.readerFont == 30); CHECK(s3.ua.empty());
 
     if (fails == 0) std::printf("profile_test: OK\n");
     return fails ? 1 : 0;
