@@ -49,6 +49,10 @@ cp -a "$S"/share/wpe-webkit-2.0     "$B/share/"                      2>/dev/null
 mkdir -p "$B/share/reader"
 cp -a engine/wpeqt/reader/Readability.js engine/wpeqt/reader/Readability-readerable.js "$B/share/reader/"
 cp -a build/wpe_render              "$B/bin/"
+# The app binary itself — a release bundle must be self-contained. (Dev deploy via run-wpeqt-on-device.sh
+# scp's a fresh build over this; here we ship whatever build/ currently holds so the tarball is complete.)
+[ -f build/rmweb-wpeqt ] && cp -a build/rmweb-wpeqt "$B/bin/" \
+  || echo "[bundle] WARN: build/rmweb-wpeqt missing — run scripts/build-wpeqt.sh (a release bundle needs the app binary)"
 # Phase 5 — installable app: on-device launcher, shared env, installer, version stamp, and (layer B) the
 # rm-appload descriptor + icon. These live under device/ in the repo and ship at the bundle root.
 cp -a device/rmweb device/rmweb-env.sh device/install.sh "$B/"
@@ -58,6 +62,10 @@ echo "0.5.0" > "$B/VERSION"
 [ -f device/icon.svg ] && cp -a device/icon.svg "$B/"
 
 echo "[bundle] local size:"; du -sh "$B"
-echo "[bundle] deploying to $DUSER@$HOST:/home/root/rmweb ..."
-tar -C "$B" -cf - . | ssh "$DUSER@$HOST" 'mkdir -p /home/root/rmweb && tar -C /home/root/rmweb -xf -'
-ssh "$DUSER@$HOST" 'echo "[device] /home/root/rmweb:"; du -sh /home/root/rmweb; ls /home/root/rmweb'
+if [ -n "${RMWEB_PACKAGE_ONLY:-}" ]; then
+  echo "[bundle] package-only: assembled $B (skipping device deploy)"
+else
+  echo "[bundle] deploying to $DUSER@$HOST:/home/root/rmweb ..."
+  tar -C "$B" -cf - . | ssh "$DUSER@$HOST" 'mkdir -p /home/root/rmweb && tar -C /home/root/rmweb -xf -'
+  ssh "$DUSER@$HOST" 'echo "[device] /home/root/rmweb:"; du -sh /home/root/rmweb; ls /home/root/rmweb'
+fi
