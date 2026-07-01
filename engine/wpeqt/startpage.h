@@ -37,9 +37,9 @@ inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
         "text-decoration:none;color:#000;}"
         ".u{color:#666;font-size:22px;} .empty{color:#666;font-size:28px;padding:16px 0;}"
         ".clear{display:inline-block;margin-top:28px;font-size:26px;color:#666;}"
-        "</style></head><body><h1>rmweb</h1><h2>Закладки</h2>";
+        "</style></head><body><h1>rmweb</h1><h2>Bookmarks</h2>";
     if (bookmarks.empty()) {
-        h += "<div class='empty'>Пока нет закладок \xE2\x80\x94 нажмите \xE2\x98\x85 на странице, чтобы сохранить.</div>";
+        h += "<div class='empty'>No bookmarks yet \xE2\x80\x94 tap \xE2\x98\x85 on a page to save it.</div>";
     } else {
         h += "<div class='tiles'>";
         for (const auto& b : bookmarks) {
@@ -48,9 +48,9 @@ inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
         }
         h += "</div>";
     }
-    h += "<h2>Недавнее</h2>";
+    h += "<h2>Recent</h2>";
     if (recent.empty()) {
-        h += "<div class='empty'>Пока пусто.</div>";
+        h += "<div class='empty'>Nothing yet.</div>";
     } else {
         h += "<div class='recent'>";
         for (const auto& e : recent) {
@@ -58,7 +58,7 @@ inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
             h += "<a href='" + htmlEscape(e.url) + "'>" + htmlEscape(t)
                + "<span class='u'> \xE2\x80\x94 " + htmlEscape(e.url) + "</span></a>";
         }
-        h += "</div><a class='clear' href='rmweb:clear-history'>Очистить недавнее</a>";
+        h += "</div><a class='clear' href='rmweb:clear-history'>Clear recent</a>";
     }
     h += "</body></html>";
     return h;

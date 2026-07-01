@@ -905,9 +905,9 @@ private Q_SLOTS:
     }
 private:
     // --- B2 frame painters (called by paint(); kept here so paint() stays a short orchestrator) -------------
-    // "Working hard" indicator while a page loads: an hourglass + "Загрузка NN%" from the real load progress.
+    // "Working hard" indicator while a page loads: an hourglass + "Loading NN%" from the real load progress.
     void drawLoadingBadge(QPainter *p, qreal w) const {
-        const QString lbl = QStringLiteral("Загрузка %1%").arg(int(m_loadProgress * 100));
+        const QString lbl = QStringLiteral("Loading %1%").arg(int(m_loadProgress * 100));
         QFont lf = p->font(); lf.setPixelSize(40); p->setFont(lf);
         const qreal tw = p->fontMetrics().horizontalAdvance(lbl);
         const qreal iconW = 34, pad = 30, gap = 18, bh = 96, bw = pad + iconW + gap + tw + pad;
@@ -923,8 +923,8 @@ private:
     }
     // Load finished but the page rendered ~nothing (a heavy JS app the CPU can't run). "(!)" + two lines.
     void drawRenderNotice(QPainter *p, qreal w, qreal h) const {
-        const QString t1 = QStringLiteral("Не удалось отобразить страницу");
-        const QString t2 = QStringLiteral("тяжёлый сайт или веб-приложение");
+        const QString t1 = QStringLiteral("Couldn't display the page");
+        const QString t2 = QStringLiteral("heavy site or web app");
         QFont f1 = p->font(); f1.setPixelSize(46);
         QFont f2 = p->font(); f2.setPixelSize(34);
         p->setFont(f1); const qreal w1 = p->fontMetrics().horizontalAdvance(t1);
