@@ -480,11 +480,21 @@ private:
             // lands in ~90 ms, so one frame per turn is enough. (The earlier requestAnimationFrame burst was a
             // workaround for softpipe's ~6 s composite; it also flooded the e-ink panel with ~20 presents/turn.)
             gchar *js = g_strdup_printf(
-                "window.scrollBy(0,%d>0?Math.round(innerHeight*0.92):-Math.round(innerHeight*0.92));"
-                "var m=document.getElementById('__r');"
-                "if(!m){m=document.createElement('span');m.id='__r';"
+                "(function(dy){"
+                "var step=dy>0?Math.round(innerHeight*0.92):-Math.round(innerHeight*0.92);"
+                "var se=document.scrollingElement||document.documentElement||document.body;"
+                "var y0=se.scrollTop;se.scrollTop+=step;var sc=null,used='doc';"
+                "if(se.scrollTop===y0){sc=window.__rmwebSc;"
+                "if(!sc||!sc.isConnected||sc.scrollHeight-sc.clientHeight<=40){sc=null;var bh=0,a=document.querySelectorAll('div,main,article,section,ul,ol');"
+                "for(var i=0;i<a.length;i++){var n=a[i],o=getComputedStyle(n).overflowY;"
+                "if((o==='auto'||o==='scroll')&&n.scrollHeight-n.clientHeight>40&&n.scrollHeight>bh){bh=n.scrollHeight;sc=n;}}"
+                "window.__rmwebSc=sc;}"
+                "if(sc){sc.scrollTop+=step;used='el';}}"
+                "var m=document.getElementById('__r');if(!m){m=document.createElement('span');m.id='__r';"
                 "m.style.cssText='position:fixed;left:-9999px;top:0';document.body.appendChild(m);}"
-                "m.textContent=((+m.textContent||0)+1);window.scrollY",
+                "m.textContent=((+m.textContent||0)+1);"
+                "return 'sy='+(sc?sc.scrollTop:se.scrollTop)+' ih='+innerHeight+' sh='+se.scrollHeight+' used='+used;"
+                "})(%d)",
                 static_cast<int>(m->dy));
             webkit_web_view_evaluate_javascript(self->m_view, js, -1, nullptr, nullptr, self->m_cancel,
                                                 &WpeEngine::onJsDone, self);
@@ -508,9 +518,9 @@ private:
         bool cancelled; JSCValue *v = finishJsEval(obj, res, &cancelled);
         if (cancelled) return;
         auto *self = static_cast<WpeEngine*>(data);
-        double scrollY = -1;
-        if (v) { if (jsc_value_is_number(v)) scrollY = jsc_value_to_double(v); g_object_unref(v); }
-        if (self) qInfo("[t] page JS done scrollY=%.0f @%.0fms", scrollY, msSince(self->m_startUs));
+        std::string dbg = "?";
+        if (v) { if (jsc_value_is_string(v)) { char *c = jsc_value_to_string(v); dbg = c ? c : ""; g_free(c); } g_object_unref(v); }
+        if (self) qInfo("[t] page JS done %s @%.0fms", dbg.c_str(), msSince(self->m_startUs));
     }
     static void onTapLink(GObject *obj, GAsyncResult *res, gpointer data) {
         bool cancelled; JSCValue *v = finishJsEval(obj, res, &cancelled);
