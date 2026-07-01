@@ -22,7 +22,7 @@ int main() {
     CHECK(has(html, "href='rmweb:clear-history'"));       // clear link present
 
     std::string empty = buildStartPage({}, {});
-    CHECK(has(empty, "No bookmarks yet"));                // empty-state hint
+    CHECK(has(empty, "Пока нет закладок"));                // empty-state hint
     CHECK(!has(empty, "rmweb:clear-history"));            // no clear link when history empty
 
     if (fails == 0) std::printf("startpage_test: OK\n");
