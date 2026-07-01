@@ -74,6 +74,10 @@ facts, all verified on-device and written up in `docs/research/` (4 sourced docs
   the old device-profile mapping was BACKWARDS), `EVIOCGRAB`'d (the grab also silences the QPA's crashing touch
   dispatch). `TouchReader` decodes Protocol-B (SLOT 47 / TRACKING_ID 57 (−1=lift) / POS_X 53 / POS_Y 54 / SYN),
   maps `x*1620/2064,y*2160/2832`, debounces 0.8 s, emits page-turn swipes. See `remarkable-touch-input.md`.
+  **Phantom-touch guard (2026-07-01):** the epaper present induces capacitive noise on the Elan digitizer →
+  `TouchReader` floods with phantom taps/swipes while rendering. Fix: `bumpTouchGuard()` called in `presentNext()`
+  (issue) and `onFrameSwapped()` (completion); `emitGesture()` drops swipe/tap while `touchGuarded()`. Default
+  tail = 350 ms (tunable: `RMWEB_TOUCH_GUARD_MS`). Lock-free (`std::atomic<gint64>`, both threads use monotonic).
 - **Rendering (`wpe-rendering-protocol.md`):** (1) the headless view must be **mapped** or WebKit suspends
   painting — `set_visible(FALSE)→(TRUE)` after sizing the toplevel; verify `wpe_view_get_mapped()`. (2) NEVER call
   `wpe_view_buffer_released()` with an embedded WebKitWebView (double-free). (3) launcher sets
