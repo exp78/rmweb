@@ -1,27 +1,12 @@
-// engine/wpeqt/main.cpp — Phase 4: WPE WebKit -> Qt6 -> (offscreen PNG | epaper e-ink) + paged reading.
+// engine/wpeqt/main.cpp — rmweb core (WPE WebKit on reMarkable Paper Pro)
 //
-// WpeEngine drives WPE WebKit headless on its own worker thread (own GMainContext + GMainLoop) and on each
-// buffer-rendered deep-copies the BGRA buffer into a QImage emitted to the GUI thread. Scrolling = PAGED:
-// a swipe runs window.scrollBy(0, ±one screen) in the page and WebKit repaints; we show the new frame.
+// Current status (post-Phase 5): full reading browser with B2 chrome, reader mode, touch gestures,
+// keyboard, bookmarks, history, zoom, phantom-touch guard, llvmpipe rendering (~120-250ms page turns).
 //
-// Correctness rules verified against WPE 2.48.5 source — docs/research/wpe-rendering-protocol.md:
-//   1. The view must be MAPPED or WebKit suspends painting (IsVisible tracks wpe_view_get_mapped()). Resize
-//      the toplevel first (headless default 0x0), then force set_visible(FALSE)->(TRUE), then verify mapped.
-//   2. NEVER call wpe_view_buffer_released()/_rendered() with an embedded WebKitWebView — double-free crash.
-//   3. Scrolled frames need single-threaded CPU Skia (launcher: WEBKIT_SKIA_CPU_PAINTING_THREADS=0).
+// Architecture: WpeEngine (worker thread + WebKit) → frameReady signal → WpeView (QQuickPaintedItem).
+// Input via direct evdev (event3 = touch), not Qt (epaper QPA drops it). All under /home/root/rmweb.
 //
-// INPUT — verified against the epaper QPA + Qt source (docs/research/remarkable-touch-input.md): the epaper
-// QPA posts finger touch with a NULL target window, so Qt drops it (no QTouchEvent/QMouseEvent ever reaches a
-// QtQuick item), and that same null-window path crashes WebKit on touch. So we read the finger digitizer
-// directly from evdev (TouchReader: node "Elan touch input" = event3, EVIOCGRAB'd — the grab also silences the
-// QPA's broken touch dispatch, fixing the crash) and detect page-turn swipes ourselves.
-//
-//   * save mode  (argv[2] = out.png): save the 2nd painted frame and quit  — headless proof.
-//   * display mode (no argv[2])     : show the page; swipe up = next page, swipe down = previous.
-//
-// Timing: every milestone logs "[t] ... @Xms" (ms since engine start) so we can see where time goes.
-// NOTE: launcher runs JSC in the interpreter (JSC_useJIT=0) by default. RMWEB_JIT=1 enables the JIT, which
-// works here via JSC_usePollingTraps=1 (the earlier "JIT segfault" was a signal conflict — see the launcher).
+// See: CLAUDE.md, docs/research/*.md, docs/superpowers/specs/2026-06-30-rmweb-phase5-packaging-design.md
 #include <QGuiApplication>
 #include <QThread>
 #include <QImage>
