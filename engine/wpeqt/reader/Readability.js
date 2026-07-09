@@ -1756,10 +1756,9 @@ Readability.prototype = {
    * @return void
   **/
   _cleanStyles: function(e) {
-    if (!e || e.tagName.toLowerCase() === "svg")
-      return;
+    if (!e || e.tagName.toLowerCase() === "svg") return;
 
-    // Remove `style` and deprecated presentational attributes
+    // Remove presentational and deprecated attributes
     for (var i = 0; i < this.PRESENTATIONAL_ATTRIBUTES.length; i++) {
       e.removeAttribute(this.PRESENTATIONAL_ATTRIBUTES[i]);
     }
@@ -1790,10 +1789,9 @@ Readability.prototype = {
 
     var linkLength = 0;
 
-    // XXX implement _reduceNodeList?
     this._forEachNode(element.getElementsByTagName("a"), function(linkNode) {
       var href = linkNode.getAttribute("href");
-      var coefficient = href && this.REGEXPS.hashUrl.test(href) ? 0.3 : 1;
+      var coefficient = (href && this.REGEXPS.hashUrl.test(href)) ? 0.3 : 1;
       linkLength += this._getInnerText(linkNode).length * coefficient;
     });
 

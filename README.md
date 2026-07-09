@@ -2,9 +2,9 @@
 
 A native **WPE WebKit** web browser for the **reMarkable Paper Pro** e-ink tablet.
 
-> Status: **early development** (foundations). Starting as a fast e-ink *reading* browser,
-> growing toward a general-purpose browser within the hardware limits.
-> First known attempt to run WPE WebKit on reMarkable e-ink.
+> **Status: Mature reading browser (Phase 5 complete)**. Fast, verified on-device e-ink web reader
+> with B2 chrome, reader mode, touch gestures, on-screen keyboard, bookmarks, history, zoom,
+> phantom-touch protection and ~150ms page turns. Built on WPE WebKit + Mesa llvmpipe (CPU-only).
 
 ## Why it's interesting
 
@@ -29,11 +29,19 @@ reMarkable Paper Pro ("Ferrari"), Codex Linux (scarthgap), aarch64, kernel 6.12.
 Everything installs under `/home/root/rmweb` (the rootfs is full). Cross-compiled with the
 official reMarkable "ferrari" Yocto SDK.
 
-## Build / install
+## Build & Install
 
-Cross-compilation toolchain, build env, and install steps land as Phase 0–5 progress.
-See the spec for the phased roadmap.
+```bash
+./scripts/fetch-sdk.sh          # download Yocto SDK once
+./scripts/build-wpeqt.sh        # build rmweb-wpeqt
+./scripts/bundle.sh             # create device bundle
+./scripts/run-wpeqt-on-device.sh show https://example.com
+```
+
+Full instructions: [`docs/install.md`](docs/install.md)
 
 ## License
 
-TBD before public release.
+[MIT](LICENSE) — see the file for details. Co-developed with AI assistance.
+
+Ready for public release on GitHub.
