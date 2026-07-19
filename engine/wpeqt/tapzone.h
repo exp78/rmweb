@@ -10,7 +10,7 @@ enum class TapAction { Next, Prev, SummonChrome, Content };
 // (a browser needs what a pure e-reader doesn't); the top strip summons chrome and wins at the corners.
 struct TapZones {
     double topStripFrac = 0.08;  // top 8% summons chrome
-    double edgeFrac     = 0.22;  // left/right 22% each = page turn
+    double edgeFrac     = 0.15;  // left/right 15% each = page turn (narrower so links stay tappable)
 };
 
 inline TapAction classifyTap(int x, int y, int w, int h, const TapZones& z = {}) {

@@ -2,9 +2,7 @@
 
 A native **WPE WebKit** web browser for the **reMarkable Paper Pro** e-ink tablet.
 
-> **Status: Mature reading browser (Phase 5 complete)**. Fast, verified on-device e-ink web reader
-> with B2 chrome, reader mode, touch gestures, on-screen keyboard, bookmarks, history, zoom,
-> phantom-touch protection and ~150ms page turns. Built on WPE WebKit + Mesa llvmpipe (CPU-only).
+> **Status: v0.8.0 — Full general-purpose e-ink browser**. Mature reading experience + complete Phase 7 (password manager with secure storage, advanced autofill, on-device JS console, lightweight extensions/content scripts, full history search with filters, polished gestures/error pages/performance dashboard). Fast, stable on reMarkable Paper Pro with B2 chrome, reader mode, touch/pen input, on-screen keyboard, bookmarks, persistent history/cookies/tabs, forms, downloads, logins. All features verified on-device, e-ink-safe (CPU-only llvmpipe+Skia, <200ms frames, low RAM). Ready for GitHub release.
 
 ## Why it's interesting
 
