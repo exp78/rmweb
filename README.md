@@ -2,7 +2,14 @@
 
 A native **WPE WebKit** web browser for the **reMarkable Paper Pro** e-ink tablet.
 
-> **Status: v0.8.0 — Full general-purpose e-ink browser**. Mature reading experience + complete Phase 7 (password manager with secure storage, advanced autofill, on-device JS console, lightweight extensions/content scripts, full history search with filters, polished gestures/error pages/performance dashboard). Fast, stable on reMarkable Paper Pro with B2 chrome, reader mode, touch/pen input, on-screen keyboard, bookmarks, persistent history/cookies/tabs, forms, downloads, logins. All features verified on-device, e-ink-safe (CPU-only llvmpipe+Skia, <200ms frames, low RAM). Ready for GitHub release.
+> **Status: v0.8.0 — beta.** The primary use case is **reading**; general browsing is basic.
+> Implemented and verified on-device: reader mode (Mozilla Readability), B2 chrome painted into the
+> frame (with C++ hit-test), touch/pen input via evdev with a phantom-touch guard, on-screen URL
+> keyboard, bookmarks/history/settings persisted in the profile dir, HTML start page (`rmweb:` scheme),
+> page/reader zoom, content blocking (WebKit UserContentManager filter), and a no-brick launcher that
+> stops/restores xochitl. E-ink-safe: CPU-only llvmpipe + Skia, ~120–250 ms page turns, low RAM.
+> A 2026-07-18 code review ([docs/review-2026-07-18.md](docs/review-2026-07-18.md)) found open
+> security/robustness issues — not release-ready yet.
 
 ## Why it's interesting
 
@@ -38,8 +45,13 @@ official reMarkable "ferrari" Yocto SDK.
 
 Full instructions: [`docs/install.md`](docs/install.md)
 
+## Roadmap / Planned
+
+Not implemented yet (earlier docs claimed some of these by mistake — see the review above):
+password manager, autofill, tabs, downloads manager, history search, on-device JS console,
+user/content scripts, TLS indicator, persistent cookies, dark/night mode, reading-progress bar,
+performance dashboard, per-URL scroll restore.
+
 ## License
 
 [MIT](LICENSE) — see the file for details. Co-developed with AI assistance.
-
-Ready for public release on GitHub.
