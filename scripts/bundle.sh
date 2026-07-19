@@ -57,7 +57,7 @@ cp -a build/wpe_render              "$B/bin/"
 # rm-appload descriptor + icon. These live under device/ in the repo and ship at the bundle root.
 cp -a device/rmweb device/rmweb-env.sh device/install.sh "$B/"
 chmod +x "$B/rmweb" "$B/install.sh"
-echo "0.5.0" > "$B/VERSION"
+echo "0.8.0" > "$B/VERSION"
 [ -d device/appload ] && cp -a device/appload "$B/"
 [ -f device/icon.svg ] && cp -a device/icon.svg "$B/"
 

@@ -12,6 +12,7 @@
 #include <QImage>
 #include <QTimer>
 #include <QDebug>
+#include <QLoggingCategory>
 #include <QUrl>
 #include <QQmlEngine>
 #include <QQmlComponent>
@@ -58,6 +59,8 @@
 using rmweb::Gesture;
 using rmweb::classifyGesture;
 
+Q_LOGGING_CATEGORY(lcEngine, "rmweb.engine", QtWarningMsg)  // Phase 2 hardening: better diagnostics (filter with WEBKIT_DEBUG=rmweb.engine)
+
 // Finger digitizer raw range (Elan, verified on device) -> 1620x2160 panel; swipe thresholds in panel px.
 static const int kPanelW = 1620, kPanelH = 2160, kTouchRawW = 2064, kTouchRawH = 2832;
 static const double kPageStepPx = 2000.0;   // ~one screen of scroll per page turn (with a little overlap)
@@ -70,19 +73,26 @@ static inline double msSince(gint64 us) { return (g_get_monotonic_time() - us) /
 // digitizer -> phantom taps; we blank touch during a present + a tail. Set by the present path, read by TouchReader.
 static std::atomic<gint64> g_touchGuardUntilUs{0};
 static gint64 touchGuardTailUs() {
-    static const gint64 v = (getenv("RMWEB_TOUCH_GUARD_MS") ? atoi(getenv("RMWEB_TOUCH_GUARD_MS")) : 350) * 1000LL;
+    static const gint64 v = (getenv("RMWEB_TOUCH_GUARD_MS") ? atoi(getenv("RMWEB_TOUCH_GUARD_MS")) : 450) * 1000LL;  // hardened default (Phase 2)
     return v;
 }
-static void bumpTouchGuard() { g_touchGuardUntilUs.store(g_get_monotonic_time() + touchGuardTailUs(), std::memory_order_relaxed); }
-static bool touchGuarded()  { return g_get_monotonic_time() < g_touchGuardUntilUs.load(std::memory_order_relaxed); }
+static void bumpTouchGuard() { g_touchGuardUntilUs.store(g_get_monotonic_time() + touchGuardTailUs(), std::memory_order_seq_cst); }
+static bool touchGuarded()  { return g_get_monotonic_time() < g_touchGuardUntilUs.load(std::memory_order_seq_cst); }
+// True while the on-screen URL keyboard is open — TouchReader must NOT drop taps (refresh guard /
+// 250 ms debounce would eat fast typing). Set only from the GUI thread; read from the touch thread.
+static std::atomic<bool> g_urlEditing{false};
+// True after the first ⏻ tap (exit armed) — second tap must not be eaten by debounce/refresh guard.
+static std::atomic<bool> g_exitArmed{false};
 
 // Print a native backtrace on a fatal signal (to stderr -> the persistent device log), then re-raise.
 // Our binary is unstripped, so addr2line on build/rmweb-wpeqt resolves the rmweb frames.
 extern "C" void crashHandler(int sig) {
     void *bt[64];
     const int n = backtrace(bt, 64);
-    fprintf(stderr, "\n[CRASH] signal %d — backtrace (%d frames):\n", sig, n);
+    fprintf(stderr, "\n[CRASH] signal %d (Phase2-hardened) — backtrace (%d frames):\n", sig, n);
     backtrace_symbols_fd(bt, n, fileno(stderr));
+    // extra diagnostics: try to log common registers if possible (minimal)
+    fprintf(stderr, "[CRASH] PID=%d TID=%d\n", getpid(), gettid());
     fflush(stderr);
     signal(sig, SIG_DFL);
     raise(sig);
@@ -399,17 +409,28 @@ public Q_SLOTS:
     void goForward() { marshalToCtx([this] { if (m_view && webkit_web_view_can_go_forward(m_view)) webkit_web_view_go_forward(m_view); }); }
     void reload()    { marshalToCtx([this] { if (m_view) webkit_web_view_reload(m_view); }); }
     void stopLoading() { marshalToCtx([this] { if (m_view) webkit_web_view_stop_loading(m_view); }); }
-    // Follow a link at panel (x,y) if there is one (probe via elementFromPoint at CSS px = panel/dpr); else emit
-    // linkMissed so the GUI falls back to the chrome toggle. This is what makes us a browser: tap a link to go.
+    // Follow a link at panel (x,y). Panel px -> CSS px: divide by dpr * zoom (both scale the painted frame).
+    // Wider probe + click() fallback so buttons/role=link work, not only <a href>.
     void tapLink(int x, int y) {
         marshalToCtx([this, x, y] {
             if (!m_view) return;
-            // Probe the tap point + a small neighbourhood (finger taps on tiny inline links are imprecise on e-ink).
+            const double scale = std::max(0.5, m_dpr * m_zoom);
+            const int cx = int(x / scale), cy = int(y / scale);
             gchar *js = g_strdup_printf(
-                "(function(x,y){var p=[[0,0],[0,-12],[0,12],[-12,0],[12,0],[-22,0],[22,0],[0,-22],[0,22]];"
-                "for(var i=0;i<p.length;i++){var e=document.elementFromPoint(x+p[i][0],y+p[i][1]);"
-                "var a=e&&e.closest?e.closest('a[href]'):0;if(a&&a.href){location.href=a.href;return true;}}return false;})(%d,%d)",
-                int(x / m_dpr), int(y / m_dpr));
+                "(function(x,y){"
+                "var p=[[0,0],[0,-16],[0,16],[-16,0],[16,0],[-32,0],[32,0],[0,-32],[0,32],"
+                "[-16,-16],[16,-16],[-16,16],[16,16],[-40,0],[40,0],[0,-40],[0,40]];"
+                "function go(e){if(!e)return false;"
+                "var a=e.closest?e.closest('a[href],area[href],[role=link],button'):null;"
+                "if(a){if(a.href){location.href=a.href;return true;}"
+                "try{a.click();return true;}catch(ex){}}"
+                "var t=e.closest?e.closest('[onclick],input[type=submit],input[type=button]'):null;"
+                "if(t){try{t.click();return true;}catch(ex){}}return false;}"
+                "for(var i=0;i<p.length;i++){"
+                "if(go(document.elementFromPoint(x+p[i][0],y+p[i][1])))return true;}"
+                "return false;})(%d,%d)",
+                cx, cy);
+            qInfo("[link] probe panel=(%d,%d) css=(%d,%d) dpr=%.2f zoom=%.2f", x, y, cx, cy, m_dpr, m_zoom);
             webkit_web_view_evaluate_javascript(m_view, js, -1, nullptr, nullptr, m_cancel, &WpeEngine::onTapLink, this);
             g_free(js);
         });
@@ -683,13 +704,26 @@ private:
                     rmweb::addHistory(self->m_history, url, self->m_curTitle, (long)time(nullptr));
                     rmweb::saveHistory(self->m_profileDir, self->m_history);
                     Q_EMIT self->bookmarkedChanged(rmweb::isBookmarked(self->m_bookmarks, url));
-                    // "Rendering…" badge: show while the heavy page composites on llvmpipe after load.
-                    // Cleared by first non-blank content frame in onBuffer, or by renderFailed.
-                    if (!self->m_renderingState) { self->m_renderingState = true; Q_EMIT self->renderingChanged(true); }
+                    // "Rendering…" only if content has not painted yet. If first-content already
+                    // arrived during the load (common), do not raise the badge — and clear it if it
+                    // was left on from a race (early first-content + late LOAD_FINISHED stuck it).
+                    if (self->m_firstContentLogged && self->m_lastNonWhite >= kBlankSamples) {
+                        if (self->m_renderingState) {
+                            self->m_renderingState = false;
+                            Q_EMIT self->renderingChanged(false);
+                        }
+                    } else if (!self->m_renderingState) {
+                        self->m_renderingState = true;
+                        Q_EMIT self->renderingChanged(true);
+                    }
                 } else {
                     self->m_curUrl.clear(); self->m_curTitle.clear();
                     Q_EMIT self->bookmarkedChanged(false);
                     // file:// pages (start page) don't need the "Rendering…" badge.
+                    if (self->m_renderingState) {
+                        self->m_renderingState = false;
+                        Q_EMIT self->renderingChanged(false);
+                    }
                 }
             }
         }
@@ -728,10 +762,17 @@ private:
     }
     static void onWebProcessTerminated(WebKitWebView *view, WebKitWebProcessTerminationReason reason, gpointer data) {
         auto *self = static_cast<WpeEngine*>(data);
-        qWarning("[crash] WebProcess terminated (reason=%d), attempts=%d", reason, self->m_reloadAttempts);
+        qWarning("[crash] WebProcess terminated (reason=%d, Phase2-hardened recovery), attempts=%d", reason, self->m_reloadAttempts);
         Q_EMIT self->processCrashed();
-        if (self->m_reloadAttempts < 2) { self->m_reloadAttempts++; webkit_web_view_reload(view); }
-        else qWarning("[crash] giving up auto-reload after %d attempts", self->m_reloadAttempts);
+        // hardened: exponential backoff + diagnostic log (avoids tight loops on repeated crashes)
+        if (self->m_reloadAttempts < 3) {
+            self->m_reloadAttempts++;
+            int backoffMs = 500 * (1 << (self->m_reloadAttempts - 1));
+            qInfo("[recovery] scheduling reload in %d ms (attempt %d)", backoffMs, self->m_reloadAttempts);
+            QTimer::singleShot(backoffMs, [view]() { webkit_web_view_reload(view); });
+        } else {
+            qWarning("[crash] giving up auto-reload after %d attempts", self->m_reloadAttempts);
+        }
     }
 
     static void onBuffer(WPEView *, WPEBuffer *buffer, gpointer data) {
@@ -777,12 +818,18 @@ private:
         if (nonWhite >= kBlankSamples && self->m_renderFailedState) {   // content finally painted -> clear notice
             self->m_renderFailedState = false; Q_EMIT self->renderFailed(false);
         }
-        // [perf] first-content: the first non-blank frame after a load started (once per navigation).
-        // Also clears the "Rendering…" badge since visible content has arrived.
-        if (nonWhite >= kBlankSamples && !self->m_firstContentLogged) {
-            self->m_firstContentLogged = true;
-            qInfo("[perf] first-content @%.0fms (nonWhite=%d)", msSince(self->m_loadStartUs), nonWhite);
-            if (self->m_renderingState) { self->m_renderingState = false; Q_EMIT self->renderingChanged(false); }
+        // Visible content: clear "Rendering…" whenever it is still on (not only the first time).
+        // Previously first-content could fire early (stale frame), then LOAD_FINISHED re-raised the
+        // badge and subsequent frames were all dups so the badge never cleared.
+        if (nonWhite >= kBlankSamples) {
+            if (!self->m_firstContentLogged) {
+                self->m_firstContentLogged = true;
+                qInfo("[perf] first-content @%.0fms (nonWhite=%d)", msSince(self->m_loadStartUs), nonWhite);
+            }
+            if (self->m_renderingState) {
+                self->m_renderingState = false;
+                Q_EMIT self->renderingChanged(false);
+            }
         }
         // Skip identical frames: WebKit re-submits the same composited buffer on its idle heartbeat, and
         // the rAF page-turn pulse yields several identical ticks. Only repaint the e-ink when pixels change
@@ -859,29 +906,50 @@ public:
         m_keys = rmweb::buildKeyboard(kPanelW, kPanelH, kKbTopY);   // URL keyboard, drawn into the frame (B2)
         // Exit-guard disarm timer: if a second ⏻ tap doesn't arrive within 3 s, unarm silently.
         m_exitDisarm.setSingleShot(true);
-        connect(&m_exitDisarm, &QTimer::timeout, this, [this]{ m_exitArmed = false; schedule(); });
+        connect(&m_exitDisarm, &QTimer::timeout, this, [this]{
+            m_exitArmed = false;
+            g_exitArmed.store(false, std::memory_order_release);
+            schedule(/*guardTouch=*/false);
+        });
+        // Keyboard: buffer keystrokes, paint once after a short idle (e-ink can't keep up with per-key presents).
+        m_kbFlush.setSingleShot(true);
+        connect(&m_kbFlush, &QTimer::timeout, this, [this]{
+            if (m_editing) schedule(/*guardTouch=*/false);   // flush address+keys without re-arming touch blank
+        });
+        // Content present throttle: heavy SPAs (a heavy news portal etc.) emit NEW frames every ~300ms forever
+        // (ads/tickers). Presenting each to e-ink locks the UI under continuous refresh + touch guard.
+        // Keep the latest pixels, paint at most every kContentMinPresentMs unless forceNextContent().
+        if (const int v = qEnvironmentVariableIntValue("RMWEB_CONTENT_PRESENT_MS"); v > 0)
+            m_contentMinPresentMs = v;
+        m_contentFlush.setSingleShot(true);
+        connect(&m_contentFlush, &QTimer::timeout, this, [this]{
+            if (m_hasPending) schedule(/*guardTouch=*/true);
+        });
+    }
+    // Call before user-driven actions (page turn, reload, link) so the next WPE frame paints immediately.
+    void forceNextContent() {
+        m_forceContentPresent = true;
+        m_contentFlush.stop();
     }
     // First tap on ⏻ "arms" exit (shown inverted on a black pill, 3 s window); a second tap actually exits.
     // Returns true if this tap only armed (caller must NOT exit), false if already armed (caller should exit).
-    bool exitTapped() {
-        if (!m_exitArmed) { m_exitArmed = true; m_exitDisarm.start(3000); schedule(); return true; }
-        return false;
-    }
+    // Exit is single-tap (double-tap was unreliable on e-ink: arm present + debounce made every
+    // tap look like a fresh arm). Kept as a method so the router stays tidy.
+    bool exitTapped() { return false; /* false = caller should exit now */ }
     void paint(QPainter *p) override {
         const qreal w = width(), h = height();
         if (!m_img.isNull()) p->drawImage(QRectF(0, 0, w, h), m_img);
         else                 p->fillRect(QRectF(0, 0, w, h), Qt::white);
         // Badge precedence: Loading > RenderFailed > Rendering > nothing.
-        if (m_loading && !m_renderFailed)          drawLoadingBadge(p, w);    // "Loading NN%" while page loads
-        else if (m_renderFailed)                   drawRenderNotice(p, w, h); // notice wins once we know it failed
-        else if (m_rendering && !m_renderFailed)   drawRenderingBadge(p, w);  // "Rendering…" while compositing
-        if (!m_chromeOn) return;                                     // reader-fullscreen: nothing below the bar
+        if (m_loading && !m_renderFailed)          drawLoadingBadge(p, w);
+        else if (m_renderFailed)                   drawRenderNotice(p, w, h);
+        else if (m_rendering && !m_renderFailed)   drawRenderingBadge(p, w);
+        if (!m_chromeOn) return;              // reader-fullscreen: hide chrome
         drawChromeBar(p, w);
-        if (!m_editing) return;          // the keyboard shows only during URL entry (entered via the Address
-        drawKeyboard(p, w, h);           // hit, which needs chrome on -> editing always implies the bar shows)
+        if (m_editing) drawKeyboard(p, w, h); // URL keyboard only while editing
     }
     // Hit-test a tap against the chrome bar (panel px); returns the control, or None (off / below the bar).
-    enum Hit { None, Back, Fwd, Reload, Home, Address, ZoomOut, ZoomIn, Bookmark, Reader, Power };
+    enum Hit { None, Back, Fwd, Reload, Home, Address, AddressClear, ZoomOut, ZoomIn, Bookmark, Reader, Power };
     Hit hitChrome(int x, int y) const {
         if (!m_chromeOn || y >= kBarH) return None;
         const int powerX  = int(width()) - kPowerW;         // right: A- | A+ | ★ | Reader | Power
@@ -897,32 +965,88 @@ public:
         if (x >= starX)         return Bookmark;
         if (x >= zInX)          return ZoomIn;
         if (x >= zOutX)         return ZoomOut;
+        // Inside the address box: × on the right while editing clears the typed buffer.
+        if (m_editing) {
+            const int clearLeft = zOutX - 8 - kClearW;
+            if (x >= clearLeft) return AddressClear;
+        }
         return Address;
     }
     bool chromeOn()  const { return m_chromeOn; }
     bool isLoading() const { return m_loading; }
     bool isEditing() const { return m_editing; }
-    // URL entry: tapping the address field calls beginEdit() -> the on-screen keyboard shows; key taps feed
-    // m_editBuf; Go emits urlEntered (main() -> engine.loadUrl); Cancel/Go end the edit. The tap router in
-    // main() routes ALL taps here while editing.
-    void beginEdit() { m_editing = true; m_editBuf.clear(); schedule(); }
-    void endEdit()   { if (m_editing) { m_editing = false; schedule(); } }
+    // URL entry: tap address -> empty field + keyboard. Cancel / empty Go keep the previous URL.
+    // × in the field clears the typed buffer. Go with non-empty text navigates.
+    void beginEdit() {
+        m_editing = true;
+        g_urlEditing.store(true, std::memory_order_release);
+        m_editBuf.clear();   // start blank; m_addr stays as the "old" value until a successful Go
+        m_kbFlush.stop();
+        schedule(/*guardTouch=*/false);
+    }
+    void endEdit() {
+        if (!m_editing) return;
+        m_kbFlush.stop();
+        m_editing = false;
+        g_urlEditing.store(false, std::memory_order_release);
+        m_editBuf.clear();
+        schedule(/*guardTouch=*/false);
+    }
+    void clearEditBuf() {
+        if (!m_editing || m_editBuf.isEmpty()) return;
+        m_editBuf.clear();
+        m_kbFlush.stop();
+        schedule(/*guardTouch=*/false);
+    }
     void handleEditTap(int x, int y) {
+        // × in the address bar (chrome) while the keyboard is open.
+        if (y < kBarH && hitChrome(x, y) == AddressClear) { clearEditBuf(); return; }
         const int i = rmweb::hitKey(m_keys, x, y);
         if (i < 0) return;                                       // tap outside the keys (page area) -> ignore
         switch (m_keys[i].kind) {
-            case rmweb::KeyKind::Char:      m_editBuf += QString::fromStdString(m_keys[i].insert); break;
-            case rmweb::KeyKind::Backspace: m_editBuf.chop(1); break;
-            case rmweb::KeyKind::Cancel:    endEdit(); return;
-            case rmweb::KeyKind::Go: { const QString u = m_editBuf; endEdit();
-                                       if (!u.isEmpty()) Q_EMIT urlEntered(u); return; }
+            case rmweb::KeyKind::Char:
+                m_editBuf += QString::fromStdString(m_keys[i].insert);
+                m_kbFlush.start(kKbFlushMs);                     // buffer; one present after typing pause
+                return;
+            case rmweb::KeyKind::Backspace:
+                m_editBuf.chop(1);
+                m_kbFlush.start(kKbFlushMs);
+                return;
+            case rmweb::KeyKind::Cancel:
+                endEdit();                                       // discard typed text; keep m_addr
+                return;
+            case rmweb::KeyKind::Go: {
+                m_kbFlush.stop();
+                const QString u = m_editBuf.trimmed();
+                endEdit();
+                // Empty Go = keep the old URL (do not navigate). Non-empty = load.
+                if (!u.isEmpty()) Q_EMIT urlEntered(u);
+                return;
+            }
         }
-        schedule();
     }
 Q_SIGNALS:
     void urlEntered(const QString &url);   // Go pressed with a non-empty buffer -> load it (wired in main())
 public Q_SLOTS:
-    void setImage(const QImage &img) { m_pending = img; m_hasPending = true; schedule(); }
+    void setImage(const QImage &img) {
+        m_pending = img;
+        m_hasPending = true;
+        // Always keep the latest frame. Only schedule an e-ink present if forced (user action) or
+        // the min interval since the last *content* present has elapsed (anti-frame-storm for SPAs).
+        const gint64 now = g_get_monotonic_time();
+        const gint64 minUs = static_cast<gint64>(m_contentMinPresentMs) * 1000LL;
+        if (m_forceContentPresent || m_lastContentPresentUs == 0 ||
+            (now - m_lastContentPresentUs) >= minUs) {
+            m_forceContentPresent = false;
+            m_contentFlush.stop();
+            schedule(/*guardTouch=*/true);
+            return;
+        }
+        // Coalesce: present the newest pending after the remaining wait.
+        const int waitMs = static_cast<int>((minUs - (now - m_lastContentPresentUs) + 999) / 1000);
+        if (!m_contentFlush.isActive())
+            m_contentFlush.start(std::max(50, waitMs));
+    }
     // Chrome state (fed by engine signals on the GUI thread). Each re-presents the current frame with the
     // new chrome via the SAME serializer — never a bare update() (that would risk an overlapping present).
     void setChromeOn(bool v)       { if (v != m_chromeOn) { m_chromeOn = v; schedule(); } }
@@ -950,7 +1074,9 @@ private Q_SLOTS:
         if (!m_inFlight) return;
         const int ms = m_clock.isValid() ? int(m_clock.elapsed()) : 0;
         qInfo("[t][gui] frameSwapped @%dms (dwell=%d)", ms, m_dwellMs);
-        bumpTouchGuard();                        // present completed: waveform tail still induces noise
+        // Waveform tail can induce phantom taps — re-arm only when this present requested a guard
+        // (content/chrome). Keyboard flushes leave it off so typing is not blanked mid-burst.
+        if (m_lastPresentGuarded) bumpTouchGuard();
         const int wait = m_dwellMs - ms;         // hold the rest of the dwell so the next can't overlap
         if (wait > 0) QTimer::singleShot(wait, this, [this]{ releaseGate(); });
         else releaseGate();
@@ -1010,8 +1136,9 @@ private:
         p->drawText(QRectF(tx, by + 116, textW, 50), Qt::AlignLeft | Qt::AlignVCenter, t2);
         p->setPen(Qt::black);
     }
-    // B2 browser chrome painted straight into the frame (QtQuick chrome does NOT composite over it; see
-    // docs/research/epaper-chrome-compositing.md): Back/Fwd/Reload icons + address(+caret) + A-/A+ + Reader.
+    // B2 browser chrome painted into the frame (QtQuick does not composite over WPE; see
+    // docs/research/epaper-chrome-compositing.md). e-ink rules: no gradients/shadows, bold outlines,
+    // large targets, address field drawn as a real rounded input box (EinkBro/KOReader pattern).
     void drawChromeBar(QPainter *p, qreal w) const {
         p->fillRect(QRectF(0, 0, w, kBarH), Qt::white);
         p->fillRect(QRectF(0, kBarH - 3, w, 3), Qt::black);
@@ -1021,19 +1148,54 @@ private:
         pen(m_canFwd);  iconFwd (p, (kBackX + kFwdX) / 2.0, cy);
         pen(true);      m_loading ? iconStop(p, (kFwdX + kRelX) / 2.0, cy) : iconReload(p, (kFwdX + kRelX) / 2.0, cy);
         pen(true);      iconHome(p, kRelX + kHomeW / 2.0, cy);
+
         const qreal powerX = w - kPowerW, readerX = powerX - kReaderW, starX = readerX - kStarW;
         const qreal zInX = starX - kZoomW, zOutX = zInX - kZoomW;
-        QFont af = p->font(); af.setPixelSize(34); p->setFont(af); p->setPen(Qt::black);
-        const QString addrText = m_editing ? (m_editBuf + "|") : m_addr;   // editing -> typed buffer + caret
-        const auto elide = m_editing ? Qt::ElideLeft : Qt::ElideRight;     // keep the caret end visible while typing
         const int addrX = kRelX + kHomeW;
-        const QString a = p->fontMetrics().elidedText(addrText, elide, int(zOutX - addrX - 40));
-        p->drawText(QRectF(addrX + 20, 0, zOutX - addrX - 40, kBarH), Qt::AlignVCenter, a);
-        // Text size -/+ : page zoom normally, reader font in reader mode ("A-"/"A+" is the conventional size icon).
+        const int clearW = m_editing ? kClearW : 0;
+        // Address field: rounded box; while editing, a × on the right clears the typed buffer.
+        const QRectF addrBox(addrX + 8, 14, zOutX - addrX - 16, kBarH - 28);
+        p->setPen(QPen(Qt::black, m_editing ? 4 : 3));
+        p->setBrush(m_editing ? QColor(245, 245, 245) : Qt::white);
+        p->drawRoundedRect(addrBox, 14, 14);
+        QFont af = p->font(); af.setPixelSize(32); p->setFont(af);
+        QString addrText;
+        bool grey = false;
+        if (m_editing) {
+            if (m_editBuf.isEmpty()) {
+                // Hint shows previous URL (not submitted) so Cancel/empty-Go is obvious.
+                grey = true;
+                addrText = m_addr.isEmpty() ? QStringLiteral("type URL…") : m_addr;
+            } else {
+                addrText = m_editBuf + QLatin1Char('|');
+            }
+        } else if (m_addr.isEmpty()) {
+            grey = true;
+            addrText = QStringLiteral("tap to enter URL");
+        } else {
+            addrText = m_addr;
+        }
+        p->setPen(grey ? QColor(120, 120, 120) : Qt::black);
+        const auto elide = m_editing && !m_editBuf.isEmpty() ? Qt::ElideLeft : Qt::ElideRight;
+        const int textRightPad = 14 + clearW;
+        const QString a = p->fontMetrics().elidedText(addrText, elide, int(addrBox.width() - 14 - textRightPad));
+        p->drawText(addrBox.adjusted(14, 0, -textRightPad, 0), Qt::AlignVCenter | Qt::AlignLeft, a);
+        if (m_editing) {
+            // Clear button: circle + × (large hit target for finger on e-ink).
+            const qreal cx = addrBox.right() - kClearW / 2.0, cy = addrBox.center().y();
+            const qreal r = 22;
+            p->setPen(QPen(Qt::black, 3));
+            p->setBrush(Qt::white);
+            p->drawEllipse(QPointF(cx, cy), r, r);
+            p->setPen(QPen(Qt::black, 4, Qt::SolidLine, Qt::RoundCap));
+            const qreal d = 10;
+            p->drawLine(QPointF(cx - d, cy - d), QPointF(cx + d, cy + d));
+            p->drawLine(QPointF(cx + d, cy - d), QPointF(cx - d, cy + d));
+        }
+
         QFont zf = p->font(); zf.setPixelSize(40); zf.setBold(true); p->setFont(zf); p->setPen(Qt::black);
         p->drawText(QRectF(zOutX, 0, kZoomW, kBarH), Qt::AlignCenter, "A-");
         p->drawText(QRectF(zInX,  0, kZoomW, kBarH), Qt::AlignCenter, "A+");
-        // Reader (document icon): inverted on a black pill when active; greyed when the page isn't an article.
         const qreal rcx = readerX + kReaderW / 2.0;
         if (m_readerMode) {
             p->setBrush(Qt::black); p->setPen(Qt::NoPen);
@@ -1041,11 +1203,11 @@ private:
             p->setPen(Qt::white); p->setBrush(Qt::NoBrush); iconReader(p, rcx, cy);
         } else { pen(m_readerable); iconReader(p, rcx, cy); }
         pen(true); iconStar(p, starX + kStarW / 2.0, cy, m_bookmarked);
-        if (m_exitArmed) {                                     // armed: tap again within 3s to exit
+        if (m_exitArmed) {
             p->setBrush(Qt::black); p->setPen(Qt::NoPen);
             p->drawRoundedRect(QRectF(powerX + 20, 12, kPowerW - 40, kBarH - 24), 12, 12);
             p->setPen(Qt::white); p->setBrush(Qt::NoBrush); iconPower(p, powerX + kPowerW / 2.0, cy);
-        } else { pen(true); iconPower(p, powerX + kPowerW / 2.0, cy); }   // exit to the reMarkable menu
+        } else { pen(true); iconPower(p, powerX + kPowerW / 2.0, cy); }
     }
     void iconHome(QPainter *p, qreal cx, qreal cy) const {                 // a simple house
         QPen pn = p->pen(); pn.setWidthF(4); pn.setJoinStyle(Qt::RoundJoin); p->setPen(pn); p->setBrush(Qt::NoBrush);
@@ -1114,12 +1276,24 @@ private:
             p->drawText(r, Qt::AlignCenter, QString::fromStdString(k.label));
         }
     }
-    void schedule() { if (m_inFlight) m_dirty = true; else presentNext(); }
+    // guardTouch: e-ink refresh induces phantom taps — blank them for content presents. Keyboard
+    // chrome flushes pass false so typing is not blocked mid-burst.
+    void schedule(bool guardTouch = true) {
+        m_nextGuardTouch = m_nextGuardTouch || guardTouch;
+        if (m_inFlight) m_dirty = true;
+        else presentNext();
+    }
     void presentNext() {
-        if (m_hasPending) { m_img = m_pending; m_hasPending = false; }   // newest frame (else re-present current)
+        // Apply newest WPE frame if any; always present so chrome-only updates (URL bar, keyboard,
+        // badges) still refresh when m_img is still null (before the first buffer).
+        const bool hadContent = m_hasPending;
+        if (m_hasPending) { m_img = m_pending; m_hasPending = false; }
         m_dirty = false; m_inFlight = true;
         m_clock.restart();
-        bumpTouchGuard();                        // present issued: blank touch during refresh + tail
+        if (hadContent) m_lastContentPresentUs = g_get_monotonic_time();
+        m_lastPresentGuarded = m_nextGuardTouch;
+        if (m_nextGuardTouch) bumpTouchGuard();  // content/chrome present: blank phantom noise
+        m_nextGuardTouch = false;
         update();                                // -> scene render -> EPRenderLoop present to panel
         m_fallback.start(kFallbackMs);
     }
@@ -1128,14 +1302,25 @@ private:
         if (m_hasPending || m_dirty) presentNext();   // newer frame or a chrome change queued -> present it
     }
     static const int kFallbackMs = 2500;         // release even if frameSwapped never fires (>= worst refresh)
+    static const int kKbFlushMs = 120;           // coalesce keystrokes; one e-ink paint after typing pause
     int m_dwellMs = 200;                         // min present spacing, ms (RMWEB_PRESENT_DWELL overrides)
+    int m_contentMinPresentMs = 1200;            // SPA frame-storm throttle (RMWEB_CONTENT_PRESENT_MS)
     bool m_hasPending = false, m_inFlight = false, m_dirty = false;
+    bool m_nextGuardTouch = true;                // whether the next present arms the phantom-touch guard
+    bool m_lastPresentGuarded = true;            // last present used the guard (for frameSwapped re-arm)
+    bool m_forceContentPresent = false;          // next setImage bypasses content throttle (user action)
+    gint64 m_lastContentPresentUs = 0;            // last e-ink present that carried a new WPE frame
     QImage m_img, m_pending;
     QElapsedTimer m_clock;
     QTimer m_fallback;
+    QTimer m_kbFlush;                            // keyboard address-bar coalesced redraw
+    QTimer m_contentFlush;                       // delayed present of throttled SPA frames
     // chrome state, painted into the frame (reader-first: shown on launch, hidden by a content tap).
-    static const int kBarH = 104, kBackX = 170, kFwdX = 340, kRelX = 560, kReaderW = 190, kZoomW = 120, kPowerW = 130;
-    static const int kHomeW = 140, kStarW = 120;   // Home (left, after Reload) + bookmark star (right, before Reader)
+    // Chrome layout (panel 1620): left cluster | wide address box | A- A+ ★ Reader Power
+    // Give the URL field ~half the bar — previous widths left only ~220px and the box looked "gone".
+    static const int kBarH = 104, kBackX = 150, kFwdX = 300, kRelX = 480, kReaderW = 150, kZoomW = 100, kPowerW = 110;
+    static const int kHomeW = 120, kStarW = 100;
+    static const int kClearW = 72;               // × clear-button zone on the right of the address box
     bool m_chromeOn = true, m_canBack = false, m_canFwd = false, m_loading = false;
     qreal m_loadProgress = 0.0;          // 0..1 estimated load progress (drives the loading badge)
     bool m_renderFailed = false;         // load finished but the page is ~blank (heavy SPA) -> show a notice
@@ -1230,16 +1415,26 @@ private:
     void emitGesture(int dx, int dy, int x, int y, gint64 downUs) {
         const gint64 now = g_get_monotonic_time();
         const int dwellMs = static_cast<int>((now - downUs) / 1000);
+        const bool editing = g_urlEditing.load(std::memory_order_acquire);
+        const bool exitArmed = g_exitArmed.load(std::memory_order_acquire);
         switch (classifyGesture(dx, dy, dwellMs)) {
-        case Gesture::Tap:
-            if (m_lastTapUs && now - m_lastTapUs < 250000) return;       // debounce double-taps
-            if (touchGuarded()) { qInfo("[touch] dropped (refresh guard)"); return; }
+        case Gesture::Tap: {
+            // Keyboard / exit-confirm: short debounce. Normal UI: 250 ms anti-double-tap.
+            const gint64 tapDebounceUs = (editing || exitArmed) ? 40000 : 250000;
+            if (m_lastTapUs && now - m_lastTapUs < tapDebounceUs) return;
+            // Phantom-touch guard during e-ink refresh — never while typing or confirming exit.
+            if (!editing && !exitArmed && touchGuarded()) {
+                qInfo("[touch] dropped (refresh guard)");
+                return;
+            }
             m_lastTapUs = now;
-            qInfo("[touch] tap @ %d,%d", x, y);
+            qInfo("[touch] tap @ %d,%d%s", x, y, editing ? " (kb)" : (exitArmed ? " (exit)" : ""));
             Q_EMIT tap(x, y);
             return;
+        }
         case Gesture::SwipeUp:
         case Gesture::SwipeDown:
+            if (editing) return;                                         // ignore page swipes over keyboard
             if (m_lastSwipeUs && now - m_lastSwipeUs < 800000) return;   // <=1 turn / 0.8 s
             if (touchGuarded()) { qInfo("[touch] dropped (refresh guard)"); return; }
             m_lastSwipeUs = now;
@@ -1390,7 +1585,11 @@ int main(int argc, char **argv) {
         // Engine state -> the C++ chrome painted into the frame (queued worker->GUI).
         QObject::connect(&engine, &WpeEngine::canGoBack,      view, &WpeView::setCanBack);
         QObject::connect(&engine, &WpeEngine::canGoForward,   view, &WpeView::setCanFwd);
-        QObject::connect(&engine, &WpeEngine::loadingChanged, view, &WpeView::setLoading);
+        QObject::connect(&engine, &WpeEngine::loadingChanged, view,
+                         [view](bool on) {
+            if (on) view->forceNextContent();   // navigation start: paint first frames without throttle
+            view->setLoading(on);
+        }, Qt::QueuedConnection);
         QObject::connect(&engine, &WpeEngine::loadProgressChanged, view, &WpeView::setLoadProgress);
         QObject::connect(&engine, &WpeEngine::urlChanged,     view, &WpeView::setAddr);
         QObject::connect(&engine, &WpeEngine::readerModeChanged, view, &WpeView::setReaderMode);
@@ -1420,7 +1619,8 @@ int main(int argc, char **argv) {
         // Direct evdev touch -> page turns (queued onto the GUI thread; pageBy then marshals to the worker).
         touchReader.moveToThread(&touchThread);
         QObject::connect(&touchThread, &QThread::started, &touchReader, &TouchReader::run);
-        QObject::connect(&touchReader, &TouchReader::swipe, &app, [&engine](int dir) {
+        QObject::connect(&touchReader, &TouchReader::swipe, &app, [&engine, view](int dir) {
+            view->forceNextContent();   // page-turn frame must paint immediately (bypass SPA throttle)
             if (dir > 0) engine.pageNext(); else engine.pagePrev();
         });
         // Reader-first tap routing (queued worker->GUI). The chrome is painted INTO the frame (B2), so we
@@ -1431,28 +1631,44 @@ int main(int argc, char **argv) {
             [&engine, view](int x, int y) {
                 if (view->isEditing()) { view->handleEditTap(x, y); return; }   // keyboard captures all taps
                 switch (view->hitChrome(x, y)) {
-                    case WpeView::Back:    engine.goBack();    return;
-                    case WpeView::Fwd:     engine.goForward(); return;
-                    case WpeView::Reload:  view->isLoading() ? engine.stopLoading() : engine.reload(); return;
-                    case WpeView::Home:    engine.goHome();     return;
-                    case WpeView::Reader:  engine.toggleReader(); return;
-                    case WpeView::ZoomOut: engine.zoomBy(-1);   return;
-                    case WpeView::ZoomIn:  engine.zoomBy(+1);   return;
+                    case WpeView::Back:    view->forceNextContent(); engine.goBack();    return;
+                    case WpeView::Fwd:     view->forceNextContent(); engine.goForward(); return;
+                    case WpeView::Reload:  view->forceNextContent();
+                        view->isLoading() ? engine.stopLoading() : engine.reload(); return;
+                    case WpeView::Home:    view->forceNextContent(); engine.goHome();     return;
+                    case WpeView::Reader:  view->forceNextContent(); engine.toggleReader(); return;
+                    case WpeView::ZoomOut: view->forceNextContent(); engine.zoomBy(-1);   return;
+                    case WpeView::ZoomIn:  view->forceNextContent(); engine.zoomBy(+1);   return;
                     case WpeView::Address: view->beginEdit();  return;   // open the on-screen URL keyboard
                     case WpeView::Bookmark: engine.toggleBookmark(); return;
-                    case WpeView::Power:   if (!view->exitTapped()) std::_Exit(0); return;   // quit to menu; launcher restores xochitl
+                    case WpeView::Power:
+                        // Single tap exits. std::_Exit skips WebKit teardown SIGABRT (watchdog-safe).
+                        qInfo("[exit] power — leaving");
+                        std::_Exit(0);
                     case WpeView::None:    break;             // tap not on the bar
+                    default:              break;
                 }
-                // Reading (chrome hidden): edge/top zones are fast gestures; the centre falls through to a link probe.
+                // Page-turn zones: when chrome is HIDDEN use left/right edges (reading mode).
+                // When chrome is SHOWN, edges would steal link taps — only swipe pages then.
+                // Swipe always pages (connected above).
                 if (!view->chromeOn()) {
-                    switch (rmweb::classifyTap(x, y, kPanelW, kPanelH)) {
-                        case rmweb::TapAction::Next:         engine.pageNext();       return;
-                        case rmweb::TapAction::Prev:         engine.pagePrev();       return;
-                        case rmweb::TapAction::SummonChrome: view->setChromeOn(true); return;
-                        case rmweb::TapAction::Content:      break;   // centre -> probe for a link below
+                    rmweb::TapZones z;
+                    z.edgeFrac = 0.15;   // 15% edges (was 22% — too greedy, ate link taps)
+                    const auto a = rmweb::classifyTap(x, y, kPanelW, kPanelH, z);
+                    if (a == rmweb::TapAction::Next) {
+                        view->forceNextContent(); engine.pageNext(); return;
+                    }
+                    if (a == rmweb::TapAction::Prev) {
+                        view->forceNextContent(); engine.pagePrev(); return;
+                    }
+                    if (a == rmweb::TapAction::SummonChrome) {
+                        view->setChromeOn(true);
+                        return;
                     }
                 }
-                engine.tapLink(x, y);   // follow a link at (x,y); on a miss engine.linkMissed -> toggle chrome
+                // Content / chrome-visible: try link (or interactive control) at the point.
+                view->forceNextContent();
+                engine.tapLink(x, y);
             }, Qt::QueuedConnection);
         // A content tap with no link underneath -> the old behaviour: toggle the chrome (show <-> hide).
         QObject::connect(&engine, &WpeEngine::linkMissed, win ? win : qobject_cast<QObject*>(&app),

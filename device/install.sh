@@ -3,7 +3,7 @@
 # re-run, which is also the recovery step after a firmware/OTA update. See the Phase 5 design spec.
 set -u
 R="${RMWEB_ROOT:-/home/root/rmweb}"
-VER="0.5.0"
+VER="0.8.0"
 fail(){ echo "[install] ERROR: $*" >&2; exit 1; }
 
 # 1. Integrity: the launcher's hard dependencies must be present.

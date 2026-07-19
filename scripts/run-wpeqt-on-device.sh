@@ -11,7 +11,8 @@ MODE="${1:-save}"; URL="${2:-}"
 
 scp -q build/rmweb-wpeqt "$DUSER@$HOST:/home/root/rmweb/bin/rmweb-wpeqt"
 
-ssh "$DUSER@$HOST" "MODE='$MODE' URL='$URL' SHOW_SECS='${SHOW_SECS:-40}' RMWEB_AUTOPAGE_MS='${RMWEB_AUTOPAGE_MS:-}' WEBKIT_DEBUG='${WEBKIT_DEBUG:-}' RMWEB_FULL_EVERY='${RMWEB_FULL_EVERY:-}' RMWEB_DEBUG_TAP='${RMWEB_DEBUG_TAP:-}' RMWEB_DEBUG_READER='${RMWEB_DEBUG_READER:-}' RMWEB_DEBUG_KB='${RMWEB_DEBUG_KB:-}' RMWEB_DEBUG_ZOOM='${RMWEB_DEBUG_ZOOM:-}' RMWEB_JIT='${RMWEB_JIT:-}' RMWEB_JSC_OPTS='${RMWEB_JSC_OPTS:-}' RMWEB_BLOCK='${RMWEB_BLOCK:-}' RMWEB_SITECSS='${RMWEB_SITECSS:-}' RMWEB_QUICK_BACKEND='${RMWEB_QUICK_BACKEND:-}' RMWEB_GRAB_MS='${RMWEB_GRAB_MS:-}' RMWEB_MANUAL_PRESENT='${RMWEB_MANUAL_PRESENT:-}' RMWEB_PRESENT_DWELL='${RMWEB_PRESENT_DWELL:-}' RMWEB_DPR='${RMWEB_DPR:-}' RMWEB_READER_FONT='${RMWEB_READER_FONT:-}' RMWEB_READER_DIR='${RMWEB_READER_DIR:-}' RMWEB_UA='${RMWEB_UA:-}' bash -s" <<'EOS'
+# SHOW_SECS: seconds to leave the app on e-ink (default 180). Use 0 to run until Ctrl-C / kill.
+ssh "$DUSER@$HOST" "MODE='$MODE' URL='$URL' SHOW_SECS='${SHOW_SECS:-180}' RMWEB_AUTOPAGE_MS='${RMWEB_AUTOPAGE_MS:-}' WEBKIT_DEBUG='${WEBKIT_DEBUG:-}' RMWEB_FULL_EVERY='${RMWEB_FULL_EVERY:-}' RMWEB_DEBUG_TAP='${RMWEB_DEBUG_TAP:-}' RMWEB_DEBUG_READER='${RMWEB_DEBUG_READER:-}' RMWEB_DEBUG_KB='${RMWEB_DEBUG_KB:-}' RMWEB_DEBUG_ZOOM='${RMWEB_DEBUG_ZOOM:-}' RMWEB_JIT='${RMWEB_JIT:-}' RMWEB_JSC_OPTS='${RMWEB_JSC_OPTS:-}' RMWEB_BLOCK='${RMWEB_BLOCK:-}' RMWEB_SITECSS='${RMWEB_SITECSS:-}' RMWEB_QUICK_BACKEND='${RMWEB_QUICK_BACKEND:-}' RMWEB_GRAB_MS='${RMWEB_GRAB_MS:-}' RMWEB_MANUAL_PRESENT='${RMWEB_MANUAL_PRESENT:-}' RMWEB_PRESENT_DWELL='${RMWEB_PRESENT_DWELL:-}' RMWEB_DPR='${RMWEB_DPR:-}' RMWEB_READER_FONT='${RMWEB_READER_FONT:-}' RMWEB_READER_DIR='${RMWEB_READER_DIR:-}' RMWEB_UA='${RMWEB_UA:-}' bash -s" <<'EOS'
 set -e
 R=/home/root/rmweb
 # WPE spawns helpers from the baked /usr/libexec/wpe-webkit-2.0 and / is read-only -> overlay it.
@@ -44,20 +45,26 @@ if [ "$MODE" = show ]; then
   export RMWEB_DEBUG_READER  # diagnostic: auto-toggle reader mode once after N ms (verify reflow w/ RMWEB_GRAB_MS)
   export RMWEB_DEBUG_KB      # diagnostic: open the URL keyboard after N ms (grab its rendering w/ RMWEB_GRAB_MS)
   export RMWEB_DEBUG_ZOOM    # diagnostic: bump page zoom +2 steps after N ms (verify scaling w/ RMWEB_GRAB_MS)
-  echo "[device] showing on e-ink for ${SHOW_SECS}s ..."
-  # BusyBox here has no `timeout`; run in the background and kill after SHOW_SECS.
-  "$R/bin/rmweb-wpeqt" "$URL" >"$R/wpeqt.log" 2>&1 &
-  APP=$!
-  sleep "$SHOW_SECS"
-  # Robust teardown so a HUNG app can't leave the panel frozen (xochitl stopped): SIGTERM, then SIGKILL the
-  # app AND its WPE subprocess children (a stuck WebProcess holds the binary + DRM). The EXIT trap restores
-  # xochitl. BusyBox has no pkill/timeout, so loop pgrep+kill.
-  kill "$APP" 2>/dev/null || true
-  for i in 1 2 3; do kill -0 "$APP" 2>/dev/null || break; sleep 1; done
-  for n in rmweb-wpeqt WPEWebProcess WPENetworkProc WPEGPUProcess; do
-    for p in $(pgrep "$n" 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
-  done
-  tail -n 30 "$R/wpeqt.log"
+  if [ "${SHOW_SECS:-180}" = "0" ]; then
+    echo "[device] showing on e-ink until process exits (SHOW_SECS=0) ..."
+    "$R/bin/rmweb-wpeqt" "$URL" >"$R/wpeqt.log" 2>&1 || true
+    tail -n 40 "$R/wpeqt.log"
+  else
+    echo "[device] showing on e-ink for ${SHOW_SECS}s (set SHOW_SECS=0 for unlimited) ..."
+    # BusyBox here has no `timeout`; run in the background and kill after SHOW_SECS.
+    "$R/bin/rmweb-wpeqt" "$URL" >"$R/wpeqt.log" 2>&1 &
+    APP=$!
+    sleep "$SHOW_SECS"
+    # Robust teardown so a HUNG app can't leave the panel frozen (xochitl stopped): SIGTERM, then SIGKILL the
+    # app AND its WPE subprocess children (a stuck WebProcess holds the binary + DRM). The EXIT trap restores
+    # xochitl. BusyBox has no pkill/timeout, so loop pgrep+kill.
+    kill "$APP" 2>/dev/null || true
+    for i in 1 2 3; do kill -0 "$APP" 2>/dev/null || break; sleep 1; done
+    for n in rmweb-wpeqt WPEWebProcess WPENetworkProc WPEGPUProcess; do
+      for p in $(pgrep "$n" 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
+    done
+    tail -n 40 "$R/wpeqt.log"
+  fi
 elif [ "$MODE" = bench ]; then
   # Isolation probe: run the engine display path OFFSCREEN (no epaper, no panel, xochitl untouched) so the
   # buffer-rendered cadence can be measured with the e-ink present path entirely out of the picture.
