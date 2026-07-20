@@ -20,13 +20,18 @@
 #include <execinfo.h>
 #include <unistd.h>
 
+/* Print a native backtrace on a fatal signal, then re-raise. Async-signal-safe ONLY: backtrace()
+ * is primed once in main() (its first call mallocs -> a crash from inside malloc would deadlock);
+ * output is write(2) + backtrace_symbols_fd (no stdio locks); snprintf into a stack buffer (no
+ * allocation). Same model as engine/prof_preload.c. */
 static void crash_handler(int sig)
 {
     void *bt[64];
     int n = backtrace(bt, 64);
-    fprintf(stderr, "\n[cad][CRASH] signal %d (%d frames):\n", sig, n);
-    backtrace_symbols_fd(bt, n, fileno(stderr));
-    fflush(stderr);
+    char buf[96];
+    int len = snprintf(buf, sizeof buf, "\n[cad][CRASH] signal %d (%d frames):\n", sig, n);
+    if (len > 0) write(2, buf, (size_t)len < sizeof buf ? (size_t)len : sizeof buf - 1);
+    backtrace_symbols_fd(bt, n, 2);
     signal(sig, SIG_DFL);
     raise(sig);
 }
@@ -91,8 +96,16 @@ int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
     setvbuf(stderr, NULL, _IOLBF, 0);   /* line-buffer so the log file survives a kill/crash */
-    signal(SIGSEGV, crash_handler);
-    signal(SIGABRT, crash_handler);
+    { void *tmp[4]; backtrace(tmp, 4); }   /* prime the unwinder before the handler can fire */
+    /* sigaction, all four fatal signals: SIGBUS (SHM buffers) and SIGILL (llvmpipe JITs code on the
+     * CPU) are as real as SEGV/ABRT here. The handler restores SIG_DFL + re-raises at the end. */
+    struct sigaction sa = { 0 };
+    sa.sa_handler = crash_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
     start_us = g_get_monotonic_time();
 
     WPEDisplay *display = wpe_display_headless_new();
