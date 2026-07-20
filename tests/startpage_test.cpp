@@ -25,6 +25,16 @@ int main() {
     CHECK(has(empty, "No bookmarks yet"));                // empty-state hint
     CHECK(!has(empty, "rmweb:clear-history"));            // no clear link when history empty
 
+    // scheme whitelist: non-http(s) URLs from a poisoned store render as inert text, never href
+    std::vector<Bookmark> badBm = {{"javascript:alert(1)", "BadBm"}, {"file:///etc/passwd", "BadFile"}};
+    std::vector<HistoryEntry> badH = {{"javascript:alert(1)", "BadH", 1}, {"data:text/html,x", "BadD", 2}};
+    std::string bad = buildStartPage(badBm, badH);
+    CHECK(!has(bad, "href='javascript:"));                // no working script link
+    CHECK(!has(bad, "href='data:"));
+    CHECK(!has(bad, "href='file:"));
+    CHECK(has(bad, "BadBm") && has(bad, "BadH"));         // entries still rendered as plain text
+    CHECK(has(bad, "href='rmweb:clear-history'"));        // generator's own rmweb: link unaffected
+
     if (fails == 0) std::printf("startpage_test: OK\n");
     return fails ? 1 : 0;
 }

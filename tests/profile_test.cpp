@@ -51,6 +51,25 @@ int main() {
     Settings s3 = loadSettings("/tmp/rmweb-does-not-exist");
     CHECK(s3.zoom == 1.0); CHECK(s3.readerFont == 30); CHECK(s3.ua.empty());
 
+    // atomicWrite: a failed write returns false and must NOT clobber an existing good file
+    CHECK(!detail::atomicWrite("/tmp/rmweb-no-such-dir-xyz/x.txt", "data"));   // missing parent dir
+    CHECK(detail::atomicWrite(dir + "/protect.txt", "original"));
+    CHECK(!detail::atomicWrite(dir + "/protect.txt/nested", "x"));             // parent is a file -> open fails
+    auto kept = detail::readLines(dir + "/protect.txt");
+    CHECK(kept.size() == 1 && kept[0] == "original");                          // untouched
+
+    // loadSettings: ua goes through sanitizeField — control chars in a hand-edited file (ssh)
+    // must not survive into the User-Agent / HTTP headers
+    CHECK(detail::atomicWrite(dir + "/settings.txt", "zoom=2.0\nua=evil\tagent\n"));
+    Settings s6 = loadSettings(dir);
+    CHECK(s6.ua == "evil agent");
+    CHECK(s6.zoom > 1.99 && s6.zoom < 2.01);
+
+    // ua round-trip: dirty value is sanitized on save and stays clean on load
+    Settings s7; s7.ua = "a\tb\nc";
+    CHECK(saveSettings(dir, s7));
+    CHECK(loadSettings(dir).ua == "a b c");
+
     if (fails == 0) std::printf("profile_test: OK\n");
     return fails ? 1 : 0;
 }

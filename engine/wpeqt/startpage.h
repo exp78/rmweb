@@ -20,6 +20,13 @@ inline std::string htmlEscape(const std::string& s) {
     return o;
 }
 
+// Only http(s) URLs may become links. Any other scheme smuggled into the store (javascript:,
+// data:, file:, ...) renders as plain text — an <a> without href is inert. The only non-http(s)
+// link on the page is the generator's own hardcoded rmweb:clear-history below.
+inline bool isSafeLinkUrl(const std::string& url) {
+    return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
+}
+
 // `recent` is the already-trimmed most-recent slice (the caller passes ~15).
 inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
                                   const std::vector<HistoryEntry>& recent) {
@@ -44,7 +51,9 @@ inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
         h += "<div class='tiles'>";
         for (const auto& b : bookmarks) {
             const std::string t = b.title.empty() ? b.url : b.title;
-            h += "<a class='tile' href='" + htmlEscape(b.url) + "'>" + htmlEscape(t) + "</a>";
+            h += "<a class='tile'";
+            if (isSafeLinkUrl(b.url)) h += " href='" + htmlEscape(b.url) + "'";
+            h += ">" + htmlEscape(t) + "</a>";
         }
         h += "</div>";
     }
@@ -55,7 +64,9 @@ inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
         h += "<div class='recent'>";
         for (const auto& e : recent) {
             const std::string t = e.title.empty() ? e.url : e.title;
-            h += "<a href='" + htmlEscape(e.url) + "'>" + htmlEscape(t)
+            h += "<a";
+            if (isSafeLinkUrl(e.url)) h += " href='" + htmlEscape(e.url) + "'";
+            h += ">" + htmlEscape(t)
                + "<span class='u'> \xE2\x80\x94 " + htmlEscape(e.url) + "</span></a>";
         }
         h += "</div><a class='clear' href='rmweb:clear-history'>Clear recent</a>";
