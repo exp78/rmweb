@@ -44,6 +44,7 @@
 #include <string>
 #include <cstdlib>
 #include <cstdio>
+#include <cerrno>
 #include <cstring>
 #include <csignal>
 #include <execinfo.h>
@@ -254,7 +255,10 @@ public Q_SLOTS:
 
         // Load persistent profile (bookmarks, history, settings) before any WebKit activity.
         if (const char* p = getenv("RMWEB_PROFILE"); p && *p) m_profileDir = p; else m_profileDir = "/home/root/.rmweb";
-        { std::string mk = "mkdir -p '" + m_profileDir + "'"; (void)system(mk.c_str()); }
+        // glib mkdir, no shell — an apostrophe in RMWEB_PROFILE is just a path char, not injection.
+        // On failure the loads below simply find nothing and later saves fail (logged in atomicWrite).
+        if (g_mkdir_with_parents(m_profileDir.c_str(), 0700) != 0)
+            qWarning("[profile] mkdir %s failed: %s", m_profileDir.c_str(), g_strerror(errno));
         m_bookmarks = rmweb::loadBookmarks(m_profileDir);
         m_history   = rmweb::loadHistory(m_profileDir);
         m_settings  = rmweb::loadSettings(m_profileDir);
@@ -319,10 +323,19 @@ public Q_SLOTS:
             WebKitURIRequest* req = webkit_navigation_action_get_request(act);
             const char* uri = webkit_uri_request_get_uri(req);
             if (uri && std::string(uri).rfind("rmweb:", 0) == 0) {
-                if (std::string(uri) == "rmweb:clear-history") {
-                    self->m_history.clear();
-                    rmweb::saveHistory(self->m_profileDir, self->m_history);
-                    self->goHome();
+                // rmweb: commands mutate the profile — honour them ONLY from our own start page
+                // (file://...home.html). Any other page navigating here is a confused-deputy
+                // attempt (location.href='rmweb:clear-history'): log it and swallow the command.
+                const char *cur = self->m_view ? webkit_web_view_get_uri(self->m_view) : nullptr;
+                const std::string home = "file://" + self->m_profileDir + "/home.html";
+                if (cur && std::string(cur) == home) {
+                    if (std::string(uri) == "rmweb:clear-history") {
+                        self->m_history.clear();
+                        rmweb::saveHistory(self->m_profileDir, self->m_history);
+                        self->goHome();
+                    }
+                } else {
+                    qWarning("[nav] rmweb: command from non-start page ignored (current: %s)", cur ? cur : "(none)");
                 }
                 webkit_policy_decision_ignore(dec);
                 return TRUE;
