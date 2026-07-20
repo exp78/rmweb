@@ -60,7 +60,7 @@
 using rmweb::Gesture;
 using rmweb::classifyGesture;
 
-Q_LOGGING_CATEGORY(lcEngine, "rmweb.engine", QtWarningMsg)  // Phase 2 hardening: better diagnostics (filter with WEBKIT_DEBUG=rmweb.engine)
+Q_LOGGING_CATEGORY(lcEngine, "rmweb.engine", QtWarningMsg)  // per-frame/tap traces go to qCDebug(lcEngine), off by default; enable with QT_LOGGING_RULES=rmweb.engine.debug=true
 
 // Finger digitizer raw range (Elan, verified on device) -> 1620x2160 panel; swipe thresholds in panel px.
 static const int kPanelW = 1620, kPanelH = 2160, kTouchRawW = 2064, kTouchRawH = 2832;
@@ -85,16 +85,22 @@ static std::atomic<bool> g_urlEditing{false};
 // True after the first ⏻ tap (exit armed) — second tap must not be eaten by debounce/refresh guard.
 static std::atomic<bool> g_exitArmed{false};
 
-// Print a native backtrace on a fatal signal (to stderr -> the persistent device log), then re-raise.
-// Our binary is unstripped, so addr2line on build/rmweb-wpeqt resolves the rmweb frames.
+// Print a native backtrace on a fatal signal (straight to fd 2 -> the persistent device log), then
+// re-raise so the watchdog still sees the crash. Our binary is unstripped, so addr2line on
+// build/rmweb-wpeqt resolves the rmweb frames.
+// ASYNC-SIGNAL-SAFE ONLY in here: backtrace() is primed once in main() before the handler is
+// installed (its first call mallocs -> a crash from inside malloc would deadlock on the heap lock);
+// output is write(2) + backtrace_symbols_fd (no stdio locks); snprintf into a stack buffer is OK
+// (no allocation). getpid/gettid are bare syscalls. Same model as engine/prof_preload.c.
 extern "C" void crashHandler(int sig) {
     void *bt[64];
     const int n = backtrace(bt, 64);
-    fprintf(stderr, "\n[CRASH] signal %d (Phase2-hardened) — backtrace (%d frames):\n", sig, n);
-    backtrace_symbols_fd(bt, n, fileno(stderr));
-    // extra diagnostics: try to log common registers if possible (minimal)
-    fprintf(stderr, "[CRASH] PID=%d TID=%d\n", getpid(), gettid());
-    fflush(stderr);
+    char buf[160];
+    int len = snprintf(buf, sizeof buf, "\n[CRASH] signal %d (Phase2-hardened) — backtrace (%d frames):\n", sig, n);
+    if (len > 0) write(STDERR_FILENO, buf, (size_t)len < sizeof buf ? (size_t)len : sizeof buf - 1);
+    backtrace_symbols_fd(bt, n, STDERR_FILENO);
+    len = snprintf(buf, sizeof buf, "[CRASH] PID=%d TID=%d\n", getpid(), gettid());
+    if (len > 0) write(STDERR_FILENO, buf, (size_t)len < sizeof buf ? (size_t)len : sizeof buf - 1);
     signal(sig, SIG_DFL);
     raise(sig);
 }
@@ -374,6 +380,10 @@ public Q_SLOTS:
 
         g_main_loop_run(m_loop);  // pumps WPE on this thread until stop()
 
+        // Loop exited: flush a still-pending debounced profile write so a shutdown doesn't lose
+        // the last history/settings change (runs here, on the worker thread, like every save).
+        flushPendingWrites();
+
         // Loop exited (engine.stop()): release the web view here, on its own thread, BEFORE ~WpeEngine —
         // this drops the buffer-rendered/load-changed handlers that capture `this`, so none can fire late.
         if (m_view) { g_object_unref(m_view); m_view = nullptr; }
@@ -443,7 +453,7 @@ public Q_SLOTS:
                 "if(go(document.elementFromPoint(x+p[i][0],y+p[i][1])))return true;}"
                 "return false;})(%d,%d)",
                 cx, cy);
-            qInfo("[link] probe panel=(%d,%d) css=(%d,%d) dpr=%.2f zoom=%.2f", x, y, cx, cy, m_dpr, m_zoom);
+            qCDebug(lcEngine, "[link] probe panel=(%d,%d) css=(%d,%d) dpr=%.2f zoom=%.2f", x, y, cx, cy, m_dpr, m_zoom);
             webkit_web_view_evaluate_javascript(m_view, js, -1, nullptr, nullptr, m_cancel, &WpeEngine::onTapLink, this);
             g_free(js);
         });
@@ -463,9 +473,9 @@ public Q_SLOTS:
                 m_zoom = std::clamp(m_zoom * (dir > 0 ? 1.2 : 1.0 / 1.2), 0.5, 3.0);     // page zoom level
                 webkit_web_view_set_zoom_level(m_view, m_zoom);
             }
-            qInfo("[zoom] reader=%d zoom=%.2f font=%d", m_readerMode, m_zoom, m_readerFont);
+            qCDebug(lcEngine, "[zoom] reader=%d zoom=%.2f font=%d", m_readerMode, m_zoom, m_readerFont);
             m_settings.zoom = m_zoom; m_settings.readerFont = m_readerFont;
-            rmweb::saveSettings(m_profileDir, m_settings);
+            queueSave(&m_settingsSaveSrc, 1);   // debounced — one flash write after the tap burst ends
         });
     }
     // Reader mode: inject Readability + reflow the article into one clean column; toggle off = reload original.
@@ -518,7 +528,7 @@ private:
             webkit_web_view_evaluate_javascript(self->m_view, js, -1, nullptr, nullptr, self->m_cancel,
                                                 &WpeEngine::onJsDone, self);
             g_free(js);
-            qInfo("[t] pageBy(%d) @%.0fms", static_cast<int>(m->dy), msSince(self->m_startUs));
+            qCDebug(lcEngine, "[t] pageBy(%d) @%.0fms", static_cast<int>(m->dy), msSince(self->m_startUs));
         }
         return G_SOURCE_REMOVE;
     }
@@ -539,7 +549,7 @@ private:
         auto *self = static_cast<WpeEngine*>(data);
         std::string dbg = "?";
         if (v) { if (jsc_value_is_string(v)) { char *c = jsc_value_to_string(v); dbg = c ? c : ""; g_free(c); } g_object_unref(v); }
-        if (self) qInfo("[t] page JS done %s @%.0fms", dbg.c_str(), msSince(self->m_startUs));
+        if (self) qCDebug(lcEngine, "[t] page JS done %s @%.0fms", dbg.c_str(), msSince(self->m_startUs));
     }
     static void onTapLink(GObject *obj, GAsyncResult *res, gpointer data) {
         bool cancelled; JSCValue *v = finishJsEval(obj, res, &cancelled);
@@ -548,7 +558,7 @@ private:
         bool followed = false;
         if (v) { if (jsc_value_is_boolean(v)) followed = jsc_value_to_boolean(v); g_object_unref(v); }
         if (!self) return;
-        qInfo("[link] followed=%d", followed);
+        qCDebug(lcEngine, "[link] followed=%d", followed);
         if (!followed) Q_EMIT self->linkMissed();
     }
     // Build the apply script: the vendored Readability lib + our glue, with the reader CSS (font size from
@@ -629,6 +639,46 @@ private:
         g_source_unref(s);
     }
 
+    // Debounced profile writes (blocking flash I/O must not stall the WebKit worker): LOAD_FINISHED
+    // (every page) and each A-/A+ tap used to write synchronously. Coalesce onto ONE pending
+    // timeout per store on this context — a repeat inside the window re-arms it. Runs only on the
+    // worker thread (like every m_history/m_settings access); flushPendingWrites() covers shutdown.
+    static constexpr guint kSaveDebounceMs = 1500;
+    struct SaveMsg { WpeEngine *self; int what; };   // what: 0 = history, 1 = settings
+    void queueSave(GSource **slot, int what) {
+        if (*slot) { g_source_destroy(*slot); g_source_unref(*slot); *slot = nullptr; }   // re-arm the window
+        auto *m = new SaveMsg{ this, what };
+        GSource *s = g_timeout_source_new(kSaveDebounceMs);
+        g_source_set_callback(s, &WpeEngine::onSaveTimer, m,
+                              [](gpointer d) { delete static_cast<SaveMsg*>(d); });
+        g_source_attach(s, m_ctx);
+        *slot = s;   // keep our ref so a repeat can destroy it; onSaveTimer drops it when it fires
+    }
+    static gboolean onSaveTimer(gpointer d) {
+        auto *msg = static_cast<SaveMsg*>(d);
+        WpeEngine *self = msg->self;
+        const int what = msg->what;
+        GSource **slot = (what == 0) ? &self->m_historySaveSrc : &self->m_settingsSaveSrc;
+        g_source_unref(*slot); *slot = nullptr;   // fired: drop our ref (may free msg — locals only from here)
+        self->runSave(what);
+        return G_SOURCE_REMOVE;
+    }
+    void runSave(int what) {
+        if (what == 0) rmweb::saveHistory(m_profileDir, m_history);
+        else           rmweb::saveSettings(m_profileDir, m_settings);
+    }
+    // Final flush on worker-loop exit (start()): a write still inside its debounce window would be lost.
+    void flushPendingWrites() {
+        if (m_historySaveSrc) {
+            g_source_destroy(m_historySaveSrc); g_source_unref(m_historySaveSrc); m_historySaveSrc = nullptr;
+            rmweb::saveHistory(m_profileDir, m_history);
+        }
+        if (m_settingsSaveSrc) {
+            g_source_destroy(m_settingsSaveSrc); g_source_unref(m_settingsSaveSrc); m_settingsSaveSrc = nullptr;
+            rmweb::saveSettings(m_profileDir, m_settings);
+        }
+    }
+
     void loadInitial() {
         if (m_url.isEmpty()) {
             // No URL given: show the start page (bookmarks + recent history). goHome() is already
@@ -683,14 +733,14 @@ private:
             if (self->m_renderingState) { self->m_renderingState = false; Q_EMIT self->renderingChanged(false); }
             const char *startUri = webkit_web_view_get_uri(view);
             qInfo("[t] load started @%.0fms", msSince(self->m_startUs));
-            qInfo("[perf] load-started url=%s", startUri ? startUri : "");
+            qCDebug(lcEngine, "[perf] load-started url=%s", startUri ? startUri : "");
             Q_EMIT self->loadingChanged(true);
             Q_EMIT self->renderFailed(false);           // new load -> clear any "couldn't render" notice
             Q_EMIT self->tlsChanged(true, QString());   // optimistic; onTlsError flips it on a cert failure
             self->scheduleRenderCheck();                // LOAD_STARTED always fires -> robust blank-check trigger
         }
         if (ev == WEBKIT_LOAD_COMMITTED) {
-            qInfo("[perf] load-committed @%.0fms", msSince(self->m_loadStartUs));
+            qCDebug(lcEngine, "[perf] load-committed @%.0fms", msSince(self->m_loadStartUs));
             // A real navigation/reload landed fresh original content -> any reader view is gone; reset its state.
             if (self->m_readerMode) { self->m_readerMode = false; Q_EMIT self->readerModeChanged(false); }
             // Passive TLS indicator: get_tls_info flags https + cert errors even when the page still
@@ -706,7 +756,7 @@ private:
             Q_EMIT self->loadingChanged(false);
             self->checkReaderable();                     // article? -> enable/disable the Reader button
             qInfo("[t] load finished @%.0fms", msSince(self->m_startUs));
-            qInfo("[perf] load-finished @%.0fms", msSince(self->m_loadStartUs));
+            qCDebug(lcEngine, "[perf] load-finished @%.0fms", msSince(self->m_loadStartUs));
             // Record history for real web pages (not file:// start page, not reader-injected DOM).
             {
                 const char* u = webkit_web_view_get_uri(view);
@@ -715,7 +765,7 @@ private:
                 if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
                     self->m_curUrl = url; self->m_curTitle = t ? t : "";
                     rmweb::addHistory(self->m_history, url, self->m_curTitle, (long)time(nullptr));
-                    rmweb::saveHistory(self->m_profileDir, self->m_history);
+                    self->queueSave(&self->m_historySaveSrc, 0);   // debounced — not on the WebKit hot path
                     Q_EMIT self->bookmarkedChanged(rmweb::isBookmarked(self->m_bookmarks, url));
                     // "Rendering…" only if content has not painted yet. If first-content already
                     // arrived during the load (common), do not raise the badge — and clear it if it
@@ -762,7 +812,7 @@ private:
         Q_EMIT self->loadProgressChanged(p);
         // [perf] milestone logs at 25/50/75% (once each per load).
         while (self->m_progressMilestone <= 75 && p >= self->m_progressMilestone / 100.0) {
-            qInfo("[perf] progress %d%% @%.0fms", self->m_progressMilestone, msSince(self->m_loadStartUs));
+            qCDebug(lcEngine, "[perf] progress %d%% @%.0fms", self->m_progressMilestone, msSince(self->m_loadStartUs));
             self->m_progressMilestone += 25;
         }
     }
@@ -782,7 +832,17 @@ private:
             self->m_reloadAttempts++;
             int backoffMs = 500 * (1 << (self->m_reloadAttempts - 1));
             qInfo("[recovery] scheduling reload in %d ms (attempt %d)", backoffMs, self->m_reloadAttempts);
-            QTimer::singleShot(backoffMs, [view]() { webkit_web_view_reload(view); });
+            // glib timer on the worker context (same pattern as scheduleRenderCheck): the worker
+            // thread runs NO Qt event loop, so QTimer::singleShot here could never fire. The view
+            // is ref'd for the wait; the destroy-notify drops the ref whether the timer fires or
+            // is discarded with the context at teardown.
+            GSource *s = g_timeout_source_new(static_cast<guint>(backoffMs));
+            g_source_set_callback(s, [](gpointer v) -> gboolean {
+                webkit_web_view_reload(WEBKIT_WEB_VIEW(v));
+                return G_SOURCE_REMOVE;
+            }, g_object_ref(view), [](gpointer v) { g_object_unref(v); });
+            g_source_attach(s, self->m_ctx);
+            g_source_unref(s);
         } else {
             qWarning("[crash] giving up auto-reload after %d attempts", self->m_reloadAttempts);
         }
@@ -837,7 +897,7 @@ private:
         if (nonWhite >= kBlankSamples) {
             if (!self->m_firstContentLogged) {
                 self->m_firstContentLogged = true;
-                qInfo("[perf] first-content @%.0fms (nonWhite=%d)", msSince(self->m_loadStartUs), nonWhite);
+                qCDebug(lcEngine, "[perf] first-content @%.0fms (nonWhite=%d)", msSince(self->m_loadStartUs), nonWhite);
             }
             if (self->m_renderingState) {
                 self->m_renderingState = false;
@@ -852,7 +912,7 @@ private:
 
         const double dt   = self->m_lastBufUs ? (tIn - self->m_lastBufUs) / 1000.0 : 0.0;
         const double flip = self->m_pageUs    ? (tIn - self->m_pageUs)    / 1000.0 : -1.0;
-        qInfo("[t] frame %d @%.0fms  build=%.1fms  dt=%.1fms  flip-latency=%.1fms  sig=%08x %s  %dx%d",
+        qCDebug(lcEngine, "[t] frame %d @%.0fms  build=%.1fms  dt=%.1fms  flip-latency=%.1fms  sig=%08x %s  %dx%d",
               self->m_frames, msSince(self->m_startUs), msSince(tIn), dt, flip, sig,
               changed ? "NEW" : "dup", w, h);
         self->m_lastBufUs = tIn;
@@ -894,6 +954,8 @@ private:
     std::vector<rmweb::Bookmark> m_bookmarks;
     std::vector<rmweb::HistoryEntry> m_history;
     rmweb::Settings m_settings;
+    GSource *m_historySaveSrc = nullptr;            // pending debounced history write (worker ctx)
+    GSource *m_settingsSaveSrc = nullptr;           // pending debounced settings write (worker ctx)
     std::string m_curUrl, m_curTitle;               // current committed page (for history + bookmark)
 };
 
@@ -915,7 +977,7 @@ public:
         if (const int v = qEnvironmentVariableIntValue("RMWEB_PRESENT_DWELL"); v > 0) m_dwellMs = v;
         m_fallback.setSingleShot(true);
         connect(&m_fallback, &QTimer::timeout, this,
-                [this]{ qInfo("[t][gui] present fallback-release (no frameSwapped)"); releaseGate(); });
+                [this]{ qCDebug(lcEngine, "[t][gui] present fallback-release (no frameSwapped)"); releaseGate(); });
         m_keys = rmweb::buildKeyboard(kPanelW, kPanelH, kKbTopY);   // URL keyboard, drawn into the frame (B2)
         // Exit-guard disarm timer: if a second ⏻ tap doesn't arrive within 3 s, unarm silently.
         m_exitDisarm.setSingleShot(true);
@@ -1086,7 +1148,7 @@ private Q_SLOTS:
     void onFrameSwapped() {
         if (!m_inFlight) return;
         const int ms = m_clock.isValid() ? int(m_clock.elapsed()) : 0;
-        qInfo("[t][gui] frameSwapped @%dms (dwell=%d)", ms, m_dwellMs);
+        qCDebug(lcEngine, "[t][gui] frameSwapped @%dms (dwell=%d)", ms, m_dwellMs);
         // Waveform tail can induce phantom taps — re-arm only when this present requested a guard
         // (content/chrome). Keyboard flushes leave it off so typing is not blanked mid-burst.
         if (m_lastPresentGuarded) bumpTouchGuard();
@@ -1437,11 +1499,11 @@ private:
             if (m_lastTapUs && now - m_lastTapUs < tapDebounceUs) return;
             // Phantom-touch guard during e-ink refresh — never while typing or confirming exit.
             if (!editing && !exitArmed && touchGuarded()) {
-                qInfo("[touch] dropped (refresh guard)");
+                qCDebug(lcEngine, "[touch] dropped (refresh guard)");
                 return;
             }
             m_lastTapUs = now;
-            qInfo("[touch] tap @ %d,%d%s", x, y, editing ? " (kb)" : (exitArmed ? " (exit)" : ""));
+            qCDebug(lcEngine, "[touch] tap @ %d,%d%s", x, y, editing ? " (kb)" : (exitArmed ? " (exit)" : ""));
             Q_EMIT tap(x, y);
             return;
         }
@@ -1449,10 +1511,10 @@ private:
         case Gesture::SwipeDown:
             if (editing) return;                                         // ignore page swipes over keyboard
             if (m_lastSwipeUs && now - m_lastSwipeUs < 800000) return;   // <=1 turn / 0.8 s
-            if (touchGuarded()) { qInfo("[touch] dropped (refresh guard)"); return; }
+            if (touchGuarded()) { qCDebug(lcEngine, "[touch] dropped (refresh guard)"); return; }
             m_lastSwipeUs = now;
-            if (dy < 0) { qInfo("[touch] swipe up -> next");   Q_EMIT swipe(+1); }
-            else        { qInfo("[touch] swipe down -> prev"); Q_EMIT swipe(-1); }
+            if (dy < 0) { qCDebug(lcEngine, "[touch] swipe up -> next");   Q_EMIT swipe(+1); }
+            else        { qCDebug(lcEngine, "[touch] swipe down -> prev"); Q_EMIT swipe(-1); }
             return;
         case Gesture::None:
             return;
@@ -1508,10 +1570,10 @@ public:
         const QRect full(0, 0, kPanelW, kPanelH);
         ++m_frames;
         const bool isFull = (m_fullEvery > 0 && (m_frames % m_fullEvery) == 0);
-        qInfo("[present] #%d swap enter full=%d", m_frames, isFull);
+        qCDebug(lcEngine, "[present] #%d swap enter full=%d", m_frames, isFull);
         if (isFull) m_swap(m_fb, full, 1, 4, 1);  // colour + anti-ghost flash
         else        m_swap(m_fb, full, 0, 1, 0);  // fast grayscale, no flash
-        qInfo("[present] #%d swap done", m_frames);
+        qCDebug(lcEngine, "[present] #%d swap done", m_frames);
     }
 private:
     typedef void *(*InstanceFn)();
@@ -1545,8 +1607,19 @@ int main(int argc, char **argv) {
     // Line-buffer stderr: the launcher redirects it to a file (block-buffered by default), so a kill at
     // the end of a timed run would drop the last unflushed block — losing exactly the most recent events.
     setvbuf(stderr, nullptr, _IOLBF, 0);
-    signal(SIGSEGV, crashHandler);
-    signal(SIGABRT, crashHandler);
+    // Prime the libgcc unwinder BEFORE the handler can fire: the first backtrace() allocates, and
+    // doing that inside the handler would deadlock a crash-from-malloc (prof_preload.c pattern).
+    { void *tmp[4]; backtrace(tmp, 4); }
+    // sigaction, all four fatal signals: SIGBUS (SHM buffers) and SIGILL (llvmpipe JITs code on the
+    // CPU) are as real as SEGV/ABRT here. The handler itself restores SIG_DFL + re-raises, so the
+    // watchdog still receives the signal exactly as before.
+    struct sigaction sa = {};
+    sa.sa_handler = crashHandler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGABRT, &sa, nullptr);
+    sigaction(SIGBUS,  &sa, nullptr);
+    sigaction(SIGILL,  &sa, nullptr);
     QGuiApplication app(argc, argv);
     const QString url      = (argc > 1) ? QString::fromUtf8(argv[1]) : QString();
     const QString savePath = (argc > 2) ? QString::fromUtf8(argv[2]) : QString();
@@ -1592,7 +1665,7 @@ int main(int argc, char **argv) {
                          [view](const QImage &img, int frame) {
             const gint64 t = g_get_monotonic_time();
             view->setImage(img);
-            qInfo("[t][gui] frame %d -> setImage %.1fms  %dx%d", frame,
+            qCDebug(lcEngine, "[t][gui] frame %d -> setImage %.1fms  %dx%d", frame,
                   (g_get_monotonic_time() - t) / 1000.0, img.width(), img.height());
         });
         // Engine state -> the C++ chrome painted into the frame (queued worker->GUI).
@@ -1690,8 +1763,10 @@ int main(int argc, char **argv) {
 
         // DIAG: GUI event-loop heartbeat. If these "[gui] tick" lines stop, the GUI thread is blocked
         // (e.g. inside present()/swapBuffers) and queued frameReady deliveries stall -> content never paints.
+        // Debug-category (off by default — 2 s writes forever would wear the flash log): enable with
+        // QT_LOGGING_RULES=rmweb.engine.debug=true when chasing a stall.
         { auto *hb = new QTimer(&app);
-          QObject::connect(hb, &QTimer::timeout, &app, []{ qInfo("[gui] tick"); });
+          QObject::connect(hb, &QTimer::timeout, &app, []{ qCDebug(lcEngine, "[gui] tick"); });
           hb->start(2000); }
 
         // DIAG (RMWEB_GRAB_MS): grab the composited window to a PNG after N ms — captures exactly what Qt

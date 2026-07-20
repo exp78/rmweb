@@ -131,6 +131,16 @@ static void on_buffer_rendered(WPEView *view, WPEBuffer *buffer, gpointer user_d
     gsize size = 0;
     const guint8 *pix = g_bytes_get_data(bytes, &size);
     int stride = (int)(size / (gsize)h);
+    /* A short GBytes (truncated SHM, driver quirk) would make the libpng loop below read past the
+     * buffer — and a segfault on the device is a watchdog reboot. Refuse to touch such a buffer:
+     * require the full w*h*4 bytes (which also implies stride >= w*4 for 4 bpp). */
+    if (size < (gsize)w * (gsize)h * 4 || stride < w * 4) {
+        g_printerr("[render] bad pixel buffer: %zu bytes for %dx%d (need %zu) -- aborting capture\n",
+                   size, w, h, (size_t)((gsize)w * (gsize)h * 4));
+        g_bytes_unref(bytes);
+        if (loop) g_main_loop_quit(loop);
+        return;
+    }
     g_printerr("[render] pixels: %zu bytes, stride=%d (=%d bpp)\n", size, stride, stride / w);
 
     if (write_png_bgra(out_png, pix, w, h, stride)) {
