@@ -24,7 +24,6 @@
 #include <QPolygonF>
 #include <QElapsedTimer>
 #include <cmath>
-#include <qpa/qwindowsysteminterface.h>   // QWindowSystemInterface — inject taps into QtQuick's input path
 
 #include <wpe/webkit.h>
 #include <wpe/wpe-platform.h>
@@ -82,8 +81,6 @@ static bool touchGuarded()  { return g_get_monotonic_time() < g_touchGuardUntilU
 // True while the on-screen URL keyboard is open — TouchReader must NOT drop taps (refresh guard /
 // 250 ms debounce would eat fast typing). Set only from the GUI thread; read from the touch thread.
 static std::atomic<bool> g_urlEditing{false};
-// True after the first ⏻ tap (exit armed) — second tap must not be eaten by debounce/refresh guard.
-static std::atomic<bool> g_exitArmed{false};
 
 // Print a native backtrace on a fatal signal (straight to fd 2 -> the persistent device log), then
 // re-raise so the watchdog still sees the crash. Our binary is unstripped, so addr2line on
@@ -242,11 +239,8 @@ Q_SIGNALS:
     void urlChanged(const QString &url);   // current page URI (toolbar address field)
     void canGoBack(bool ok);               // toolbar Back button enabled-state
     void canGoForward(bool ok);            // toolbar Forward button enabled-state
-    void titleChanged(const QString &title);
     void loadProgressChanged(double fraction);     // 0..1 estimated load progress
     void loadingChanged(bool loading);
-    void tlsChanged(bool ok, const QString &host); // false = TLS error -> broken-lock indicator
-    void processCrashed();                         // WebProcess died (auto-reload attempted)
     void readerModeChanged(bool on);               // reader view applied/cleared -> toolbar button state
     void readerableChanged(bool can);              // current page looks like an article -> enable Reader
     void renderFailed(bool failed);                // load finished but the page rendered ~blank (heavy SPA)
@@ -297,7 +291,8 @@ public Q_SLOTS:
         // Readability: lay the page out at device-pixel-ratio `dpr` so the CSS viewport is narrower
         // (panel/dpr) -> responsive sites reflow to a readable, fits-width layout. Toplevel sizes are
         // LOGICAL; the buffer is logical*dpr (~= the physical panel), so the display path is unchanged.
-        // Tunable via RMWEB_DPR (default 1.0 = current behaviour; ~2.0 = readable). See zoom-readability.md.
+        // Tunable via RMWEB_DPR (default 2.0: an unset/invalid value parses to 0.0 and lands outside
+        // [1.0,3.0] -> forced to 2.0; 1.0 = the old cramped behaviour). See zoom-readability.md.
         double dpr = qgetenv("RMWEB_DPR").toDouble(); if (dpr < 1.0 || dpr > 3.0) dpr = 2.0;
         m_dpr = dpr;   // panel-px -> CSS-px factor, for elementFromPoint link hit-testing on a tap
         const int logW = static_cast<int>(m_w / dpr), logH = static_cast<int>(m_h / dpr);
@@ -351,10 +346,12 @@ public Q_SLOTS:
 
         // User-Agent: env overrides; else persisted setting; else WPE default.
         // RMWEB_UA=mobile opts into lighter mobile layout for heavy JS-app sites; any other non-empty value =
-        // that exact string; "off" = use WPE default (also clears any persisted UA).
+        // that exact string; "off" = use WPE default and clear any persisted UA (saved to disk below, so
+        // the clear survives the next launch).
         {
             std::string ua = m_settings.ua;
-            if (const char *uaEnv = getenv("RMWEB_UA"); uaEnv && *uaEnv && std::string(uaEnv) != "off") ua = uaEnv;
+            const char *uaEnv = getenv("RMWEB_UA");
+            if (uaEnv && *uaEnv && std::string(uaEnv) != "off") ua = uaEnv;
             else if (uaEnv && std::string(uaEnv) == "off") ua = "";
             if (!ua.empty()) {
                 const char* real = (ua == "mobile") ? kMobileUA : ua.c_str();
@@ -362,6 +359,9 @@ public Q_SLOTS:
                 qInfo("[ua] %s", real);
             }
             m_settings.ua = ua;
+            // Persist the "off" clear immediately: a direct write is fine here (startup, before the loop
+            // runs) — the debounced queueSave() exists for the runtime hot paths.
+            if (uaEnv && std::string(uaEnv) == "off") rmweb::saveSettings(m_profileDir, m_settings);
         }
         // Apply persisted zoom (must be done after the view is fully set up).
         webkit_web_view_set_zoom_level(m_view, m_zoom);
@@ -736,20 +736,17 @@ private:
             qCDebug(lcEngine, "[perf] load-started url=%s", startUri ? startUri : "");
             Q_EMIT self->loadingChanged(true);
             Q_EMIT self->renderFailed(false);           // new load -> clear any "couldn't render" notice
-            Q_EMIT self->tlsChanged(true, QString());   // optimistic; onTlsError flips it on a cert failure
             self->scheduleRenderCheck();                // LOAD_STARTED always fires -> robust blank-check trigger
         }
         if (ev == WEBKIT_LOAD_COMMITTED) {
             qCDebug(lcEngine, "[perf] load-committed @%.0fms", msSince(self->m_loadStartUs));
             // A real navigation/reload landed fresh original content -> any reader view is gone; reset its state.
             if (self->m_readerMode) { self->m_readerMode = false; Q_EMIT self->readerModeChanged(false); }
-            // Passive TLS indicator: get_tls_info flags https + cert errors even when the page still
-            // loaded (lock shows broken for a bad cert, plain for http), independent of tls-errors-policy.
+            // TLS state is log-only (no UI consumes it): get_tls_info flags https + cert errors even when
+            // the page still loaded, independent of tls-errors-policy.
             GTlsCertificate *cert = nullptr; GTlsCertificateFlags errs = (GTlsCertificateFlags)0;
             const gboolean secure = webkit_web_view_get_tls_info(view, &cert, &errs);
-            const char *cu = webkit_web_view_get_uri(view);
             qInfo("[tls] secure=%d errs=0x%x", secure, (unsigned)errs);
-            Q_EMIT self->tlsChanged(secure && errs == 0, QUrl(QString::fromUtf8(cu ? cu : "")).host());
         }
         if (ev == WEBKIT_LOAD_FINISHED) {
             self->m_reloadAttempts = 0;                  // a good load refills the crash auto-reload budget
@@ -800,11 +797,9 @@ private:
         }
     }
 
-    static void onTitle(GObject *obj, GParamSpec *, gpointer data) {
-        auto *self = static_cast<WpeEngine*>(data);
+    static void onTitle(GObject *obj, GParamSpec *, gpointer) {
         const char *t = webkit_web_view_get_title(WEBKIT_WEB_VIEW(obj));
         qInfo("[meta] title=%s", t ? t : "");
-        Q_EMIT self->titleChanged(QString::fromUtf8(t ? t : ""));
     }
     static void onProgress(GObject *obj, GParamSpec *, gpointer data) {
         auto *self = static_cast<WpeEngine*>(data);
@@ -817,16 +812,13 @@ private:
         }
     }
     static gboolean onTlsError(WebKitWebView *, gchar *failing_uri, GTlsCertificate *,
-                               GTlsCertificateFlags, gpointer data) {
-        auto *self = static_cast<WpeEngine*>(data);
+                               GTlsCertificateFlags, gpointer) {
         qWarning("[tls] cert error: %s", failing_uri ? failing_uri : "?");
-        Q_EMIT self->tlsChanged(false, QUrl(QString::fromUtf8(failing_uri ? failing_uri : "")).host());
-        return FALSE;   // don't proceed — WebKit fails the load; the shell shows a broken-lock indicator
+        return FALSE;   // don't proceed — WebKit fails the load
     }
     static void onWebProcessTerminated(WebKitWebView *view, WebKitWebProcessTerminationReason reason, gpointer data) {
         auto *self = static_cast<WpeEngine*>(data);
         qWarning("[crash] WebProcess terminated (reason=%d, Phase2-hardened recovery), attempts=%d", reason, self->m_reloadAttempts);
-        Q_EMIT self->processCrashed();
         // hardened: exponential backoff + diagnostic log (avoids tight loops on repeated crashes)
         if (self->m_reloadAttempts < 3) {
             self->m_reloadAttempts++;
@@ -979,13 +971,6 @@ public:
         connect(&m_fallback, &QTimer::timeout, this,
                 [this]{ qCDebug(lcEngine, "[t][gui] present fallback-release (no frameSwapped)"); releaseGate(); });
         m_keys = rmweb::buildKeyboard(kPanelW, kPanelH, kKbTopY);   // URL keyboard, drawn into the frame (B2)
-        // Exit-guard disarm timer: if a second ⏻ tap doesn't arrive within 3 s, unarm silently.
-        m_exitDisarm.setSingleShot(true);
-        connect(&m_exitDisarm, &QTimer::timeout, this, [this]{
-            m_exitArmed = false;
-            g_exitArmed.store(false, std::memory_order_release);
-            schedule(/*guardTouch=*/false);
-        });
         // Keyboard: buffer keystrokes, paint once after a short idle (e-ink can't keep up with per-key presents).
         m_kbFlush.setSingleShot(true);
         connect(&m_kbFlush, &QTimer::timeout, this, [this]{
@@ -1006,11 +991,6 @@ public:
         m_forceContentPresent = true;
         m_contentFlush.stop();
     }
-    // First tap on ⏻ "arms" exit (shown inverted on a black pill, 3 s window); a second tap actually exits.
-    // Returns true if this tap only armed (caller must NOT exit), false if already armed (caller should exit).
-    // Exit is single-tap (double-tap was unreliable on e-ink: arm present + debounce made every
-    // tap look like a fresh arm). Kept as a method so the router stays tidy.
-    bool exitTapped() { return false; /* false = caller should exit now */ }
     void paint(QPainter *p) override {
         const qreal w = width(), h = height();
         if (!m_img.isNull()) p->drawImage(QRectF(0, 0, w, h), m_img);
@@ -1278,11 +1258,7 @@ private:
             p->setPen(Qt::white); p->setBrush(Qt::NoBrush); iconReader(p, rcx, cy);
         } else { pen(m_readerable); iconReader(p, rcx, cy); }
         pen(true); iconStar(p, starX + kStarW / 2.0, cy, m_bookmarked);
-        if (m_exitArmed) {
-            p->setBrush(Qt::black); p->setPen(Qt::NoPen);
-            p->drawRoundedRect(QRectF(powerX + 20, 12, kPowerW - 40, kBarH - 24), 12, 12);
-            p->setPen(Qt::white); p->setBrush(Qt::NoBrush); iconPower(p, powerX + kPowerW / 2.0, cy);
-        } else { pen(true); iconPower(p, powerX + kPowerW / 2.0, cy); }
+        pen(true); iconPower(p, powerX + kPowerW / 2.0, cy);
     }
     void iconHome(QPainter *p, qreal cx, qreal cy) const {                 // a simple house
         QPen pn = p->pen(); pn.setWidthF(4); pn.setJoinStyle(Qt::RoundJoin); p->setPen(pn); p->setBrush(Qt::NoBrush);
@@ -1402,8 +1378,6 @@ private:
     bool m_rendering = false;            // load finished, page compositing on llvmpipe -> show "Rendering…" badge
     bool m_readerMode = false, m_readerable = false;
     bool m_bookmarked = false;   // current page is bookmarked -> filled star
-    bool m_exitArmed = false;    // first ⏻ tap armed: show inverted pill; second tap within 3s actually exits
-    QTimer m_exitDisarm;         // single-shot: disarms m_exitArmed after 3 s if no second tap arrives
     QString m_addr;
     bool m_editing = false;             // URL-entry mode: the on-screen keyboard is shown over the page
     QString m_editBuf;                  // the URL currently being typed
@@ -1491,19 +1465,18 @@ private:
         const gint64 now = g_get_monotonic_time();
         const int dwellMs = static_cast<int>((now - downUs) / 1000);
         const bool editing = g_urlEditing.load(std::memory_order_acquire);
-        const bool exitArmed = g_exitArmed.load(std::memory_order_acquire);
         switch (classifyGesture(dx, dy, dwellMs)) {
         case Gesture::Tap: {
-            // Keyboard / exit-confirm: short debounce. Normal UI: 250 ms anti-double-tap.
-            const gint64 tapDebounceUs = (editing || exitArmed) ? 40000 : 250000;
+            // Keyboard: short debounce. Normal UI: 250 ms anti-double-tap.
+            const gint64 tapDebounceUs = editing ? 40000 : 250000;
             if (m_lastTapUs && now - m_lastTapUs < tapDebounceUs) return;
-            // Phantom-touch guard during e-ink refresh — never while typing or confirming exit.
-            if (!editing && !exitArmed && touchGuarded()) {
+            // Phantom-touch guard during e-ink refresh — never while typing.
+            if (!editing && touchGuarded()) {
                 qCDebug(lcEngine, "[touch] dropped (refresh guard)");
                 return;
             }
             m_lastTapUs = now;
-            qCDebug(lcEngine, "[touch] tap @ %d,%d%s", x, y, editing ? " (kb)" : (exitArmed ? " (exit)" : ""));
+            qCDebug(lcEngine, "[touch] tap @ %d,%d%s", x, y, editing ? " (kb)" : "");
             Q_EMIT tap(x, y);
             return;
         }
@@ -1528,10 +1501,10 @@ private:
 #include "main.moc"
 
 // ---------------------------------------------------------------------------
-// EpaperRefresh — drives the e-ink panel ourselves. The libqsgepaper scenegraph renders into the DRM dumb
-// buffer fast (~ms) but defers the *panel present* to a coarse internal cadence (~6 s), and a fast waveform
-// never develops grayscale/color on Gallery 3 until a full pass. With QSG_RENDER_LOOP=basic (no EPRenderLoop
-// auto-present), we present each rendered frame ourselves from QQuickWindow::afterRendering:
+// EpaperRefresh — manual e-ink panel present, DIAGNOSTIC ONLY (enabled by RMWEB_MANUAL_PRESENT; see
+// main()). Calling EPFramebuffer::swapBuffers ourselves from QQuickWindow::afterRendering re-enters the
+// framebuffer mutex the epaper QPA's EPRenderLoop holds across renderSceneGraph -> self-deadlock, so by
+// default EPRenderLoop drives the panel and this class stays unused. Kept for cadence diagnosis:
 //   * fast grayscale  (Mono, QualityFast, NoRefresh)      — every frame, so a page turn shows immediately;
 //   * full colour flash (Color, QualityFull, CompleteRefresh) — every kFullEvery frames, develops colour +
 //     clears ghosting ("grayscale now, colour catches up"). Symbols verified in libqsgepaper.so via readelf.
@@ -1562,6 +1535,9 @@ public:
     // EPScreenMode{QualityFast=1,QualityFull=4}, UpdateFlag{NoRefresh=0,CompleteRefresh=1}.
     void present() {
         if (!m_fb) return;
+        // The project's only hand-rolled refresh policy lives right here: rate-limit presents (~150 ms)
+        // + full colour flash every m_fullEvery presents. The never-wired refreshpolicy.h module was
+        // deleted — there is no other implementation to look for.
         // e-ink physically can't refresh faster than ~6 Hz; with llvmpipe the engine can emit frames far
         // faster, so rate-limit panel presents to protect the controller and avoid ghosting/flicker.
         const gint64 now = g_get_monotonic_time();

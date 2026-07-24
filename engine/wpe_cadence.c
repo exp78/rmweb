@@ -83,8 +83,8 @@ static void on_load_changed(WebKitWebView *view, WebKitLoadEvent ev, gpointer u)
 
 static gboolean on_timeout(gpointer u) { (void)u; if (loop) g_main_loop_quit(loop); return G_SOURCE_REMOVE; }
 
-/* Page carries a continuous CSS transform animation (RMWEB_ANIM=1) to test whether the compositor can
- * produce frames faster than ~6 s when something animates continuously. */
+/* Static test page (80 lines of plain text): frames arrive only via the scroll+remap tick above, so the
+ * logged buffer-rendered intervals show WPE's raw render cadence. */
 static const char *PAGE =
     "<html><head><meta charset='utf-8'><style>"
     "html,body{margin:0;padding:0;font-family:sans-serif}"
