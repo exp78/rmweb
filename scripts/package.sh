@@ -6,8 +6,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 [ -f build/rmweb-wpeqt ] || { echo "[package] build/rmweb-wpeqt missing — run ./scripts/build-wpeqt.sh first"; exit 1; }
-VER="$(grep '^VER=' device/install.sh | cut -d'"' -f2)"
-[ -n "$VER" ] || { echo "[package] could not read VER from device/install.sh"; exit 1; }
+VER="$(cat VERSION)"   # single source of truth: the repo-root VERSION file
+[ -n "$VER" ] || { echo "[package] could not read VERSION"; exit 1; }
 
 echo "[package] assembling bundle (package-only, no deploy) ..."
 RMWEB_PACKAGE_ONLY=1 ./scripts/bundle.sh

@@ -8,6 +8,23 @@ LOCK="$R/.lock"
 LOG="$R/rmweb.log"
 log(){ echo "[rmweb] $*" >> "$LOG"; }
 
+# The log lives on flash and the app appends to it for its whole lifetime — keep it bounded:
+# before a big append, if it exceeds 5 MB cut it back to the last ~1 MB. BusyBox-compatible
+# (wc/tail/mv); never fatal — a rotation failure must not stop the launcher.
+rotate_log(){
+  [ -f "$LOG" ] || return 0
+  size=$(wc -c < "$LOG" 2>/dev/null | tr -dc '0-9')
+  if [ -n "$size" ] && [ "$size" -gt 5242880 ]; then
+    if tail -c 1048576 "$LOG" > "$LOG.rot" 2>/dev/null; then
+      mv "$LOG.rot" "$LOG"
+      log "log rotated (was ${size} bytes, kept last 1 MB)"
+    else
+      rm -f "$LOG.rot"
+    fi
+  fi
+  return 0
+}
+
 DONE=
 cleanup(){
   [ -n "$DONE" ] && return; DONE=1
@@ -32,6 +49,7 @@ if ! mkdir "$LOCK" 2>/dev/null; then
   DONE=1; exit 1
 fi
 
+rotate_log   # bound the persistent log before this run's appends
 log "start"
 if systemctl is-active --quiet xochitl; then log "stopping xochitl"; systemctl stop xochitl && STOPPED=1; fi
 
@@ -46,6 +64,7 @@ fi
 
 . "$R/rmweb-env.sh"
 
+rotate_log   # the app's own append below is the main growth source
 log "launch rmweb-wpeqt $*"
 "$R/bin/rmweb-wpeqt" "$@" >> "$LOG" 2>&1 &
 APP=$!

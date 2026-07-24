@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 [ -f .env ] && . ./.env
 HOST="${REMARKABLE_HOST:-10.11.99.1}"
-DEVICE_USER="${REMARKABLE_USER:-root}"
+DEVICE_USER="${REMARKABLE_USER:-${DEVICE_USER:-root}}"   # REMARKABLE_USER (.env) is canonical; DEVICE_USER = legacy fallback
 BIN="${1:?usage: run-on-device.sh <local-binary> [app-args...]}"; shift || true
 NAME="$(basename "$BIN")"
 REMOTE="/home/root/rmweb/bin/$NAME"

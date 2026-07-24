@@ -3,6 +3,7 @@
 # WPE WebKit (in build/stage) and runs it on the software GL stack to render a
 # page to /work/build/wpe-render.png.
 set -e
+set -o pipefail   # the compile pipe below must not mask a compiler failure
 . /opt/rmpp-sdk/environment-setup-cortexa53-crypto-remarkable-linux
 
 # A font so text actually paints: the SDK sysroot ships fonts.conf but ZERO fonts. The sysroot

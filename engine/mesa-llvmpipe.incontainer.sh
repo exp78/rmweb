@@ -4,6 +4,7 @@
 # Uses the container's own arm64 LLVM 16 (Debian bookworm); its glibc 2.36 < device 2.39 -> runs on device.
 # Output: build/stage-mesa-llvm/usr/lib/dri/swrast_dri.so (now with llvmpipe) + build/llvm-bundle/libLLVM*.
 set -e
+set -o pipefail   # the meson/ninja pipes below must not mask a build failure
 
 echo "### STAGE 1: install arm64 LLVM 16 in the container ###"
 apt-get update -qq
@@ -46,8 +47,8 @@ MESA_OPTS="-Dgallium-drivers=swrast -Dvulkan-drivers= -Dplatforms= -Degl-native-
  -Dvalgrind=disabled -Dlibunwind=disabled -Dzstd=disabled -Dgallium-opencl=disabled -Dgallium-rusticl=false \
  -Dprefix=/usr -Dbuildtype=release"
 rm -rf _b2
-"$MESON" setup _b2 --native-file=/work/build/src/mesa-native.ini $MESA_OPTS 2>&1 | tail -n 25
-echo "--- gallium drivers configured: ---"; grep -iE "gallium|llvm" _b2/meson-logs/meson-log.txt | grep -iE "llvmpipe|softpipe|llvm.*(yes|enabled|found)" | head
+"$MESON" setup _b2 --native-file=/work/engine/mesa-native.ini $MESA_OPTS 2>&1 | tail -n 25
+echo "--- gallium drivers configured: ---"; grep -iE "gallium|llvm" _b2/meson-logs/meson-log.txt | grep -iE "llvmpipe|softpipe|llvm.*(yes|enabled|found)" | head || true
 
 echo "### STAGE 3: build (ninja) ###"
 ninja -C _b2 2>&1 | tail -n 15

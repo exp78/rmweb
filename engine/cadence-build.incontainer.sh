@@ -2,6 +2,7 @@
 # Runs INSIDE rmweb-sdk. Cross-compiles engine/wpe_cadence.c against the staged WPE WebKit into an
 # aarch64 binary at build/wpe_cadence (to be run ON THE DEVICE, not here). Compile-only — no run.
 set -e
+set -o pipefail   # the compile pipe below must not mask a compiler failure
 . /opt/rmpp-sdk/environment-setup-cortexa53-crypto-remarkable-linux
 
 STAGE=/work/build/stage

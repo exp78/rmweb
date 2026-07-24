@@ -28,13 +28,24 @@ set -euo pipefail
 # (See research-reuse.md §8.)
 cd "$(dirname "$0")/.."
 VER=2.78.1
+# Pinned SHA-256 of the release tarball (same discipline as scripts/fetch-sdk.sh).
+SHA256=e48f2ddbb049832cbb09230529c5e45daca9f0df0eda325f832f7379859bf09f
 SRC="build/src/glib-networking-$VER"
+
+verify_sha256() { # file expected-sha256
+  if command -v sha256sum >/dev/null 2>&1; then echo "$2  $1" | sha256sum -c -
+  else echo "$2  $1" | shasum -a 256 -c -; fi
+}
+
 if [ ! -f "$SRC/meson.build" ]; then
   echo "[fetch] glib-networking $VER (host)"
   mkdir -p "$SRC"
-  curl -fL "https://download.gnome.org/sources/glib-networking/2.78/glib-networking-$VER.tar.xz" -o /tmp/gn.tar.xz
-  tar xf /tmp/gn.tar.xz -C "$SRC" --strip-components=1
-  rm -f /tmp/gn.tar.xz
+  tmp="$(mktemp "${TMPDIR:-/tmp}/_gn.XXXXXX")"   # template must END in the X's (GNU mktemp); tar auto-detects the format
+  curl -fL "https://download.gnome.org/sources/glib-networking/2.78/glib-networking-$VER.tar.xz" -o "$tmp"
+  # Verify BEFORE extracting; drop the tarball and the (empty) dest on mismatch.
+  verify_sha256 "$tmp" "$SHA256" || { echo "[fetch] CHECKSUM FAILED — removing $tmp" >&2; rm -f "$tmp"; rm -rf "$SRC"; exit 1; }
+  tar xf "$tmp" -C "$SRC" --strip-components=1 || { rm -rf "$SRC"; rm -f "$tmp"; exit 1; }
+  rm -f "$tmp"
 fi
 docker run --rm -v "$PWD":/work -w /work rmweb-sdk bash -lc '
   set -e

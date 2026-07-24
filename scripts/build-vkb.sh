@@ -11,7 +11,7 @@ SRC="build/src/qtvirtualkeyboard-$VER"
 if [ ! -d "$SRC" ] || [ -z "$(ls -A "$SRC" 2>/dev/null)" ]; then
   echo "[fetch] qtvirtualkeyboard $VER (host)"
   mkdir -p "$SRC"
-  tmp="$(mktemp "${TMPDIR:-/tmp}/_vkb.XXXXXX.tar.xz")"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/_vkb.XXXXXX")"   # template must END in the X's (GNU mktemp); tar auto-detects the format
   curl -fL "https://download.qt.io/archive/qt/6.8/$VER/submodules/qtvirtualkeyboard-everywhere-src-$VER.tar.xz" -o "$tmp"
   tar xf "$tmp" -C "$SRC" --strip-components=1 || { rm -rf "$SRC"; rm -f "$tmp"; exit 1; }
   rm -f "$tmp"

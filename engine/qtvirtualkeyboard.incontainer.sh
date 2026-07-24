@@ -7,6 +7,7 @@
 #   * the input-context   .../plugins/platforminputcontexts/libqtvirtualkeyboardplugin.so
 # Source is fetched on the HOST (container has no curl) into build/src/qtvirtualkeyboard-6.8.2.
 set -e
+set -o pipefail   # the configure/build/install pipes below must not mask a build failure
 . /opt/rmpp-sdk/environment-setup-cortexa53-crypto-remarkable-linux
 SRC=/work/build/src/qtvirtualkeyboard-6.8.2
 BLD=/build/vkb
