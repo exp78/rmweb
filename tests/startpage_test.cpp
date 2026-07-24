@@ -1,5 +1,4 @@
 #include "../engine/wpeqt/startpage.h"
-#include <cassert>
 #include <cstdio>
 #include <string>
 using namespace rmweb;
@@ -34,6 +33,19 @@ int main() {
     CHECK(!has(bad, "href='file:"));
     CHECK(has(bad, "BadBm") && has(bad, "BadH"));         // entries still rendered as plain text
     CHECK(has(bad, "href='rmweb:clear-history'"));        // generator's own rmweb: link unaffected
+
+    // href-attribute escaping: ' and " inside a URL must not break out of href='...'
+    std::vector<Bookmark> quoteBm = {{"https://ex.com/a'b\"c", "Quoted"}};
+    std::string q = buildStartPage(quoteBm, {});
+    CHECK(has(q, "href='https://ex.com/a&#39;b&quot;c'")); // quotes escaped inside the attribute
+    CHECK(!has(q, "a'b\"c"));                             // raw quotes must NOT appear anywhere
+
+    // empty title falls back to the URL as the visible label (startpage.h bookmark/history loops)
+    std::vector<Bookmark> noTitleBm = {{"http://ex.com/notitle", ""}};
+    std::vector<HistoryEntry> noTitleH = {{"http://ex.com/h2", "", 5}};
+    std::string nt = buildStartPage(noTitleBm, noTitleH);
+    CHECK(has(nt, ">http://ex.com/notitle</a>"));         // bookmark tile label = url
+    CHECK(has(nt, ">http://ex.com/h2<span"));             // history label = url (before the url span)
 
     if (fails == 0) std::printf("startpage_test: OK\n");
     return fails ? 1 : 0;
