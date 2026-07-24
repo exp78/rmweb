@@ -16,10 +16,6 @@ pkg_check_modules(WPE REQUIRED IMPORTED_TARGET
 
 qt_add_executable(rmweb-wpeqt main.cpp)
 target_link_libraries(rmweb-wpeqt PRIVATE Qt6::Gui Qt6::Qml Qt6::Quick PkgConfig::WPE)
-# QtGui private headers for QWindowSystemInterface: we synthesize finger taps INTO QtQuick's input path
-# (a plain QMouseEvent via QCoreApplication::sendEvent does NOT route to QtQuick items on Qt6). The
-# symbols live in libQt6Gui (already linked) — only the private include dir is needed.
-target_include_directories(rmweb-wpeqt PRIVATE ${Qt6Gui_PRIVATE_INCLUDE_DIRS})
 # WPE/WebKit pull in GLib's gio, whose GDBus structs have members named `signals`/`slots`.
 # Disable Qt's `signals`/`slots`/`emit` keyword macros (we use Q_SIGNALS/Q_SLOTS/Q_EMIT).
 target_compile_definitions(rmweb-wpeqt PRIVATE QT_NO_KEYWORDS)
