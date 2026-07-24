@@ -8,6 +8,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 NAME="${1:?name}"; URL="${2:?tarball-url}"; SYS="${3:?meson|cmake|autotools}"; shift 3 || true
 
+# NAME lands in `rm -rf "build/src/$NAME"` below — pin it to safe path characters and reject
+# any ".." so a crafted name can't traverse out of build/src/.
+case "$NAME" in
+  *[!A-Za-z0-9._+-]*|*..*|"") echo "[build-dep] ERROR: invalid name '$NAME' (allowed: A-Za-z0-9 . _ + -, no '..')" >&2; exit 2 ;;
+esac
+
 SRC="build/src/$NAME"
 echo "[build-dep] fetching $NAME (host) from $URL"
 rm -rf "$SRC"; mkdir -p "$SRC"

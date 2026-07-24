@@ -5,7 +5,7 @@ set -euo pipefail
 # Requires scripts/bundle.sh to have deployed /home/root/rmweb first.
 cd "$(dirname "$0")/.."
 [ -f .env ] && . ./.env || true
-HOST="${REMARKABLE_HOST:-10.11.99.1}"; DUSER="${DEVICE_USER:-root}"
+HOST="${REMARKABLE_HOST:-10.11.99.1}"; DUSER="${REMARKABLE_USER:-${DEVICE_USER:-root}}"   # REMARKABLE_USER (.env) is canonical; DEVICE_USER = legacy fallback
 OUT="${1:-build/wpe-render-device.png}"
 
 ssh "$DUSER@$HOST" 'bash -s' <<'EOS'
@@ -37,7 +37,7 @@ export GIO_EXTRA_MODULES="$R/lib/gio/modules"   # glib-networking OpenSSL TLS ba
 export FONTCONFIG_PATH=/etc/fonts HOME=/home/root
 echo "[device] system ttf fonts: $(find /usr/share/fonts -name '*.ttf' 2>/dev/null | wc -l)"
 rm -f "$R/out.png"
-"$R/bin/wpe_render" "$R/out.png" 2>&1 | tail -25 || echo "[device] wpe_render rc=$?"
+"$R/bin/wpe_render" "$R/out.png" 2>&1 | tail -n 25 || echo "[device] wpe_render rc=$?"
 echo "[device] result: $(ls -l "$R/out.png" 2>&1)"
 EOS
 

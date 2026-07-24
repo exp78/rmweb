@@ -6,7 +6,7 @@ set -euo pipefail
 # Usage: scripts/run-wpeqt-on-device.sh [save|show] [URL]
 cd "$(dirname "$0")/.."
 [ -f .env ] && . ./.env || true
-HOST="${REMARKABLE_HOST:-10.11.99.1}"; DUSER="${DEVICE_USER:-root}"
+HOST="${REMARKABLE_HOST:-10.11.99.1}"; DUSER="${REMARKABLE_USER:-${DEVICE_USER:-root}}"   # REMARKABLE_USER (.env) is canonical; DEVICE_USER = legacy fallback
 MODE="${1:-save}"; URL="${2:-}"
 
 scp -q build/rmweb-wpeqt "$DUSER@$HOST:/home/root/rmweb/bin/rmweb-wpeqt"
@@ -27,14 +27,32 @@ REMOTE_ENV="$(printf '%q ' \
 ssh "$DUSER@$HOST" "$REMOTE_ENV bash -s" <<'EOS'
 set -e
 R=/home/root/rmweb
+# Same single-instance discipline as the production launcher (device/rmweb): the lock is an
+# atomic mkdir. If it exists, another instance owns xochitl + the overlay — bail WITHOUT
+# touching either (no xochitl stop, no umount under a foreign instance).
+if ! mkdir "$R/.lock" 2>/dev/null; then
+  echo "[device] ERROR: $R/.lock exists — another rmweb instance is running" >&2
+  echo "[device] (stale lock? remove $R/.lock if no rmweb is running)" >&2
+  exit 1
+fi
 # WPE spawns helpers from the baked /usr/libexec/wpe-webkit-2.0 and / is read-only -> overlay it.
 # Install the cleanup trap BEFORE mounting/stopping anything, so a failure in the setup block
 # still restores xochitl + unmounts the overlay (the guard vars default to unset = no-op).
-cleanup(){ [ -n "${STOPPED:-}" ] && systemctl start xochitl; [ -n "${MOUNTED:-}" ] && umount /usr/libexec 2>/dev/null; }
+# DONE makes cleanup idempotent (EXIT re-runs after the TERM/INT/HUP traps).
+DONE=
+cleanup(){
+  [ -n "$DONE" ] && return; DONE=1
+  [ -n "${STOPPED:-}" ] && systemctl start xochitl
+  [ -n "${MOUNTED:-}" ] && umount /usr/libexec 2>/dev/null   # umount only what WE mounted (flag)
+  rmdir "$R/.lock" 2>/dev/null
+}
 trap cleanup EXIT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 129' HUP
 # A hard-killed prior run leaves a stale overlay (its EXIT trap never ran) whose upper holds the OLD
 # helpers — and the [ ! -e ] check below would then skip re-mounting and silently run stale binaries.
-# Drop any stale overlay first so we always mount fresh (harmless/ignored if nothing is mounted there).
+# Dropping it is safe only now that we hold the lock (no live instance can own that overlay).
 umount /usr/libexec 2>/dev/null || true
 if [ ! -e /usr/libexec/wpe-webkit-2.0 ]; then
   rm -rf "$R/ovl"; mkdir -p "$R/ovl/upper/wpe-webkit-2.0" "$R/ovl/work"
@@ -46,7 +64,8 @@ fi
 . "$R/rmweb-env.sh"
 
 if [ "$MODE" = show ]; then
-  echo "[device] stopping xochitl"; systemctl stop xochitl && STOPPED=1
+  # Stop xochitl only if it is actually running (device/rmweb discipline); STOPPED gates the restore.
+  if systemctl is-active --quiet xochitl; then echo "[device] stopping xochitl"; systemctl stop xochitl && STOPPED=1; fi
   export RMWEB_AUTOPAGE_MS   # diagnostic: if set, the app auto-turns pages at this interval (ms)
   export RMWEB_PRESENT_DWELL # A6: min present spacing (ms) for the frameSwapped-gated serializer
   export RMWEB_DPR           # readability: device-pixel-ratio (CSS viewport = panel/dpr); ~2.0 = readable
@@ -92,7 +111,7 @@ elif [ "$MODE" = bench ]; then
 else
   export QT_QPA_PLATFORM=offscreen
   rm -f "$R/qt-out.png"
-  "$R/bin/rmweb-wpeqt" "$URL" "$R/qt-out.png" 2>&1 | tail -30 || echo "[device] rc=$?"
+  "$R/bin/rmweb-wpeqt" "$URL" "$R/qt-out.png" 2>&1 | tail -n 30 || echo "[device] rc=$?"
   echo "[device] result: $(ls -l "$R/qt-out.png" 2>&1)"
 fi
 EOS

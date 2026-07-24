@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1
 # Cross-compilation environment for the reMarkable Paper Pro ("ferrari").
 # Installs reMarkable's official aarch64 Yocto SDK (scarthgap, glibc 2.39, -mcpu=cortex-a53).
-FROM --platform=linux/arm64 debian:bookworm-slim
+# Base image pinned by digest (= bookworm-20260713-slim, fetched 2026-07-24 via the Docker
+# Registry API) so the toolchain build is reproducible; bump deliberately, not by chance.
+FROM --platform=linux/arm64 debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       bash file xz-utils python3 make cmake ninja-build perl ca-certificates \

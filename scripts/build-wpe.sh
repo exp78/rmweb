@@ -69,14 +69,29 @@ TASN1_VER=4.19.0
 LIBWPE_VER=1.16.2
 XSLT_VER=1.1.39
 
+# Pinned SHA-256 per tarball (same discipline as scripts/fetch-sdk.sh): supply-chain +
+# reproducibility. Hashes computed from the release tarballs at the URLs in fetch_sources below.
+WPE_SHA256=01f36010705adb14404c56baf033147f7927cc7c6badec81bb141266fcdd8d0b
+HB_SHA256=109501eaeb8bde3eadb25fab4164e993fbace29c3d775bcaa1c1e58e2f15f847
+TASN1_SHA256=1613f0ac1cf484d6ec0ce3b8c06d56263cc7242f1c23b30d82d23de345a63f7a
+LIBWPE_SHA256=960bdd11c3f2cf5bd91569603ed6d2aa42fd4000ed7cac930a804eac367888d7
+XSLT_SHA256=2a20ad621148339b0759c4d4e96719362dee64c9a096dbba625ba053846349f0
+
 # ---------- host fetch helpers (container has no curl) ----------
-fetch() { # url dest-dir [strip]
-  local url="$1" dest="$2" strip="${3:-1}"
+verify_sha256() { # file expected-sha256
+  if command -v sha256sum >/dev/null 2>&1; then echo "$2  $1" | sha256sum -c -
+  else echo "$2  $1" | shasum -a 256 -c -; fi
+}
+
+fetch() { # url dest-dir sha256 [strip]
+  local url="$1" dest="$2" sha="$3" strip="${4:-1}"
   [ -e "$dest" ] && [ -n "$(ls -A "$dest" 2>/dev/null)" ] && return 0
   echo "[fetch] $url"
   mkdir -p "$dest"
-  local tmp; tmp="$(mktemp "${TMPDIR:-/tmp}/_dl.XXXXXX.tar")"
+  local tmp; tmp="$(mktemp "${TMPDIR:-/tmp}/_dl.XXXXXX")"   # template must END in the X's (GNU mktemp); tar auto-detects the format
   curl -fL "$url" -o "$tmp"
+  # Verify BEFORE extracting; drop the tarball and the (empty) dest on mismatch.
+  verify_sha256 "$tmp" "$sha" || { echo "[fetch] CHECKSUM FAILED: $url" >&2; rm -f "$tmp"; rm -rf "$dest"; return 1; }
   # On a corrupt/partial extract, wipe dest so the non-empty skip-guard above can't later
   # mistake a half-written tree for a good one.
   tar xf "$tmp" -C "$dest" --strip-components="$strip" || { rm -rf "$dest"; rm -f "$tmp"; return 1; }
@@ -84,11 +99,11 @@ fetch() { # url dest-dir [strip]
 }
 
 fetch_sources() {
-  fetch "https://wpewebkit.org/releases/wpewebkit-$VER.tar.xz"          "build/src/wpewebkit-$VER"
-  fetch "https://github.com/harfbuzz/harfbuzz/releases/download/$HB_VER/harfbuzz-$HB_VER.tar.xz" "build/src/harfbuzz-$HB_VER"
-  fetch "https://ftp.gnu.org/gnu/libtasn1/libtasn1-$TASN1_VER.tar.gz"   "build/src/libtasn1-$TASN1_VER"
-  fetch "https://wpewebkit.org/releases/libwpe-$LIBWPE_VER.tar.xz"      "build/src/libwpe-$LIBWPE_VER"
-  fetch "https://download.gnome.org/sources/libxslt/1.1/libxslt-$XSLT_VER.tar.xz" "build/src/libxslt-$XSLT_VER"
+  fetch "https://wpewebkit.org/releases/wpewebkit-$VER.tar.xz"          "build/src/wpewebkit-$VER"      "$WPE_SHA256"
+  fetch "https://github.com/harfbuzz/harfbuzz/releases/download/$HB_VER/harfbuzz-$HB_VER.tar.xz" "build/src/harfbuzz-$HB_VER" "$HB_SHA256"
+  fetch "https://ftp.gnu.org/gnu/libtasn1/libtasn1-$TASN1_VER.tar.gz"   "build/src/libtasn1-$TASN1_VER" "$TASN1_SHA256"
+  fetch "https://wpewebkit.org/releases/libwpe-$LIBWPE_VER.tar.xz"      "build/src/libwpe-$LIBWPE_VER"  "$LIBWPE_SHA256"
+  fetch "https://download.gnome.org/sources/libxslt/1.1/libxslt-$XSLT_VER.tar.xz" "build/src/libxslt-$XSLT_VER" "$XSLT_SHA256"
 }
 
 # ---------- run a script body inside the SDK container ----------
@@ -168,7 +183,7 @@ PC
       MESON=meson.real; command -v "$MESON" >/dev/null 2>&1 || MESON=meson
       ( unset CC CXX CPP LD AR NM STRIP CFLAGS CXXFLAGS LDFLAGS CPPFLAGS
         cd /work/build/src/libwpe-$LWV; rm -rf _b
-        "$MESON" setup _b . --native-file /work/build/src/mesa-native.ini \
+        "$MESON" setup _b . --native-file /work/engine/mesa-native.ini \
           --prefix /usr --buildtype release -Denable-xkb=true >/tmp/libwpe.log 2>&1
         ninja -C _b -j"$JOBS" >>/tmp/libwpe.log 2>&1
         DESTDIR="$STAGE" ninja -C _b install >>/tmp/libwpe.log 2>&1 )

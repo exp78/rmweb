@@ -7,7 +7,7 @@ set -euo pipefail
 # freetype, harfbuzz, openssl, libxml2, png/jpeg, ...) are reused from the device.
 cd "$(dirname "$0")/.."
 [ -f .env ] && . ./.env || true
-HOST="${REMARKABLE_HOST:-10.11.99.1}"; DUSER="${DEVICE_USER:-root}"
+HOST="${REMARKABLE_HOST:-10.11.99.1}"; DUSER="${REMARKABLE_USER:-${DEVICE_USER:-root}}"   # REMARKABLE_USER (.env) is canonical; DEVICE_USER = legacy fallback
 S=build/stage/usr; M=build/stage-mesa/usr; B=build/bundle
 
 rm -rf "$B"; mkdir -p "$B/lib/dri" "$B/lib/gio/modules" "$B/libexec" "$B/share/glvnd/egl_vendor.d" "$B/bin"
@@ -57,7 +57,7 @@ cp -a build/wpe_render              "$B/bin/"
 # rm-appload descriptor + icon. These live under device/ in the repo and ship at the bundle root.
 cp -a device/rmweb device/rmweb-env.sh device/install.sh "$B/"
 chmod +x "$B/rmweb" "$B/install.sh"
-echo "0.8.0" > "$B/VERSION"
+cp VERSION "$B/VERSION"   # single source of truth: the repo-root VERSION file
 [ -d device/appload ] && cp -a device/appload "$B/"
 [ -f device/icon.svg ] && cp -a device/icon.svg "$B/"
 
@@ -65,7 +65,31 @@ echo "[bundle] local size:"; du -sh "$B"
 if [ -n "${RMWEB_PACKAGE_ONLY:-}" ]; then
   echo "[bundle] package-only: assembled $B (skipping device deploy)"
 else
-  echo "[bundle] deploying to $DUSER@$HOST:/home/root/rmweb ..."
-  tar -C "$B" -cf - . | ssh "$DUSER@$HOST" 'mkdir -p /home/root/rmweb && tar -C /home/root/rmweb -xf -'
-  ssh "$DUSER@$HOST" 'echo "[device] /home/root/rmweb:"; du -sh /home/root/rmweb; ls /home/root/rmweb'
+  # Atomic deploy: unpack into a staging dir on the device, then swap with mv (rename is atomic
+  # on the same fs). A failed/interrupted transfer leaves the LIVE install untouched. If rmweb is
+  # running (its .lock exists), abort BEFORE unpacking — never swap libs under a live instance.
+  # The remote shell is BusyBox ash: no GNU-isms.
+  echo "[bundle] deploying to $DUSER@$HOST:/home/root/rmweb (atomic staging) ..."
+  tar -C "$B" -cf - . | ssh "$DUSER@$HOST" '
+    set -e
+    R=/home/root/rmweb; S=/home/root/.rmweb-staging.$$; O=/home/root/.rmweb-old.$$
+    if [ -e "$R/.lock" ]; then
+      echo "[deploy] ERROR: $R/.lock exists — rmweb is RUNNING on the device." >&2
+      echo "[deploy] quit it first (or remove a proven-stale lock); deploy aborted BEFORE unpacking." >&2
+      exit 1
+    fi
+    rm -rf "$S" "$O" /home/root/.rmweb-staging.* /home/root/.rmweb-old.*   # sweep leftovers of interrupted deploys
+    mkdir -p "$S"
+    if tar -C "$S" -xf -; then
+      [ -d "$R" ] && mv "$R" "$O"   # current -> .old
+      mv "$S" "$R"                  # staging -> live (atomic rename)
+      rm -rf "$O"
+      echo "[device] deployed. /home/root/rmweb:"
+      du -sh "$R"; ls "$R"
+    else
+      rm -rf "$S"
+      echo "[deploy] ERROR: untar failed — live install untouched" >&2
+      exit 1
+    fi
+  '
 fi
