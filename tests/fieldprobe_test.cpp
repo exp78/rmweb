@@ -26,19 +26,35 @@ int main() {
     CHECK(parseTapProbe("tick\n").value == "");
     CHECK(parseTapProbe("tick\nmulti\nline").value == "multi\nline");
 
-    // field: flag + value; the value may contain newlines (textarea)
-    TapProbe f = parseTapProbe("field\n0\nhello");
-    CHECK(f.hit == TapHit::Field); CHECK(!f.masked); CHECK(f.value == "hello");
-    TapProbe pw = parseTapProbe("field\n1\ns3cret");
-    CHECK(pw.masked); CHECK(pw.value == "s3cret");
-    TapProbe ta = parseTapProbe("field\n0\nline1\nline2");
-    CHECK(ta.value == "line1\nline2");                          // value = after the SECOND \n
-    TapProbe empty = parseTapProbe("field\n0\n");
-    CHECK(empty.hit == TapHit::Field); CHECK(empty.value.empty());
+    // field: flag + hint + value; the value may contain newlines (textarea)
+    TapProbe f = parseTapProbe("field\n0\nemail \nhello");
+    CHECK(f.hit == TapHit::Field); CHECK(!f.masked); CHECK(f.hint == "email "); CHECK(f.value == "hello");
+    TapProbe pw = parseTapProbe("field\n1\npassword\ns3cret");
+    CHECK(pw.masked); CHECK(pw.hint == "password"); CHECK(pw.value == "s3cret");
+    TapProbe ta = parseTapProbe("field\n0\n\nline1\nline2");
+    CHECK(ta.hint.empty()); CHECK(ta.value == "line1\nline2");    // value = after the THIRD \n
+    TapProbe empty = parseTapProbe("field\n0\nname\n");
+    CHECK(empty.hit == TapHit::Field); CHECK(empty.hint == "name"); CHECK(empty.value.empty());
     TapProbe mal = parseTapProbe("field\nonlyone");
-    CHECK(mal.hit == TapHit::Field); CHECK(mal.value.empty());  // malformed: no flag line -> empty value
-    TapProbe wrongflag = parseTapProbe("field\n2\nv");
-    CHECK(!wrongflag.masked); CHECK(wrongflag.value == "v");    // only "1" means masked
+    CHECK(mal.hit == TapHit::Field); CHECK(mal.value.empty());    // malformed: no flag line -> empty value
+    TapProbe legacy = parseTapProbe("field\n0\nhello");           // legacy: no hint line -> empty hint
+    CHECK(legacy.hit == TapHit::Field); CHECK(legacy.hint.empty()); CHECK(legacy.value == "hello");
+    TapProbe wrongflag = parseTapProbe("field\n2\nx\nv");
+    CHECK(!wrongflag.masked); CHECK(wrongflag.hint == "x"); CHECK(wrongflag.value == "v");  // only "1" means masked
+
+    // classifyFieldHint (autofill): email / user / name, order matters ("username" has "name")
+    CHECK(classifyFieldHint("email", false) == FieldKind::Email);
+    CHECK(classifyFieldHint("E-Mail", false) == FieldKind::Email);
+    CHECK(classifyFieldHint(" text mailaddr ", false) == FieldKind::Email);
+    CHECK(classifyFieldHint("username", false) == FieldKind::User);
+    CHECK(classifyFieldHint("login", false) == FieldKind::User);
+    CHECK(classifyFieldHint("nickname", false) == FieldKind::User);
+    CHECK(classifyFieldHint("name", false) == FieldKind::Name);
+    CHECK(classifyFieldHint("given-name fname", false) == FieldKind::Name);
+    CHECK(classifyFieldHint("FullName", false) == FieldKind::Name);
+    CHECK(classifyFieldHint("search q", false) == FieldKind::None);
+    CHECK(classifyFieldHint("", false) == FieldKind::None);
+    CHECK(classifyFieldHint("email", true) == FieldKind::None);   // passwords never classify
 
     // jsStringEscape
     CHECK(jsStringEscape("plain") == "plain");
