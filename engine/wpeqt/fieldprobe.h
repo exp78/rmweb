@@ -3,6 +3,7 @@
 // answers ONE of these line-protocol strings:
 //   "none"                    — empty area (GUI falls back to the chrome toggle)
 //   "link"                    — a link/button was followed (navigation proceeds on its own)
+//   "peek\n<href>"            — long-press peek: a link was hit but NOT followed; href = its target
 //   "tick\n<label>"           — a checkbox/radio toggled or a <select> cycled; label = new state text
 //   "field\n<0|1>\n<value>"   — a text field was focused; flag 1 = password (mask the echo),
 //                               value = the field's current content (may itself contain newlines)
@@ -11,16 +12,17 @@
 #include <cstdio>
 namespace rmweb {
 
-enum class TapHit { None, Link, Tick, Field };
+enum class TapHit { None, Link, Peek, Tick, Field };
 
 struct TapProbe {
     TapHit hit = TapHit::None;
     bool masked = false;     // Field only: password input -> echo '*' in the input line
-    std::string value;       // Tick: state/option label. Field: current value.
+    std::string value;       // Tick: state/option label. Field: current value. Peek: link href.
 };
 
 inline TapProbe parseTapProbe(const std::string& s) {
     if (s == "link") return {TapHit::Link, false, {}};
+    if (s.rfind("peek\n", 0) == 0) return {TapHit::Peek, false, s.substr(5)};
     if (s.rfind("tick\n", 0) == 0) return {TapHit::Tick, false, s.substr(5)};
     if (s.rfind("field\n", 0) == 0) {
         const size_t p = s.find('\n', 6);

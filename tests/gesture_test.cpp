@@ -11,7 +11,7 @@ int main() {
     CHECK(classifyGesture(0, -300, 200) == Gesture::SwipeUp);    // finger up   = next page
     CHECK(classifyGesture(10, 300, 200) == Gesture::SwipeDown);  // finger down = prev page
     CHECK(classifyGesture(5, 5, 120)    == Gesture::Tap);        // small move, short dwell
-    CHECK(classifyGesture(5, 5, 2000)   == Gesture::None);       // long press is NOT a tap
+    CHECK(classifyGesture(5, 5, 2000)   == Gesture::LongPress);  // long stationary hold = peek
     CHECK(classifyGesture(300, 300, 200) == Gesture::None);      // diagonal -> nothing
     CHECK(classifyGesture(0, 100, 200)   == Gesture::None);      // short vertical -> nothing
 
@@ -25,7 +25,7 @@ int main() {
     // Exact tap boundaries (tapMaxMove=40 and tapMaxDwellMs=700, both inclusive)
     CHECK(classifyGesture(40, 40, 700) == Gesture::Tap);         // all maxima hit exactly
     CHECK(classifyGesture(41, 0, 100)  == Gesture::None);        // 1px over tap move, short of a swipe
-    CHECK(classifyGesture(0, 0, 701)   == Gesture::None);        // 1ms over tap dwell -> long-press
+    CHECK(classifyGesture(0, 0, 701)   == Gesture::LongPress);   // 1ms over tap dwell -> long-press
 
     // Dwell gates only taps, not swipes
     CHECK(classifyGesture(0, 300, 5000) == Gesture::SwipeDown);  // slow swipe still turns the page

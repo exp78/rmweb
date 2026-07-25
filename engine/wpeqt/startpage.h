@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include "profile.h"
+#include "url.h"
 
 namespace rmweb {
 
@@ -131,6 +132,58 @@ inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
     h += "<h2>Settings</h2><div class='row'><a class='rowlink' href='rmweb:toggle-dark'><span class='t'>Reader theme: ";
     h += readerDark ? "dark" : "light";
     h += "</span></a></div></body></html>";
+    return h;
+}
+
+// Address-bar search results (typed words that aren't a URL): a web-search link on top, then the
+// matching bookmarks + history rows. Same design language as the start page, still JS-free.
+inline std::string buildSearchResults(const std::string& query,
+                                      const std::vector<Bookmark>& bm,
+                                      const std::vector<HistoryEntry>& hist) {
+    std::string h =
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'><title>rmweb</title>"
+        "<style>"
+        "*{box-sizing:border-box}"
+        "body{font-family:sans-serif;color:#000;background:#fff;margin:0;padding:52px 60px;}"
+        ".hero{font-size:44px;font-weight:800;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}"
+        "h2{font-size:24px;font-weight:700;letter-spacing:4px;color:#666;margin:44px 0 12px;"
+        "border-bottom:2px solid #000;padding-bottom:10px;}"
+        ".row{display:flex;align-items:center;padding:16px 0;border-bottom:1px solid #ddd;}"
+        "a.rowlink{display:flex;align-items:center;flex:1;min-width:0;text-decoration:none;color:#000;}"
+        ".t{flex:1;font-size:30px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}"
+        ".u{color:#888;font-size:22px;margin-left:16px;}"
+        ".chip{flex:none;width:56px;height:56px;line-height:56px;text-align:center;background:#000;"
+        "color:#fff;border-radius:12px;font-size:28px;font-weight:700;margin-right:20px;}"
+        ".web{display:flex;align-items:center;border:3px solid #000;border-radius:16px;padding:22px 26px;"
+        "text-decoration:none;color:#000;font-size:30px;font-weight:700;margin-top:22px;}"
+        ".web .q{color:#666;font-weight:400;margin-left:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}"
+        ".empty{color:#666;font-size:28px;padding:16px 0;}"
+        "</style></head><body><div class='hero'>Search: " + htmlEscape(query) + "</div>"
+        "<a class='web' href='https://html.duckduckgo.com/html/?q=" + urlEncode(query) + "'>"
+        "<span class='chip'>&#8594;</span>Search the web<span class='q'>" + htmlEscape(query) + "</span></a>";
+    auto rows = [&](const char* head, auto begin, auto end, auto labelOf, auto urlOf) {
+        if (begin == end) return;
+        h += std::string("<h2>") + head + "</h2>";
+        for (auto it = begin; it != end; ++it) {
+            const std::string url = urlOf(*it);
+            const std::string t = labelOf(*it).empty() ? url : labelOf(*it);
+            h += "<div class='row'><a class='rowlink'";
+            if (isSafeLinkUrl(url)) h += " href='" + htmlEscape(url) + "'";
+            h += "><span class='chip'>" + htmlEscape(utf8First(t)) + "</span>"
+               + "<span class='t'>" + htmlEscape(t)
+               + "<span class='u'>" + htmlEscape(urlHost(url)) + "</span></span></a></div>";
+        }
+    };
+    rows("Bookmarks", bm.begin(), bm.end(),
+         [](const Bookmark& b) -> const std::string& { return b.title; },
+         [](const Bookmark& b) -> const std::string& { return b.url; });
+    rows("History", hist.begin(), hist.end(),
+         [](const HistoryEntry& e) -> const std::string& { return e.title; },
+         [](const HistoryEntry& e) -> const std::string& { return e.url; });
+    if (bm.empty() && hist.empty())
+        h += "<div class='empty'>No local matches \xE2\x80\x94 try the web search above.</div>";
+    h += "</body></html>";
     return h;
 }
 

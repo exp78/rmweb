@@ -69,6 +69,21 @@ int main() {
     CHECK(has(buildStartPage({}, {}, {}, true),  "Reader theme: dark"));
     CHECK(has(html, "rmweb:toggle-dark"));                // toggle present on every start page
 
+    // address-bar search: case-insensitive substring on title/url, results page renders matches
+    CHECK(containsCI("E-Reader Wiki", "reader"));
+    CHECK(!containsCI("E-Reader Wiki", "xyz"));
+    std::vector<HistoryEntry> sh = searchHistory({{"https://a.com/x", "Alpha page", 1},
+                                                  {"https://b.com/y", "Beta", 2}}, "alpha");
+    CHECK(sh.size() == 1 && sh[0].url == "https://a.com/x");
+    std::vector<Bookmark> sb = searchBookmarks({{"https://a.com", "Alpha"}, {"https://b.com", "Beta"}}, "b.com");
+    CHECK(sb.size() == 1 && sb[0].title == "Beta");       // url substring matches too
+    std::string sr = buildSearchResults("wiki e ink", sb, sh);
+    CHECK(has(sr, "Search: wiki e ink"));
+    CHECK(has(sr, "href='https://html.duckduckgo.com/html/?q=wiki%20e%20ink'")); // web-search link, encoded
+    CHECK(has(sr, "href='https://a.com/x'"));             // history match row
+    CHECK(!has(sr, "No local matches"));                  // matches exist -> no empty hint
+    CHECK(has(buildSearchResults("zzz", {}, {}), "No local matches"));
+
     if (fails == 0) std::printf("startpage_test: OK\n");
     return fails ? 1 : 0;
 }

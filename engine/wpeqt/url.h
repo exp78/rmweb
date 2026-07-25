@@ -15,6 +15,30 @@ inline std::string normalizeUrl(std::string s) {
     return s;
 }
 
+// Address-bar classifier: does the input look like a navigable URL (vs a search query)? Anything
+// scheme'd qualifies; otherwise a single whitespace-free token containing a dot (host.tld).
+inline bool looksLikeUrl(std::string s) {
+    auto notSpace = [](unsigned char c) { return !std::isspace(c); };
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
+    s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
+    if (s.empty()) return false;
+    if (s.find("://") != std::string::npos) return true;
+    if (std::any_of(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c); })) return false;
+    return s.find('.') != std::string::npos;
+}
+
+// Percent-encode everything outside the unreserved set (query values for search URLs).
+inline std::string urlEncode(const std::string& s) {
+    static const char *hex = "0123456789ABCDEF";
+    std::string o; o.reserve(s.size());
+    for (unsigned char c : s) {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+            || c == '-' || c == '_' || c == '.' || c == '~') o += char(c);
+        else { o += '%'; o += hex[c >> 4]; o += hex[c & 15]; }
+    }
+    return o;
+}
+
 // Percent-decode ("a%20b" -> "a b") — used on rmweb: command payloads, whose non-ASCII bytes the
 // WebKit URL parser percent-encodes when resolving the start-page link. '+' stays literal (these
 // are URL bytes, not form data); an invalid/truncated % sequence passes through untouched.
