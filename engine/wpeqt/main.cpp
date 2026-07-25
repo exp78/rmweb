@@ -948,7 +948,7 @@ public:
         m_fallback.setSingleShot(true);
         connect(&m_fallback, &QTimer::timeout, this,
                 [this]{ qCDebug(lcEngine, "[t][gui] present fallback-release (no frameSwapped)"); releaseGate(); });
-        m_keys = rmweb::buildKeyboard(kPanelW, kPanelH, kKbTopY);   // URL keyboard, drawn into the frame (B2)
+        rebuildKeys();   // URL keyboard, drawn into the frame (B2)
         // Keyboard: buffer keystrokes, paint once after a short idle (e-ink can't keep up with per-key presents).
         m_kbFlush.setSingleShot(true);
         connect(&m_kbFlush, &QTimer::timeout, this, [this]{
@@ -1014,6 +1014,7 @@ public:
         m_editing = true;
         g_urlEditing.store(true, std::memory_order_release);
         m_editBuf.clear();   // start blank; m_addr stays as the "old" value until a successful Go
+        m_kbShift = false; m_kbSym = false; rebuildKeys();   // always reopen on the plain letters page
         m_kbFlush.stop();
         schedule(/*guardTouch=*/false);
     }
@@ -1039,7 +1040,18 @@ public:
         switch (m_keys[i].kind) {
             case rmweb::KeyKind::Char:
                 m_editBuf += QString::fromStdString(m_keys[i].insert);
+                if (m_kbShift) { m_kbShift = false; rebuildKeys(); }   // one-shot Shift
                 m_kbFlush.start(kKbFlushMs);                     // buffer; one present after typing pause
+                return;
+            case rmweb::KeyKind::Shift:
+                m_kbShift = !m_kbShift;
+                rebuildKeys();
+                schedule(/*guardTouch=*/false);                  // case labels changed — repaint keys now
+                return;
+            case rmweb::KeyKind::Sym:
+                m_kbSym = !m_kbSym; m_kbShift = false;           // page switch drops an armed Shift
+                rebuildKeys();
+                schedule(/*guardTouch=*/false);
                 return;
             case rmweb::KeyKind::Backspace:
                 m_editBuf.chop(1);
@@ -1293,6 +1305,8 @@ private:
         QPen lp = p->pen(); lp.setWidthF(3); p->setPen(lp);
         for (int i = -1; i <= 1; ++i) p->drawLine(QPointF(cx - hw + 7, cy + i * 9), QPointF(cx + hw - 7, cy + i * 9));
     }
+    // Rebuild the keyboard layout for the current page (letters/symbols) and Shift state.
+    void rebuildKeys() { m_keys = rmweb::buildKeyboard(kPanelW, kPanelH, kKbTopY, m_kbShift, m_kbSym); }
     // On-screen URL keyboard, drawn into the frame (B2). Taps -> handleEditTap() (keyboard.h hitKey) via main().
     void drawKeyboard(QPainter *p, qreal w, qreal h) const {
         p->fillRect(QRectF(0, kKbTopY, w, h - kKbTopY), Qt::white);
@@ -1300,7 +1314,11 @@ private:
         QFont kf = p->font(); kf.setPixelSize(44); p->setFont(kf);
         for (const rmweb::Key &k : m_keys) {
             const QRectF r(k.x, k.y, k.w, k.h);
-            if (k.kind == rmweb::KeyKind::Go) { p->fillRect(r.adjusted(3, 3, -3, -3), Qt::black); p->setPen(Qt::white); }
+            // Inverted (black) keys: Go always; Shift while armed; ?123/ABC while the symbols page is on.
+            const bool armed = k.kind == rmweb::KeyKind::Go
+                || (k.kind == rmweb::KeyKind::Shift && m_kbShift)
+                || (k.kind == rmweb::KeyKind::Sym   && m_kbSym);
+            if (armed) { p->fillRect(r.adjusted(3, 3, -3, -3), Qt::black); p->setPen(Qt::white); }
             else { p->setPen(Qt::black); p->drawRect(r.adjusted(2, 2, -2, -2)); }
             p->drawText(r, Qt::AlignCenter, QString::fromStdString(k.label));
         }
@@ -1359,7 +1377,9 @@ private:
     QString m_addr;
     bool m_editing = false;             // URL-entry mode: the on-screen keyboard is shown over the page
     QString m_editBuf;                  // the URL currently being typed
-    std::vector<rmweb::Key> m_keys;     // keyboard layout, built once in the ctor
+    std::vector<rmweb::Key> m_keys;     // keyboard layout, rebuilt on page/Shift change (rebuildKeys)
+    bool m_kbShift = false;             // one-shot Shift armed (letters page)
+    bool m_kbSym = false;               // symbols page ("?123") is showing
     static const int kKbTopY = 1340;    // keyboard occupies [kKbTopY, kPanelH) in panel px
 };
 
@@ -1587,16 +1607,17 @@ int main(int argc, char **argv) {
     TouchReader touchReader;
 
     if (!savePath.isEmpty()) {
-        // --- save mode (headless proof): write the 2nd painted frame, then quit ---
+        // --- save mode (headless proof): write the 2nd painted frame, then exit ---
         QObject::connect(&engine, &WpeEngine::frameReady, &app,
-                         [savePath, &app, &engine, saved = false](const QImage &img, int frame) mutable {
+                         [savePath, saved = false](const QImage &img, int frame) mutable {
             qInfo() << "[qt] frameReady" << frame << img.size();
             if (frame >= 2 && !saved) {
                 saved = true;
                 if (img.save(savePath)) qInfo() << "[qt] saved" << savePath;
                 else                    qWarning() << "[qt] QImage::save FAILED" << savePath;
-                engine.stop();
-                QTimer::singleShot(300, &app, &QGuiApplication::quit);
+                // std::_Exit skips the WebKit teardown SIGABRT (watchdog-safe) — same as the ⏻ path.
+                fflush(nullptr);
+                std::_Exit(0);
             }
         });
     } else {
