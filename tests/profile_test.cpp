@@ -153,6 +153,18 @@ int main() {
     CHECK(detail::atomicWrite(dir + "/settings.txt", "zoom=1.0\n"));
     CHECK(!loadSettings(dir).readerDark);                         // absent key -> default off
 
+    // settings: autofill (learn-as-you-type) round-trip + defaults + sanitizing
+    Settings sa; sa.autofillEmail = "me@ex.com"; sa.autofillUser = "john"; sa.autofillName = "John D";
+    CHECK(saveSettings(dir, sa));
+    Settings sa2 = loadSettings(dir);
+    CHECK(sa2.autofillEmail == "me@ex.com"); CHECK(sa2.autofillUser == "john"); CHECK(sa2.autofillName == "John D");
+    CHECK(detail::atomicWrite(dir + "/settings.txt", "zoom=1.0\n"));
+    Settings sa3 = loadSettings(dir);
+    CHECK(sa3.autofillEmail.empty() && sa3.autofillUser.empty() && sa3.autofillName.empty());  // absent -> empty
+    Settings sa4; sa4.autofillName = "a\tb\nc";
+    CHECK(saveSettings(dir, sa4));
+    CHECK(loadSettings(dir).autofillName == "a b c");             // control chars sanitized
+
     // Duplicate URLs in the store (hand-edited file): loadBookmarks keeps both — no dedupe on
     // load — and toggleBookmark removes only the FIRST match. Current behavior, pinned here.
     CHECK(detail::atomicWrite(dir + "/bookmarks.txt", "http://dup\tFirst\nhttp://dup\tSecond\n"));

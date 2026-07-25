@@ -15,7 +15,8 @@ namespace rmweb {
 
 struct Bookmark { std::string url, title; };
 struct HistoryEntry { std::string url, title; long ts = 0; };
-struct Settings { double zoom = 1.0; int readerFont = 30; std::string ua; bool readerDark = false; };
+struct Settings { double zoom = 1.0; int readerFont = 30; std::string ua; bool readerDark = false;
+                  std::string autofillEmail, autofillUser, autofillName; };   // learn-as-you-type autofill
 struct ScrollEntry { std::string url; int pos = 0; };   // per-URL reading position (page offset, CSS px)
 struct Tab { std::string url, title; };                 // tabs-lite: one entry per open page, MRU first
 
@@ -231,6 +232,9 @@ inline Settings loadSettings(const std::string& dir) {
         else if (k == "readerFont") s.readerFont = std::atoi(v.c_str());
         else if (k == "ua") s.ua = sanitizeField(v);
         else if (k == "readerDark") s.readerDark = (v == "1");
+        else if (k == "afEmail") s.autofillEmail = sanitizeField(v);
+        else if (k == "afUser") s.autofillUser = sanitizeField(v);
+        else if (k == "afName") s.autofillName = sanitizeField(v);
     }
     if (!(s.zoom >= 0.5 && s.zoom <= 3.0)) s.zoom = 1.0;                 // clamp corrupt values
     if (!(s.readerFont >= 14 && s.readerFont <= 96)) s.readerFont = 30;
@@ -240,7 +244,10 @@ inline bool saveSettings(const std::string& dir, const Settings& s) {
     std::string out = "zoom=" + std::to_string(s.zoom) + "\n"
                     + "readerFont=" + std::to_string(s.readerFont) + "\n"
                     + "ua=" + sanitizeField(s.ua) + "\n"
-                    + "readerDark=" + std::string(s.readerDark ? "1" : "0") + "\n";
+                    + "readerDark=" + std::string(s.readerDark ? "1" : "0") + "\n"
+                    + "afEmail=" + sanitizeField(s.autofillEmail) + "\n"
+                    + "afUser=" + sanitizeField(s.autofillUser) + "\n"
+                    + "afName=" + sanitizeField(s.autofillName) + "\n";
     return detail::atomicWrite(dir + "/settings.txt", out);
 }
 

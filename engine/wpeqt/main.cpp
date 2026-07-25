@@ -255,7 +255,7 @@ Q_SIGNALS:
     void linkMissed();                             // a content tap hit no link -> GUI falls back to chrome toggle
     void bookmarkedChanged(bool on);               // current page bookmark state changed
     void notice(const QString &text);              // transient toast in the chrome (find results, downloads)
-    void fieldFocused(const QString &value, bool masked); // a text field was tapped -> open the keyboard
+    void fieldFocused(const QString &value, bool masked, const QString &suggest); // a text field was tapped -> open the keyboard (suggest = autofill prefill for an empty field, may be empty)
     void tlsStateChanged(int state);                 // 0 = http/none, 1 = https ok, 2 = https with cert errors
 
 public Q_SLOTS:
@@ -551,7 +551,10 @@ public Q_SLOTS:
                 "window.__rmwebField=f;"
                 "var v=f.isContentEditable?(f.textContent||''):(f.value||'');"
                 "var m=(f.type||'').toLowerCase()==='password'?'1':'0';"
-                "return 'field\\n'+m+'\\n'+v;}"
+                // Identity clues for autofill classification — one line, whitespace-folded.
+                "var h=((f.autocomplete||'')+' '+(f.name||'')+' '+(f.id||'')+' '+"
+                "(f.getAttribute('placeholder')||'')).replace(/\\s+/g,' ').slice(0,80);"
+                "return 'field\\n'+m+'\\n'+h+'\\n'+v;}"
                 "function probe(e){"
                 "if(!e||!e.closest)return null;"
                 "var t=e,lb=t.closest('label');"
@@ -648,6 +651,23 @@ public Q_SLOTS:
             qInfo("[form] setFieldText -> %s", v ? "(non-string)" : "(eval error)");
         }
         if (v) g_object_unref(v);
+    }
+    // Learn-as-you-type autofill: a committed (Go) non-empty field value whose hint classified as
+    // email/user/name is remembered in the settings (debounced write) and offered as a keyboard
+    // prefill the next time an EMPTY field of the same kind is tapped. Passwords never classify,
+    // so they are never learned.
+    void learnFieldText(const QString &text) {
+        marshalToCtx([this, text] {
+            const rmweb::FieldKind kind = m_pendingFieldKind;
+            m_pendingFieldKind = rmweb::FieldKind::None;
+            const std::string t = text.toStdString();
+            if (t.empty() || kind == rmweb::FieldKind::None) return;
+            if (kind == rmweb::FieldKind::Email) m_settings.autofillEmail = t;
+            else if (kind == rmweb::FieldKind::User) m_settings.autofillUser = t;
+            else if (kind == rmweb::FieldKind::Name) m_settings.autofillName = t;
+            queueSave(&m_settingsSaveSrc, 1);   // debounced — same path as zoom/font settings
+            qInfo("[form] autofill learned kind=%d len=%zu", static_cast<int>(kind), t.size());
+        });
     }
     // DIAG: log the stashed field's tag/type/value LENGTH (password-safe — never the value itself),
     // and force a FULL-document repaint first (decides "renderer out of sync" vs "stale damage").
@@ -790,9 +810,19 @@ private:
             case rmweb::TapHit::Tick:            // checkbox/select changed -> toast the new state
                 if (!pr.value.empty()) Q_EMIT self->notice(QString::fromStdString(pr.value));
                 break;
-            case rmweb::TapHit::Field:           // text field focused -> open the keyboard on its value
-                Q_EMIT self->fieldFocused(QString::fromStdString(pr.value), pr.masked);
+            case rmweb::TapHit::Field: {         // text field focused -> open the keyboard on its value
+                const rmweb::FieldKind kind = rmweb::classifyFieldHint(pr.hint, pr.masked);
+                self->m_pendingFieldKind = kind;
+                // Autofill prefill: only for an EMPTY field (never overwrite existing content).
+                QString suggest;
+                if (pr.value.empty()) {
+                    if (kind == rmweb::FieldKind::Email) suggest = QString::fromStdString(self->m_settings.autofillEmail);
+                    else if (kind == rmweb::FieldKind::User) suggest = QString::fromStdString(self->m_settings.autofillUser);
+                    else if (kind == rmweb::FieldKind::Name) suggest = QString::fromStdString(self->m_settings.autofillName);
+                }
+                Q_EMIT self->fieldFocused(QString::fromStdString(pr.value), pr.masked, suggest);
                 break;
+            }
         }
     }
     // Build the apply script: the vendored Readability lib + our glue, with the reader CSS (font size from
@@ -1330,6 +1360,7 @@ private:
     int m_curScroll = 0;                            // last recorded scroll offset of m_curUrl (CSS px)
     bool m_userScrolled = false;                    // a page turn happened on this load (suppress restore)
     bool m_lastProbePeek = false;                   // the in-flight tap probe is a long-press peek (no linkMissed)
+    rmweb::FieldKind m_pendingFieldKind = rmweb::FieldKind::None;   // kind of the last focused field (autofill learn)
     std::string m_lastFind;                         // last in-page search term (repeat = search_next)
 };
 
@@ -1461,12 +1492,15 @@ public:
     // Form-field entry (a text field on the page was tapped): the keyboard opens PRE-FILLED with the
     // field's current value; Go commits into the field (fieldTextEntered), Cancel discards.
     // masked = password input -> the echo shows '*'. Chrome is summoned so the input line is visible.
-    void beginFieldEdit(const QString &value, bool masked) {
+    // suggest = autofill prefill, used only when the field itself is empty (a learned value the
+    // user can edit or accept with Go).
+    void beginFieldEdit(const QString &value, bool masked, const QString &suggest) {
         m_editing = true;
         m_editField = true; m_editMasked = masked;
         m_chromeOn = true;                      // the keyboard needs the bar (chrome may be hidden)
         g_urlEditing.store(true, std::memory_order_release);
-        m_editBuf = value;
+        m_editBuf = (value.isEmpty() && !suggest.isEmpty()) ? suggest : value;
+        if (value.isEmpty() && !suggest.isEmpty()) setNotice("Autofill — edit or press Go");
         m_kbShift = false; m_kbSym = false; rebuildKeys();
         m_kbFlush.stop();
         schedule(/*guardTouch=*/false);
@@ -2231,14 +2265,16 @@ int main(int argc, char **argv) {
         });
         // Engine toasts (find results, downloads) -> the chrome overlay.
         QObject::connect(&engine, &WpeEngine::notice, view, &WpeView::setNotice, Qt::QueuedConnection);
-        // Form fields: a tapped text field opens the keyboard on its current value; Go commits
-        // the typed text into the page field (native setter + input/change events).
+        // Form fields: a tapped text field opens the keyboard on its current value (or an autofill
+        // prefill when the field is empty); Go commits the typed text into the page field (native
+        // setter + input/change events) and learns it for future prefills.
         QObject::connect(&engine, &WpeEngine::fieldFocused, view,
-                         [view](const QString &v, bool masked){ view->beginFieldEdit(v, masked); },
+                         [view](const QString &v, bool masked, const QString &s){ view->beginFieldEdit(v, masked, s); },
                          Qt::QueuedConnection);
         QObject::connect(view, &WpeView::fieldTextEntered, &app, [&engine, view](const QString &t){
             view->forceNextContent();   // the DOM edit must paint promptly
             engine.setFieldText(t);
+            engine.learnFieldText(t);
         });
 
         // Drive the e-ink panel ourselves so page turns show immediately (needs QSG_RENDER_LOOP=basic so
