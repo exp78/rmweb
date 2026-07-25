@@ -61,6 +61,26 @@ cp VERSION "$B/VERSION"   # single source of truth: the repo-root VERSION file
 [ -d device/appload ] && cp -a device/appload "$B/"
 [ -f device/icon.svg ] && cp -a device/icon.svg "$B/"
 
+# rpath for the bundled runtime: the app's RUNPATH ($ORIGIN/../lib) covers only its DIRECT deps —
+# transitive deps of the bundled .so (libsoup/libwebp/... pulled in by libWPEWebKit) resolve via each
+# lib's OWN rpath. Give every bundled .so an $ORIGIN-relative rpath so the bundle also starts without
+# LD_LIBRARY_PATH (rmweb-env.sh still sets it as a safety net). The libexec helpers end up under the
+# /usr/libexec overlay on the device, so they get the ABSOLUTE bundle lib dir instead.
+if docker image inspect rmweb-sdk >/dev/null 2>&1; then
+  docker run --rm -v "$PWD:/work" -w /work rmweb-sdk bash -euc '
+    rp() { [ -d "$1" ] && find "$1" -maxdepth 1 \( -name "*.so" -o -name "*.so.*" \) -type f -exec patchelf --set-rpath "$2" {} +; }
+    rp build/bundle/lib                      "\$ORIGIN"
+    rp build/bundle/lib/dri                  "\$ORIGIN/.."
+    rp build/bundle/lib/gio/modules          "\$ORIGIN/../.."
+    rp build/bundle/lib/wpe-webkit-2.0       "\$ORIGIN/.."
+    rp build/bundle/plugins/platforminputcontexts "\$ORIGIN/../lib"
+    rp build/bundle/bin                      "\$ORIGIN/../lib"
+    find build/bundle/libexec/wpe-webkit-2.0 -maxdepth 1 -type f -exec patchelf --set-rpath /home/root/rmweb/lib {} +
+  ' || echo "[bundle] WARN: patchelf pass failed — LD_LIBRARY_PATH remains required"
+else
+  echo "[bundle] WARN: no rmweb-sdk docker image — bundled libs left without rpath (LD_LIBRARY_PATH required)"
+fi
+
 echo "[bundle] local size:"; du -sh "$B"
 if [ -n "${RMWEB_PACKAGE_ONLY:-}" ]; then
   echo "[bundle] package-only: assembled $B (skipping device deploy)"

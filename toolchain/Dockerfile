@@ -7,6 +7,7 @@ FROM --platform=linux/arm64 debian:bookworm-slim@sha256:7b140f374b289a7c2befc338
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       bash file xz-utils python3 make cmake ninja-build perl ca-certificates \
+      patchelf \
     && rm -rf /var/lib/apt/lists/*
 
 # The SDK installer (~467 MB) is bind-mounted from the build context (not COPYed),
