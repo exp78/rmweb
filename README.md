@@ -3,14 +3,14 @@
 A native **WPE WebKit** web browser for the **reMarkable Paper Pro** e-ink tablet.
 
 > **Status: v0.8.0 — beta.** The primary use case is **reading**; general browsing is basic.
-> Implemented and verified on-device: reader mode (Mozilla Readability), B2 chrome painted into the
-> frame (with C++ hit-test), touch/pen input via evdev with a phantom-touch guard, on-screen URL
-> keyboard, bookmarks/history/settings persisted in the profile dir, HTML start page (`rmweb:` scheme),
-> page/reader zoom, content blocking (WebKit UserContentManager filter), and a no-brick launcher that
-> stops/restores xochitl. E-ink-safe: CPU-only llvmpipe + Skia, ~120–250 ms page turns, low RAM.
-> Implemented (host-tested, on-device verification pending): persistent cookies (sqlite), per-URL
-> scroll restore, in-page find (`/text` in the address bar), downloads to `~/Downloads`, tabs-lite
-> (open-pages switcher on the start page), reader dark theme (start page → Settings).
+> Implemented and verified on-device: reader mode (Mozilla Readability, light/dark theme), B2 chrome
+> painted into the frame (with C++ hit-test), touch/pen input via evdev with a phantom-touch guard,
+> on-screen URL keyboard, bookmarks/history/settings persisted in the profile dir, HTML start page
+> (`rmweb:` scheme) with a tabs-lite open-pages switcher, page/reader zoom, content blocking (WebKit
+> UserContentManager filter), persistent cookies (sqlite — logins survive relaunch), per-URL scroll
+> restore, in-page find (`/text` in the address bar), downloads to `~/Downloads`, and a no-brick
+> launcher that stops/restores xochitl. E-ink-safe: CPU-only llvmpipe + Skia, ~120–250 ms page
+> turns, low RAM.
 > A 2026-07-18 code review ([docs/review-2026-07-18.md](docs/review-2026-07-18.md)) found open
 > security/robustness issues — not release-ready yet.
 

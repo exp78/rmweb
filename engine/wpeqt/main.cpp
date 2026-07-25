@@ -102,6 +102,13 @@ extern "C" void crashHandler(int sig) {
     raise(sig);
 }
 
+// SIGTERM (the dev runner's timed kill; `systemctl stop rmweb`): exit IMMEDIATELY via _Exit.
+// The orderly Qt/WebKit teardown path intermittently SIGABRTs/SEGVs on this stack, and any
+// fatal signal here costs a DEVICE REBOOT via the watchdog — the ⏻ button and save mode already
+// use the same _Exit escape. Async-signal-safe: _Exit only (no flush — stderr is line-buffered,
+// so at most one partial line is lost; profile writes flush on normal loop exit / debounce).
+extern "C" void termHandler(int) { std::_Exit(0); }
+
 // WKContentRuleList (Safari/WebKit content-blocker JSON): drop third-party scripts/media/fonts — i.e. ads,
 // trackers, analytics, and other heavy cross-origin JS — so the interpreter-only JSC isn't swamped. First-
 // party content/CSS is kept, so articles still render. Compiled once at startup (see onFilterSaved).
@@ -394,7 +401,10 @@ public Q_SLOTS:
             g_signal_connect(fc, "found-text", G_CALLBACK(+[](WebKitFindController*, guint n, gpointer data){
                 auto *self = static_cast<WpeEngine*>(data);
                 qInfo("[find] matches=%u", n);
-                Q_EMIT self->notice(QStringLiteral("%1 matches").arg(n));
+                // matchCount is G_MAXUINT when WebKit didn't count (we don't ask for COUNT_MATCHES
+                // — counting a long page is wasted CPU) — then show a bare confirmation instead.
+                Q_EMIT self->notice(n == G_MAXUINT ? QStringLiteral("Match found")
+                                                   : QStringLiteral("%1 matches").arg(n));
             }), this);
             g_signal_connect(fc, "failed-to-find-text", G_CALLBACK(+[](WebKitFindController*, gpointer data){
                 auto *self = static_cast<WpeEngine*>(data);
@@ -739,14 +749,22 @@ private:
             if (self->m_view && self->m_loadGen == msg->gen && !self->m_userScrolled
                     && !self->m_readerMode && msg->pos > 0) {
                 qInfo("[scroll] restore y=%d", msg->pos);
+                // Same scroller logic as the page turn: many sites (Wikipedia incl.) scroll an
+                // INNER element, not the document — setting document.scrollTop there is a no-op.
                 gchar *js = g_strdup_printf(
                     "(function(y){"
                     "var se=document.scrollingElement||document.documentElement||document.body;"
-                    "se.scrollTop=y;"
+                    "var y0=se.scrollTop;se.scrollTop=y;var sc=null;"
+                    "if(se.scrollTop===y0&&y>0){sc=window.__rmwebSc;"
+                    "if(!sc||!sc.isConnected||sc.scrollHeight-sc.clientHeight<=40){sc=null;var bh=0,a=document.querySelectorAll('div,main,article,section,ul,ol');"
+                    "for(var i=0;i<a.length;i++){var n=a[i],o=getComputedStyle(n).overflowY;"
+                    "if((o==='auto'||o==='scroll')&&n.scrollHeight-n.clientHeight>40&&n.scrollHeight>bh){bh=n.scrollHeight;sc=n;}}"
+                    "window.__rmwebSc=sc;}"
+                    "if(sc)sc.scrollTop=y;}"
                     "var m=document.getElementById('__r');if(!m){m=document.createElement('span');m.id='__r';"
                     "m.style.cssText='position:fixed;left:-9999px;top:0';document.body.appendChild(m);}"
                     "m.textContent=((+m.textContent||0)+1);"
-                    "return 'sy='+se.scrollTop;"
+                    "return 'sy='+(sc?sc.scrollTop:se.scrollTop);"
                     "})(%d)", msg->pos);
                 webkit_web_view_evaluate_javascript(self->m_view, js, -1, nullptr, nullptr, self->m_cancel,
                                                     &WpeEngine::onJsDone, self);
@@ -867,11 +885,9 @@ private:
             const size_t slash = name.find_last_of('/');
             if (slash != std::string::npos) name = name.substr(slash + 1);
             if (name.empty() || name == "." || name == "..") name = "download.bin";
-            gchar *uri = g_filename_to_uri((dir + "/" + name).c_str(), nullptr, nullptr);
-            if (!uri) return FALSE;
-            webkit_download_set_destination(d, uri);
+            // 2022 API: set_destination takes an absolute PATH (the old GTK API took a file:// URI).
+            webkit_download_set_destination(d, (dir + "/" + name).c_str());
             qInfo("[dl] -> %s/%s", dir.c_str(), name.c_str());
-            g_free(uri);
             return TRUE;
         }), nullptr);
         g_signal_connect(dl, "finished", G_CALLBACK(+[](WebKitDownload *d, gpointer data) {
@@ -1836,6 +1852,11 @@ int main(int argc, char **argv) {
     sigaction(SIGABRT, &sa, nullptr);
     sigaction(SIGBUS,  &sa, nullptr);
     sigaction(SIGILL,  &sa, nullptr);
+    // Timed kills (dev runner, systemd) skip the crash-prone WebKit teardown entirely (termHandler).
+    struct sigaction st = {};
+    st.sa_handler = termHandler;
+    sigemptyset(&st.sa_mask);
+    sigaction(SIGTERM, &st, nullptr);
     QGuiApplication app(argc, argv);
     const QString url      = (argc > 1) ? QString::fromUtf8(argv[1]) : QString();
     const QString savePath = (argc > 2) ? QString::fromUtf8(argv[2]) : QString();
