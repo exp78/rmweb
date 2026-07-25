@@ -11,7 +11,9 @@ A native **WPE WebKit** web browser for the **reMarkable Paper Pro** e-ink table
 > UserContentManager filter), persistent cookies (sqlite — logins survive relaunch), per-URL scroll
 > restore, in-page find (`/text` in the address bar), downloads to `~/Downloads`, form filling (tap a
 > text field → on-screen keyboard with its current value, password masked; tap toggles
-> checkbox/radio and cycles selects), styled error pages for failed loads (with Retry), a TLS
+> checkbox/radio and cycles selects), learn-as-you-type autofill for email/username/name fields
+> (a committed value is remembered and pre-filled into the next empty field of the same kind —
+> passwords are never learned), styled error pages for failed loads (with Retry), a TLS
 > padlock in the address bar, address-bar search over local bookmarks+history (with a web-search
 > link), long-press link peek (toast with the target URL), and a no-brick
 > launcher that stops/restores xochitl. E-ink-safe: CPU-only llvmpipe + Skia, ~120–250 ms page
@@ -56,7 +58,7 @@ Full instructions: [`docs/install.md`](docs/install.md)
 ## Roadmap / Planned
 
 Not implemented yet (earlier docs claimed some of these by mistake — see the review above):
-password manager, autofill, on-device JS console, user/content scripts,
+password manager, on-device JS console, user/content scripts,
 reading-progress bar, performance dashboard.
 
 ## License

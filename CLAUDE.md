@@ -172,7 +172,15 @@ non-URL input → `engine.searchAndShow` → `buildSearchResults` (startpage.h) 
 Long-press link peek: stationary hold >700 ms = `Gesture::LongPress` (TouchReader) → `engine.peekLink` →
 probe with `peek\n<href>` (no navigation) → toast with the URL (≤72 chars + "…"); `TapHit::Peek` in
 fieldprobe.h; `m_lastProbePeek` suppresses linkMissed. Address-bar hint now reads "URL or search — /text
-finds in page". DIAG: `RMWEB_DEBUG_SEARCH=words` (forwarded by the runner).
+finds in page". DIAG: `RMWEB_DEBUG_SEARCH=words` (forwarded by the runner). **Autofill (1da6284):**
+learn-as-you-type — the probe's `field` answer gained a hint line (`autocomplete name id placeholder`,
+whitespace-folded; `field\n<mask>\n<hint>\n<value>`, legacy no-hint answers still parse);
+`classifyFieldHint` (fieldprobe.h) maps it to Email/User/Name ("user"/"login" checked BEFORE "name" —
+"username" contains both; masked ⇒ None, passwords never learn). A committed non-empty value lands in
+settings (`afEmail`/`afUser`/`afName`, debounced `m_settingsSaveSrc`); the next EMPTY field of that kind
+opens the keyboard pre-filled (`fieldFocused(value,masked,suggest)` → `beginFieldEdit` + toast
+"Autofill — edit or press Go"); learning happens in `learnFieldText` off the `fieldTextEntered` wire
+(`m_pendingFieldKind` stashed at emit time).
 
 The production env is DRY
 in `device/rmweb-env.sh` (sourced by both the launcher and the dev runner `scripts/run-wpeqt-on-device.sh`);
