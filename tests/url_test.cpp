@@ -40,6 +40,15 @@ int main() {
     CHECK(urlEncode("a+b&c")      == "a%2Bb%26c");
     CHECK(urlEncode("plain-ok_1.~") == "plain-ok_1.~");    // unreserved untouched
     CHECK(urlEncode("")           == "");
+
+    // hostFromUrl (per-site stores: passwords)
+    CHECK(hostFromUrl("https://example.com/a/b?x") == "example.com");
+    CHECK(hostFromUrl("https://example.com:8443/a") == "example.com:8443");
+    CHECK(hostFromUrl("http://ex.com") == "ex.com");
+    CHECK(hostFromUrl("https://u:p@ex.com/") == "ex.com");   // userinfo stripped
+    CHECK(hostFromUrl("ex.com/path") == "ex.com");           // scheme-less
+    CHECK(hostFromUrl("") == "");
+    CHECK(hostFromUrl("https://") == "");
     if (fails == 0) std::printf("url_test: OK\n");
     return fails ? 1 : 0;
 }

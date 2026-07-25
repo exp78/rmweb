@@ -272,6 +272,7 @@ public Q_SLOTS:
         m_bookmarks = rmweb::loadBookmarks(m_profileDir);
         m_history   = rmweb::loadHistory(m_profileDir);
         m_settings  = rmweb::loadSettings(m_profileDir);
+        m_passwords = rmweb::loadPasswords(m_profileDir);
         m_scroll    = rmweb::loadScroll(m_profileDir);
         m_tabs      = rmweb::loadTabs(m_profileDir);
         m_zoom = m_settings.zoom;
@@ -602,6 +603,7 @@ public Q_SLOTS:
     void setFieldText(const QString &text) {
         marshalToCtx([this, text] {
             if (!m_view) return;
+            m_lastCommitText = text.toStdString();   // kept until onFieldSet (password capture)
             const std::string t = rmweb::jsStringEscape(text.toStdString());
             gchar *js = g_strdup_printf(
                 "(function(txt){var f=window.__rmwebField;"
@@ -635,22 +637,36 @@ public Q_SLOTS:
                 "var m=document.getElementById('__r');if(!m){m=document.createElement('span');m.id='__r';"
                 "m.style.cssText='position:fixed;left:-9999px;top:0';document.body.appendChild(m);}"
                 "m.textContent=((+m.textContent||0)+1);"
+                // Password commit: also answer the sibling login (first text-ish input in the form)
+                // so the password store can remember host -> (login, password). "pw\n" + login.
+                "if(ty==='password'){var u='';try{var root=f.form||document;var ins=root.querySelectorAll('input');"
+                "for(var i=0;i<ins.length;i++){var t2=(ins[i].type||'').toLowerCase();"
+                "if(t2===''||t2==='text'||t2==='email'||t2==='tel'){"
+                "u=(ins[i].value||'').replace(/\\s+/g,' ').slice(0,80);if(u)break;}}}catch(e){}"
+                "return 'pw\\n'+u;}"
                 "return ok?'ok':'fallback';})(\"%s\")", t.c_str());
-            webkit_web_view_evaluate_javascript(m_view, js, -1, nullptr, nullptr, m_cancel, &WpeEngine::onFieldSet, nullptr);
+            webkit_web_view_evaluate_javascript(m_view, js, -1, nullptr, nullptr, m_cancel, &WpeEngine::onFieldSet, this);
             g_free(js);
         });
     }
-    static void onFieldSet(GObject *obj, GAsyncResult *res, gpointer) {
+    static void onFieldSet(GObject *obj, GAsyncResult *res, gpointer data) {
         bool cancelled; JSCValue *v = finishJsEval(obj, res, &cancelled);
         if (cancelled) return;
-        if (v && jsc_value_is_string(v)) {
-            char *c = jsc_value_to_string(v);
-            qInfo("[form] setFieldText -> %s", c ? c : "?");
-            g_free(c);
-        } else {
-            qInfo("[form] setFieldText -> %s", v ? "(non-string)" : "(eval error)");
-        }
+        auto *self = static_cast<WpeEngine*>(data);   // nullptr from logFieldState (diagnostic eval)
+        std::string out;
+        if (v && jsc_value_is_string(v)) { char *c = jsc_value_to_string(v); out = c ? c : ""; g_free(c); }
+        qInfo("[form] setFieldText -> %s", !out.empty() ? out.c_str() : (v ? "(non-string)" : "(eval error)"));
         if (v) g_object_unref(v);
+        if (!self) return;
+        // A password commit answered "pw\n<sibling-login>" — remember host -> (login, obfuscated
+        // password). m_lastCommitText holds the plaintext of this commit (cleared right after).
+        if (out.rfind("pw\n", 0) == 0 && !self->m_lastCommitText.empty()) {
+            const std::string host = rmweb::hostFromUrl(self->m_curUrl);
+            rmweb::upsertPassword(self->m_passwords, host, out.substr(3), self->m_lastCommitText);
+            self->queueSave(&self->m_pwSaveSrc, 4);
+            qInfo("[form] password saved for %s", host.empty() ? "?" : host.c_str());
+        }
+        self->m_lastCommitText.clear();
     }
     // Learn-as-you-type autofill: a committed (Go) non-empty field value whose hint classified as
     // email/user/name is remembered in the settings (debounced write) and offered as a keyboard
@@ -814,11 +830,19 @@ private:
                 const rmweb::FieldKind kind = rmweb::classifyFieldHint(pr.hint, pr.masked);
                 self->m_pendingFieldKind = kind;
                 // Autofill prefill: only for an EMPTY field (never overwrite existing content).
+                // Password fields prefill from the per-host password store; a username field falls
+                // back to the stored login when no learned username exists.
                 QString suggest;
                 if (pr.value.empty()) {
-                    if (kind == rmweb::FieldKind::Email) suggest = QString::fromStdString(self->m_settings.autofillEmail);
-                    else if (kind == rmweb::FieldKind::User) suggest = QString::fromStdString(self->m_settings.autofillUser);
-                    else if (kind == rmweb::FieldKind::Name) suggest = QString::fromStdString(self->m_settings.autofillName);
+                    const std::string host = rmweb::hostFromUrl(self->m_curUrl);
+                    const rmweb::PasswordEntry *pw = rmweb::findPassword(self->m_passwords, host);
+                    if (pr.masked) {
+                        if (pw) suggest = QString::fromStdString(rmweb::deobfuscatePassword(pw->passObf));
+                    } else if (kind == rmweb::FieldKind::Email) suggest = QString::fromStdString(self->m_settings.autofillEmail);
+                    else if (kind == rmweb::FieldKind::User) {
+                        suggest = QString::fromStdString(self->m_settings.autofillUser);
+                        if (suggest.isEmpty() && pw) suggest = QString::fromStdString(pw->user);
+                    } else if (kind == rmweb::FieldKind::Name) suggest = QString::fromStdString(self->m_settings.autofillName);
                 }
                 Q_EMIT self->fieldFocused(QString::fromStdString(pr.value), pr.masked, suggest);
                 break;
@@ -966,7 +990,8 @@ private:
         GSource **slot = (what == 0) ? &self->m_historySaveSrc
                        : (what == 1) ? &self->m_settingsSaveSrc
                        : (what == 2) ? &self->m_scrollSaveSrc
-                                     : &self->m_tabsSaveSrc;
+                       : (what == 3) ? &self->m_tabsSaveSrc
+                                     : &self->m_pwSaveSrc;
         g_source_unref(*slot); *slot = nullptr;   // fired: drop our ref (may free msg — locals only from here)
         self->runSave(what);
         return G_SOURCE_REMOVE;
@@ -975,7 +1000,8 @@ private:
         if      (what == 0) rmweb::saveHistory(m_profileDir, m_history);
         else if (what == 1) rmweb::saveSettings(m_profileDir, m_settings);
         else if (what == 2) rmweb::saveScroll(m_profileDir, m_scroll);
-        else                rmweb::saveTabs(m_profileDir, m_tabs);
+        else if (what == 3) rmweb::saveTabs(m_profileDir, m_tabs);
+        else                rmweb::savePasswords(m_profileDir, m_passwords);
     }
     // Final flush on worker-loop exit (start()): a write still inside its debounce window would be lost.
     void flushPendingWrites() {
@@ -994,6 +1020,10 @@ private:
         if (m_tabsSaveSrc) {
             g_source_destroy(m_tabsSaveSrc); g_source_unref(m_tabsSaveSrc); m_tabsSaveSrc = nullptr;
             rmweb::saveTabs(m_profileDir, m_tabs);
+        }
+        if (m_pwSaveSrc) {
+            g_source_destroy(m_pwSaveSrc); g_source_unref(m_pwSaveSrc); m_pwSaveSrc = nullptr;
+            rmweb::savePasswords(m_profileDir, m_passwords);
         }
     }
 
@@ -1361,6 +1391,9 @@ private:
     bool m_userScrolled = false;                    // a page turn happened on this load (suppress restore)
     bool m_lastProbePeek = false;                   // the in-flight tap probe is a long-press peek (no linkMissed)
     rmweb::FieldKind m_pendingFieldKind = rmweb::FieldKind::None;   // kind of the last focused field (autofill learn)
+    std::vector<rmweb::PasswordEntry> m_passwords;  // per-host logins, obfuscated (passwords.txt)
+    GSource *m_pwSaveSrc = nullptr;                 // pending debounced passwords write
+    std::string m_lastCommitText;                   // plaintext of the in-flight field commit (pw capture; cleared in onFieldSet)
     std::string m_lastFind;                         // last in-page search term (repeat = search_next)
 };
 

@@ -146,6 +146,40 @@ int main() {
     CHECK(detail::atomicWrite(dir + "/tabs.txt", "http://ok\tT\nno-tab\n"));
     CHECK(loadTabs(dir).size() == 1);                             // malformed line skipped
 
+    // password store: obfuscate is reversible, not plaintext, empty stays empty; corrupt hex -> ""
+    CHECK(obfuscatePassword("").empty());
+    const std::string obf = obfuscatePassword("s3cret!");
+    CHECK(!obf.empty()); CHECK(obf != "s3cret!"); CHECK(obf.find("s3cret") == std::string::npos);
+    CHECK(deobfuscatePassword(obf) == "s3cret!");
+    CHECK(deobfuscatePassword("zz").empty());                     // non-hex -> absent
+    CHECK(deobfuscatePassword("abc").size() == 1);                // odd length -> dangling nibble ignored
+    // upsert/find: one entry per host, re-save replaces; empty host/pass ignored
+    std::vector<PasswordEntry> pw;
+    upsertPassword(pw, "ex.com", "u1", "p1");
+    upsertPassword(pw, "other.com", "u2", "p2");
+    upsertPassword(pw, "ex.com", "u1b", "p1b");                   // same host -> replace
+    CHECK(pw.size() == 2);
+    const PasswordEntry *e1 = findPassword(pw, "ex.com");
+    CHECK(e1 && e1->user == "u1b"); CHECK(deobfuscatePassword(e1->passObf) == "p1b");
+    CHECK(findPassword(pw, "missing.com") == nullptr);
+    const size_t before = pw.size();
+    upsertPassword(pw, "", "u", "p"); upsertPassword(pw, "h", "u", "");
+    CHECK(pw.size() == before);
+    // round-trip; malformed lines skipped; host/user sanitized on save
+    CHECK(savePasswords(dir, pw));
+    auto pw2 = loadPasswords(dir);
+    CHECK(pw2.size() == 2); CHECK(pw2[0].host == "ex.com");
+    CHECK(deobfuscatePassword(pw2[0].passObf) == "p1b");
+    CHECK(detail::atomicWrite(dir + "/passwords.txt", "h\tu\tff00\nno-tab\nonlyone\t\n"));
+    CHECK(loadPasswords(dir).size() == 1);
+    upsertPassword(pw, "ex.com", "lo\tgin", "pa\nss");           // control chars in user/pass
+    CHECK(savePasswords(dir, pw));
+    auto pw3 = loadPasswords(dir);
+    CHECK(findPassword(pw3, "ex.com")->user == "lo gin");         // user sanitized
+    // ...the obfuscated password itself is hex (safe bytes) — a raw newline in the plaintext
+    // survives the round-trip through obfuscation
+    CHECK(deobfuscatePassword(findPassword(pw3, "ex.com")->passObf) == "pa\nss");
+
     // settings: readerDark round-trip + default
     Settings sd; sd.readerDark = true;
     CHECK(saveSettings(dir, sd));
