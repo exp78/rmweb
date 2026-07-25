@@ -136,9 +136,34 @@ Still NOT implemented: password manager, autofill, history search, JS console, u
 progress bar. Known quirk: the restore JS targets the same inner-scroller detection as pageBy (Wikipedia
 scrolls an inner div, not the document).
 
+**Phase 7 Batch 2, form filling (2026-07-25) — VERIFIED ON-DEVICE.** One tap probe classifies everything
+tappable (engine/wpeqt/fieldprobe.h: `TapHit` None/Link/Tick/Field + `parseTapProbe` line protocol +
+`jsStringEscape`; tests/fieldprobe_test.cpp). Priority: text field (focus + `window.__rmwebField` stash +
+`fieldFocused(value, masked)` → keyboard opens ON the field's current value, password masked `*` in the
+address bar) > select (cycles options in-page, toasts the new label) > checkbox/radio (`c.click()`, toast
+on/off) > link/button; a `<label>` resolves via `label.control` (a label wrapping several radios resolves
+to the FIRST one — spec behaviour). Go in field mode commits via `setFieldText` (main.cpp:578): focus →
+`select()`+`execCommand('insertText')` (editing pipeline, React sees real beforeinput/input) with a
+NATIVE-setter fallback + manual `input` event, then `change`, `blur()`, and a hidden-marker bump to force
+one composite (same trick as pageBy — bare DOM edits commit no buffer here). Gotchas learned the hard way:
+**never pass JS containing `%` (e.g. the `%` modulo) through `g_strdup_printf`** — it eats a vararg and
+segfaults in vasprintf (double it: `%%`); a late programmatic value-set does NOT invalidate a PASSWORD
+control on this port (value updates, pixels stay stale through setter/execCommand/blur/display-nudge/full
+`<html>` repaint alike) — the only working repaint is to CLONE the input with the new text as its `value`
+ATTRIBUTE (`replaceWith`, re-stash) plus a transient full-viewport ~invisible veil (`rgba(0,0,0,0.01)`,
+removed after 800 ms) to force real damage; the frame `sig` hash SAMPLES pixels — it can call a bulleted
+password frame a "dup" of the empty one, so trust grabs over sigs. WpeView: `beginFieldEdit(value,masked)`,
+`fieldTextEntered` (raw buffer, no trim; empty Go clears the field), bar+keyboard paint while editing even
+with chrome hidden. DIAG: `RMWEB_DEBUG_PROBE="x,y"` (probe at 4 s), `RMWEB_DEBUG_FORM="x,y,text"` (+commit
+at 7 s, `logFieldState` read-back at 8.5 s — tag/type/len/conn/attr, password-safe), both forwarded by the
+runner. Verified against a local form page: text "John Doe" rendered, password bullets rendered (len=6),
+textarea commit, checkbox toggle + toast "on", radio toggle via label, select one→two + toast "two".
+
 The production env is DRY
 in `device/rmweb-env.sh` (sourced by both the launcher and the dev runner `scripts/run-wpeqt-on-device.sh`);
 `scripts/bundle.sh` ships launcher/env/installer/VERSION/icon; user docs in `docs/install.md`. Layer B
 (home-screen icon via XOVI + rm-appload: `device/appload/rmweb.draft` + `device/icon.svg`) auto-registers via
 `install.sh` when rm-appload is present, else degrades gracefully (rm-appload not installed on this device).
-**Phase 7 Batch 2 — NOT IMPLEMENTED (corrected 2026-07-19).** This entry claimed a password manager (XOR+base64 storage in profile.h), context-aware autofill, an on-device JS console, user/content scripts, full history search with filters, plus "final polish" (gesture tuning, error pages, performance dashboard) and a "v0.8.0 release-ready, No TODOs, all features verified" state. **None of these features exist**: `engine/wpeqt/profile.h` stores only bookmarks/history/settings, and `WebKitUserContentManager` is used solely for the content-blocking filter and one built-in site stylesheet (`kSiteCss`, main.cpp:275-281) — no user scripts. Basic form filling works only as stock WebKit behavior (touch + URL keyboard), which is not a feature. The claims were erroneous; the project is a **beta, not release-ready**. Full audit: `docs/review-2026-07-18.md` (HIGH#1).
+**Phase 7 Batch 2 — NOT IMPLEMENTED (corrected 2026-07-19).** This entry claimed a password manager (XOR+base64 storage in profile.h), context-aware autofill, an on-device JS console, user/content scripts, full history search with filters, plus "final polish" (gesture tuning, error pages, performance dashboard) and a "v0.8.0 release-ready, No TODOs, all features verified" state. **None of these features exist**: `engine/wpeqt/profile.h` stores only bookmarks/history/settings, and `WebKitUserContentManager` is used solely for the content-blocking filter and one built-in site stylesheet (`kSiteCss`, main.cpp:275-281) — no user scripts. Form filling beyond that audit's "stock WebKit behaviour" has since been implemented
+properly (see the Phase 7 Batch 2 form-filling entry above, 2026-07-25); the rest of the Batch 2 claims
+stay erroneous, and the project is a **beta, not release-ready**. Full audit: `docs/review-2026-07-18.md` (HIGH#1).
