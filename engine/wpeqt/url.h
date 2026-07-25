@@ -39,6 +39,18 @@ inline std::string urlEncode(const std::string& s) {
     return o;
 }
 
+// Bare host (optionally with port) out of a URL — the key for per-site stores (passwords).
+// "https://example.com:8443/a/b?x" -> "example.com:8443"; "" for junk input.
+inline std::string hostFromUrl(const std::string& url) {
+    auto s = url.find("://");
+    const size_t start = (s == std::string::npos) ? 0 : s + 3;
+    const size_t end = url.find('/', start);
+    std::string h = url.substr(start, end == std::string::npos ? end : end - start);
+    const size_t at = h.rfind('@');                     // strip userinfo (https://u:p@host/)
+    if (at != std::string::npos) h = h.substr(at + 1);
+    return h;
+}
+
 // Percent-decode ("a%20b" -> "a b") — used on rmweb: command payloads, whose non-ASCII bytes the
 // WebKit URL parser percent-encodes when resolving the start-page link. '+' stays literal (these
 // are URL bytes, not form data); an invalid/truncated % sequence passes through untouched.

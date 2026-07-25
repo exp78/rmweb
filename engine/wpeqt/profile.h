@@ -223,6 +223,62 @@ inline bool saveTabs(const std::string& dir, const std::vector<Tab>& tabs) {
     std::string s; for (const auto& t : tabs) s += sanitizeField(t.url) + "\t" + sanitizeField(t.title) + "\n";
     return detail::atomicWrite(dir + "/tabs.txt", s);
 }
+
+// --- password store ---------------------------------------------------------
+// One login per host. The password is OBFUSCATED (XOR with a fixed key + hex), not encrypted —
+// it only keeps casual shoulder/ssh readers from seeing plaintext; the profile dir is 0700.
+struct PasswordEntry { std::string host, user, passObf; };
+
+inline std::string obfuscatePassword(const std::string& plain) {
+    static const char key[] = "rmweb-eink-1";
+    static const char *hex = "0123456789abcdef";
+    std::string o; o.reserve(plain.size() * 2);
+    for (size_t i = 0; i < plain.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(plain[i]) ^ static_cast<unsigned char>(key[i % (sizeof key - 1)]);
+        o += hex[c >> 4]; o += hex[c & 15];
+    }
+    return o;
+}
+inline std::string deobfuscatePassword(const std::string& obf) {
+    static const char key[] = "rmweb-eink-1";
+    auto nib = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::string o;
+    for (size_t i = 0; i + 1 < obf.size(); i += 2) {
+        const int hi = nib(obf[i]), lo = nib(obf[i + 1]);
+        if (hi < 0 || lo < 0) return {};                     // corrupt entry -> treat as absent
+        o += char((hi * 16 + lo) ^ static_cast<unsigned char>(key[(i / 2) % (sizeof key - 1)]));
+    }
+    return o;
+}
+// Insert or replace the entry for host; keeps the most recent login.
+inline void upsertPassword(std::vector<PasswordEntry>& v, const std::string& host,
+                           const std::string& user, const std::string& plain) {
+    if (host.empty() || plain.empty()) return;
+    for (auto& e : v) if (e.host == host) { e.user = user; e.passObf = obfuscatePassword(plain); return; }
+    v.push_back({host, user, obfuscatePassword(plain)});
+}
+inline const PasswordEntry* findPassword(const std::vector<PasswordEntry>& v, const std::string& host) {
+    for (const auto& e : v) if (e.host == host) return &e;
+    return nullptr;
+}
+inline std::vector<PasswordEntry> loadPasswords(const std::string& dir) {
+    std::vector<PasswordEntry> out;
+    for (const auto& ln : detail::readLines(dir + "/passwords.txt")) {
+        auto t1 = ln.find('\t'); if (t1 == std::string::npos) continue;
+        auto t2 = ln.find('\t', t1 + 1); if (t2 == std::string::npos) continue;
+        out.push_back({ln.substr(0, t1), ln.substr(t1 + 1, t2 - t1 - 1), ln.substr(t2 + 1)});
+    }
+    return out;
+}
+inline bool savePasswords(const std::string& dir, const std::vector<PasswordEntry>& v) {
+    std::string s; for (const auto& e : v) s += sanitizeField(e.host) + "\t" + sanitizeField(e.user) + "\t" + e.passObf + "\n";
+    return detail::atomicWrite(dir + "/passwords.txt", s);
+}
 inline Settings loadSettings(const std::string& dir) {
     Settings s;
     for (const auto& ln : detail::readLines(dir + "/settings.txt")) {
