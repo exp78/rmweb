@@ -55,6 +55,7 @@
 #include "keyboard.h"  // pure on-screen-keyboard layout + hit-test (unit-tested in tests/keyboard_test.cpp)
 #include "profile.h"   // persistent store: bookmarks / history / settings
 #include "startpage.h" // start-page HTML generator
+#include "fieldprobe.h"// tap-probe result protocol + JS string escaping (tests/fieldprobe_test.cpp)
 #include <ctime>
 using rmweb::Gesture;
 using rmweb::classifyGesture;
@@ -254,6 +255,7 @@ Q_SIGNALS:
     void linkMissed();                             // a content tap hit no link -> GUI falls back to chrome toggle
     void bookmarkedChanged(bool on);               // current page bookmark state changed
     void notice(const QString &text);              // transient toast in the chrome (find results, downloads)
+    void fieldFocused(const QString &value, bool masked); // a text field was tapped -> open the keyboard
 
 public Q_SLOTS:
     void start() {
@@ -514,8 +516,11 @@ public Q_SLOTS:
             }
         });
     }
-    // Follow a link at panel (x,y). Panel px -> CSS px: divide by dpr * zoom (both scale the painted frame).
-    // Wider probe + click() fallback so buttons/role=link work, not only <a href>.
+    // Follow what a panel (x,y) tap hit (panel px -> CSS px: divide by dpr * zoom). ONE probe handles
+    // everything tappable, in priority order: text field (focus + open the keyboard) > select (cycle
+    // options) > checkbox/radio (toggle) > link/button (follow). A <label> resolves to its control.
+    // Answers the fieldprobe.h line protocol ("none"/"link"/"tick\n.."/"field\n.."); wider probe
+    // offsets so small controls and fat-finger taps still land.
     void tapLink(int x, int y) {
         marshalToCtx([this, x, y] {
             if (!m_view) return;
@@ -525,19 +530,113 @@ public Q_SLOTS:
                 "(function(x,y){"
                 "var p=[[0,0],[0,-16],[0,16],[-16,0],[16,0],[-32,0],[32,0],[0,-32],[0,32],"
                 "[-16,-16],[16,-16],[-16,16],[16,16],[-40,0],[40,0],[0,-40],[0,40]];"
-                "function go(e){if(!e)return false;"
-                "var a=e.closest?e.closest('a[href],area[href],[role=link],button'):null;"
-                "if(a){if(a.href){location.href=a.href;return true;}"
-                "try{a.click();return true;}catch(ex){}}"
-                "var t=e.closest?e.closest('[onclick],input[type=submit],input[type=button]'):null;"
-                "if(t){try{t.click();return true;}catch(ex){}}return false;}"
+                "function isTxt(f){"
+                "if(f.isContentEditable)return true;"
+                "if(f.tagName==='TEXTAREA')return true;"
+                "if(f.tagName!=='INPUT')return false;"
+                "var t=(f.type||'').toLowerCase();"
+                "return t===''||t==='text'||t==='search'||t==='email'||t==='url'||t==='password'"
+                "||t==='tel'||t==='number';}"
+                "function field(f){"
+                "if(f.disabled||f.readOnly)return null;"
+                "try{f.focus();}catch(e){}"
+                "window.__rmwebField=f;"
+                "var v=f.isContentEditable?(f.textContent||''):(f.value||'');"
+                "var m=(f.type||'').toLowerCase()==='password'?'1':'0';"
+                "return 'field\\n'+m+'\\n'+v;}"
+                "function probe(e){"
+                "if(!e||!e.closest)return null;"
+                "var t=e,lb=t.closest('label');"
+                "if(lb&&lb.control)t=lb.control;"
+                "var f=t.closest('input,textarea,[contenteditable]');"
+                "if(f&&isTxt(f))return field(f);"
+                "var s=t.closest('select');"
+                "if(s&&!s.disabled&&s.options.length){s.selectedIndex=(s.selectedIndex+1)%%s.options.length;"
+                "s.dispatchEvent(new Event('change',{bubbles:true}));"
+                "return 'tick\\n'+(s.options[s.selectedIndex]?s.options[s.selectedIndex].text:'');}"
+                "var c=t.closest('input[type=checkbox],input[type=radio]');"
+                "if(c&&!c.disabled){c.click();return 'tick\\n'+(c.checked?'on':'off');}"
+                "var a=t.closest('a[href],area[href],[role=link],button');"
+                "if(a){if(a.href){location.href=a.href;return 'link';}"
+                "try{a.click();return 'link';}catch(ex){}}"
+                "var b=t.closest('[onclick],input[type=submit],input[type=button],input[type=reset],input[type=image]');"
+                "if(b){try{b.click();return 'link';}catch(ex){}}"
+                "return null;}"
                 "for(var i=0;i<p.length;i++){"
-                "if(go(document.elementFromPoint(x+p[i][0],y+p[i][1])))return true;}"
-                "return false;})(%d,%d)",
+                "var r=probe(document.elementFromPoint(x+p[i][0],y+p[i][1]));"
+                "if(r)return r;}"
+                "return 'none';})(%d,%d)",
                 cx, cy);
             qCDebug(lcEngine, "[link] probe panel=(%d,%d) css=(%d,%d) dpr=%.2f zoom=%.2f", x, y, cx, cy, m_dpr, m_zoom);
             webkit_web_view_evaluate_javascript(m_view, js, -1, nullptr, nullptr, m_cancel, &WpeEngine::onTapLink, this);
             g_free(js);
+        });
+    }
+    // Commit the keyboard text into the last focused field (window.__rmwebField, stashed by the tap
+    // probe). The NATIVE value setter + input/change events make framework-controlled components
+    // (React & co.) register a real edit. Empty text clears the field.
+    void setFieldText(const QString &text) {
+        marshalToCtx([this, text] {
+            if (!m_view) return;
+            const std::string t = rmweb::jsStringEscape(text.toStdString());
+            gchar *js = g_strdup_printf(
+                "(function(txt){var f=window.__rmwebField;"
+                "if(!f||!f.isConnected)return 'gone';"
+                "try{f.focus();}catch(e){}"
+                "var ok=false,ty=(f.type||'').toLowerCase();"
+                // PASSWORD: this port never re-renders the control after a late programmatic set
+                // (value updates, pixels don't — neither setter nor execCommand nor blur/display
+                // nudges help). Swap in a CLONE whose value ATTRIBUTE is the new text: a fresh
+                // renderer paints the bullets from the attribute. Direct on-element listeners are
+                // lost (delegated/framework listeners at root survive); re-stash the clone.
+                "if(ty==='password'){f.setAttribute('value',txt);"
+                "var c=f.cloneNode(true);f.replaceWith(c);window.__rmwebField=c;f=c;"
+                "try{f.focus();}catch(e){}"
+                "f.dispatchEvent(new Event('input',{bubbles:true}));ok=true;"
+                // ...and even the clone doesn't self-damage — force a FULL-viewport repaint with a
+                // transient ~invisible veil (alpha 0.01 still paints; removed after one composite).
+                "var o=document.createElement('div');"
+                "o.style.cssText='position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.01);z-index:2147483647;pointer-events:none';"
+                "document.body.appendChild(o);setTimeout(function(){o.remove();},800);}"
+                "else if(f.isContentEditable){f.textContent=txt;f.dispatchEvent(new Event('input',{bubbles:true}));ok=true;}"
+                "else{try{f.select();ok=document.execCommand('insertText',false,txt);}catch(e){}"
+                // Fallback: NATIVE value setter (React & co. register a real edit).
+                "if(!ok){var p=f.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;"
+                "Object.getOwnPropertyDescriptor(p,'value').set.call(f,txt);"
+                "f.dispatchEvent(new Event('input',{bubbles:true}));}}"
+                "f.dispatchEvent(new Event('change',{bubbles:true}));"
+                "try{f.blur();}catch(e){}"   // Go = done editing; also hides the caret
+                // A bare value set may commit no buffer on this backend (same as scrollBy) — bump the
+                // hidden marker node to dirty the page and force exactly one composite.
+                "var m=document.getElementById('__r');if(!m){m=document.createElement('span');m.id='__r';"
+                "m.style.cssText='position:fixed;left:-9999px;top:0';document.body.appendChild(m);}"
+                "m.textContent=((+m.textContent||0)+1);"
+                "return ok?'ok':'fallback';})(\"%s\")", t.c_str());
+            webkit_web_view_evaluate_javascript(m_view, js, -1, nullptr, nullptr, m_cancel, &WpeEngine::onFieldSet, nullptr);
+            g_free(js);
+        });
+    }
+    static void onFieldSet(GObject *obj, GAsyncResult *res, gpointer) {
+        bool cancelled; JSCValue *v = finishJsEval(obj, res, &cancelled);
+        if (cancelled) return;
+        if (v && jsc_value_is_string(v)) {
+            char *c = jsc_value_to_string(v);
+            qInfo("[form] setFieldText -> %s", c ? c : "?");
+            g_free(c);
+        } else {
+            qInfo("[form] setFieldText -> %s", v ? "(non-string)" : "(eval error)");
+        }
+        if (v) g_object_unref(v);
+    }
+    // DIAG: log the stashed field's tag/type/value LENGTH (password-safe — never the value itself),
+    // and force a FULL-document repaint first (decides "renderer out of sync" vs "stale damage").
+    void logFieldState() {
+        marshalToCtx([this] {
+            if (!m_view) return;
+            const char *js = "(function(){var f=window.__rmwebField;if(!f)return 'none';"
+                             "return 'tag='+f.tagName+' type='+String(f.type)+' len='+String((f.value||'').length)"
+                             "+' conn='+f.isConnected+' attr='+String(f.getAttribute('value'));})()";
+            webkit_web_view_evaluate_javascript(m_view, js, -1, nullptr, nullptr, m_cancel, &WpeEngine::onFieldSet, nullptr);
         });
     }
     void pageNext()  { pageBy(kPageStepPx); }   // façade page-turn (wraps the scroll+repaint in pageBy)
@@ -650,11 +749,21 @@ private:
         bool cancelled; JSCValue *v = finishJsEval(obj, res, &cancelled);
         if (cancelled) return;
         auto *self = static_cast<WpeEngine*>(data);
-        bool followed = false;
-        if (v) { if (jsc_value_is_boolean(v)) followed = jsc_value_to_boolean(v); g_object_unref(v); }
+        std::string out = "none";
+        if (v) { if (jsc_value_is_string(v)) { char *c = jsc_value_to_string(v); out = c ? c : ""; g_free(c); } g_object_unref(v); }
         if (!self) return;
-        qCDebug(lcEngine, "[link] followed=%d", followed);
-        if (!followed) Q_EMIT self->linkMissed();
+        const rmweb::TapProbe pr = rmweb::parseTapProbe(out);
+        qCDebug(lcEngine, "[link] probe hit=%d", static_cast<int>(pr.hit));
+        switch (pr.hit) {
+            case rmweb::TapHit::None:  Q_EMIT self->linkMissed(); break;
+            case rmweb::TapHit::Link:  break;   // the navigation proceeds on its own
+            case rmweb::TapHit::Tick:            // checkbox/select changed -> toast the new state
+                if (!pr.value.empty()) Q_EMIT self->notice(QString::fromStdString(pr.value));
+                break;
+            case rmweb::TapHit::Field:           // text field focused -> open the keyboard on its value
+                Q_EMIT self->fieldFocused(QString::fromStdString(pr.value), pr.masked);
+                break;
+        }
     }
     // Build the apply script: the vendored Readability lib + our glue, with the reader CSS (font size from
     // RMWEB_READER_FONT, default 30) inlined. Injected in one shot so all symbols share the same scope.
@@ -1213,7 +1322,8 @@ public:
         else if (m_renderFailed)                   drawRenderNotice(p, w, h);
         else if (m_rendering && !m_renderFailed)   drawRenderingBadge(p, w);
         if (!m_notice.isEmpty())                 drawNoticeToast(p, w);   // toast overlays content, not chrome
-        if (!m_chromeOn) return;              // reader-fullscreen: hide chrome
+        if (!m_chromeOn && !m_editing) return;  // reader-fullscreen: hide chrome (an open keyboard
+                                                //  — e.g. a tapped form field — still needs the bar)
         drawChromeBar(p, w);
         if (m_editing) drawKeyboard(p, w, h); // URL keyboard only while editing
     }
@@ -1248,9 +1358,23 @@ public:
     // × in the field clears the typed buffer. Go with non-empty text navigates.
     void beginEdit() {
         m_editing = true;
+        m_editField = false; m_editMasked = false;
         g_urlEditing.store(true, std::memory_order_release);
         m_editBuf.clear();   // start blank; m_addr stays as the "old" value until a successful Go
         m_kbShift = false; m_kbSym = false; rebuildKeys();   // always reopen on the plain letters page
+        m_kbFlush.stop();
+        schedule(/*guardTouch=*/false);
+    }
+    // Form-field entry (a text field on the page was tapped): the keyboard opens PRE-FILLED with the
+    // field's current value; Go commits into the field (fieldTextEntered), Cancel discards.
+    // masked = password input -> the echo shows '*'. Chrome is summoned so the input line is visible.
+    void beginFieldEdit(const QString &value, bool masked) {
+        m_editing = true;
+        m_editField = true; m_editMasked = masked;
+        m_chromeOn = true;                      // the keyboard needs the bar (chrome may be hidden)
+        g_urlEditing.store(true, std::memory_order_release);
+        m_editBuf = value;
+        m_kbShift = false; m_kbSym = false; rebuildKeys();
         m_kbFlush.stop();
         schedule(/*guardTouch=*/false);
     }
@@ -1258,6 +1382,7 @@ public:
         if (!m_editing) return;
         m_kbFlush.stop();
         m_editing = false;
+        m_editField = false; m_editMasked = false;
         g_urlEditing.store(false, std::memory_order_release);
         m_editBuf.clear();
         schedule(/*guardTouch=*/false);
@@ -1298,16 +1423,20 @@ public:
                 return;
             case rmweb::KeyKind::Go: {
                 m_kbFlush.stop();
-                const QString u = m_editBuf.trimmed();
+                // Field mode commits the RAW buffer (spaces are meaningful in text); URL mode trims.
+                // Empty Go on a URL keeps the old address; empty Go on a field CLEARS it.
+                const QString u = m_editField ? m_editBuf : m_editBuf.trimmed();
+                const bool field = m_editField;
                 endEdit();
-                // Empty Go = keep the old URL (do not navigate). Non-empty = load.
-                if (!u.isEmpty()) Q_EMIT urlEntered(u);
+                if (field) Q_EMIT fieldTextEntered(u);
+                else if (!u.isEmpty()) Q_EMIT urlEntered(u);
                 return;
             }
         }
     }
 Q_SIGNALS:
     void urlEntered(const QString &url);   // Go pressed with a non-empty buffer -> load it (wired in main())
+    void fieldTextEntered(const QString &text);   // Go in field mode -> commit into the focused page field
 public Q_SLOTS:
     void setImage(const QImage &img) {
         m_pending = img;
@@ -1465,9 +1594,12 @@ private:
             if (m_editBuf.isEmpty()) {
                 // Hint shows previous URL (not submitted) so Cancel/empty-Go is obvious.
                 grey = true;
-                addrText = m_addr.isEmpty() ? QStringLiteral("type URL…") : m_addr;
+                addrText = m_editField ? QStringLiteral("type text…")
+                         : m_addr.isEmpty() ? QStringLiteral("type URL…") : m_addr;
             } else {
-                addrText = m_editBuf + QLatin1Char('|');
+                // Password fields echo '*' (the real text stays in m_editBuf).
+                addrText = (m_editMasked ? QString(m_editBuf.size(), QLatin1Char('*')) : m_editBuf)
+                         + QLatin1Char('|');
             }
         } else if (m_addr.isEmpty()) {
             grey = true;
@@ -1634,6 +1766,8 @@ private:
     bool m_bookmarked = false;   // current page is bookmarked -> filled star
     QString m_addr;
     bool m_editing = false;             // URL-entry mode: the on-screen keyboard is shown over the page
+    bool m_editField = false;           // editing a PAGE form field (vs the address bar URL)
+    bool m_editMasked = false;          // the field is a password input -> echo '*'
     QString m_editBuf;                  // the URL currently being typed
     std::vector<rmweb::Key> m_keys;     // keyboard layout, rebuilt on page/Shift change (rebuildKeys)
     bool m_kbShift = false;             // one-shot Shift armed (letters page)
@@ -1935,6 +2069,15 @@ int main(int argc, char **argv) {
         });
         // Engine toasts (find results, downloads) -> the chrome overlay.
         QObject::connect(&engine, &WpeEngine::notice, view, &WpeView::setNotice, Qt::QueuedConnection);
+        // Form fields: a tapped text field opens the keyboard on its current value; Go commits
+        // the typed text into the page field (native setter + input/change events).
+        QObject::connect(&engine, &WpeEngine::fieldFocused, view,
+                         [view](const QString &v, bool masked){ view->beginFieldEdit(v, masked); },
+                         Qt::QueuedConnection);
+        QObject::connect(view, &WpeView::fieldTextEntered, &app, [&engine, view](const QString &t){
+            view->forceNextContent();   // the DOM edit must paint promptly
+            engine.setFieldText(t);
+        });
 
         // Drive the e-ink panel ourselves so page turns show immediately (needs QSG_RENDER_LOOP=basic so
         // afterRendering fires on the GUI thread and the EPRenderLoop's slow auto-present is out of the way).
@@ -2047,6 +2190,35 @@ int main(int argc, char **argv) {
                     qInfo("[find][dbg] term=%s", qPrintable(term));
                     engine.findText(term);
                 });
+        }
+
+        // DIAG (RMWEB_DEBUG_PROBE="x,y"): run the content tap probe at panel (x,y) once after 4 s —
+        // exercises the field/select/checkbox/link classifier without a finger (a field opens the
+        // keyboard, a tick shows a toast; watch "[link] probe hit=N" in the log).
+        // DIAG (RMWEB_DEBUG_FORM="x,y,text"): the same probe, then commit "text" into the focused
+        // field at 7 s via the exact setFieldText path the keyboard's Go uses. Pair with RMWEB_GRAB_MS.
+        if (qEnvironmentVariableIsSet("RMWEB_DEBUG_PROBE") || qEnvironmentVariableIsSet("RMWEB_DEBUG_FORM")) {
+            const QString spec = qEnvironmentVariable("RMWEB_DEBUG_FORM").isEmpty()
+                               ? qEnvironmentVariable("RMWEB_DEBUG_PROBE")
+                               : qEnvironmentVariable("RMWEB_DEBUG_FORM");
+            const int c1 = spec.indexOf(QLatin1Char(',')), c2 = spec.indexOf(QLatin1Char(','), c1 + 1);
+            const int px = spec.left(c1).toInt();
+            const int py = (c1 > 0 && c2 > 0 ? spec.mid(c1 + 1, c2 - c1 - 1) : spec.mid(c1 + 1)).toInt();
+            const QString ftext = (c2 > 0) ? spec.mid(c2 + 1) : QString();
+            if (c1 > 0) {
+                QTimer::singleShot(4000, &app, [&engine, px, py]{
+                    qInfo("[form][dbg] probe @ %d,%d", px, py);
+                    engine.tapLink(px, py);
+                });
+                if (!ftext.isEmpty()) {
+                    QTimer::singleShot(7000, &app, [&engine, view, ftext]{
+                        qInfo("[form][dbg] commit: %s", qPrintable(ftext));
+                        view->forceNextContent();   // mirror the real Go path so the edit frame paints
+                        engine.setFieldText(ftext);
+                    });
+                    QTimer::singleShot(8500, &app, [&engine]{ engine.logFieldState(); });
+                }
+            } else qWarning("[form][dbg] bad spec (want x,y[,text]): %s", qPrintable(spec));
         }
 
         // DIAG (RMWEB_DEBUG_ZOOM): bump page zoom +2 steps after N ms (verify the scaling with RMWEB_GRAB_MS).
