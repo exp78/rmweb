@@ -47,6 +47,21 @@ int main() {
     CHECK(has(nt, ">http://ex.com/notitle</a>"));         // bookmark tile label = url
     CHECK(has(nt, ">http://ex.com/h2<span"));             // history label = url (before the url span)
 
+    // tabs-lite section: rendered only when tabs exist; page link + close command, both escaped
+    CHECK(!has(html, "Open tabs"));                       // no tabs -> no section
+    std::vector<Tab> tabs = {{"http://ex.com/t1", "Tab One"}, {"javascript:alert(1)", "Evil"}};
+    std::string tp = buildStartPage({}, {}, tabs);
+    CHECK(has(tp, "Open tabs"));
+    CHECK(has(tp, "href='http://ex.com/t1'"));            // tab page link
+    CHECK(has(tp, "href='rmweb:close-tab:http://ex.com/t1'")); // its close command
+    CHECK(!has(tp, "href='javascript:"));                 // poisoned tab: no working link...
+    CHECK(has(tp, "href='rmweb:close-tab:javascript:alert(1)'")); // ...but close still offered (inert
+                                                                  //  until tapped; decide-policy guards it)
+    // settings line: theme toggle label reflects the flag
+    CHECK(has(buildStartPage({}, {}, {}, false), "Reader theme: light"));
+    CHECK(has(buildStartPage({}, {}, {}, true),  "Reader theme: dark"));
+    CHECK(has(html, "rmweb:toggle-dark"));                // toggle present on every start page
+
     if (fails == 0) std::printf("startpage_test: OK\n");
     return fails ? 1 : 0;
 }

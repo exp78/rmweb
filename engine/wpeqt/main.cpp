@@ -171,6 +171,27 @@ static const char *kReaderCss =
     "#rmweb-reader code{font-family:monospace;font-size:.85em}"
     "#rmweb-reader hr{border:none;border-top:1px solid #ccc;margin:1.2em 0}"
     "#rmweb-reader table{max-width:100%;border-collapse:collapse}";
+// Dark variant of the reader sheet (start page → Settings → "Reader theme"; persisted readerDark).
+// Same layout metrics as kReaderCss — only the palette flips. Applies on the NEXT Reader activation.
+static const char *kReaderCssDark =
+    "html{background:#121212;-webkit-text-size-adjust:none}body{margin:0;background:#121212}"
+    "#rmweb-reader{max-width:46em;margin:0 auto;padding:1.1em 1.1em 4em;"
+        "font-family:Georgia,'Times New Roman',serif;font-size:__FS__px;line-height:1.6;color:#d8d8d8;"
+        "background:#121212;word-wrap:break-word;overflow-wrap:break-word}"
+    "#rmweb-reader .rmweb-title{font-size:1.5em;line-height:1.2;margin:0 0 .3em;font-weight:700;color:#eee}"
+    "#rmweb-reader .rmweb-byline{font-size:.7em;color:#999;font-style:italic;margin:0 0 1.4em}"
+    "#rmweb-reader p{margin:0 0 .9em}#rmweb-reader li{margin:.25em 0}"
+    "#rmweb-reader ul,#rmweb-reader ol{margin:0 0 .9em 1.2em;padding:0}"
+    "#rmweb-reader img,#rmweb-reader figure,#rmweb-reader video{max-width:100%;height:auto}"
+    "#rmweb-reader figure{margin:1em 0}#rmweb-reader figcaption{font-size:.7em;color:#999;text-align:center}"
+    "#rmweb-reader h1,#rmweb-reader h2,#rmweb-reader h3{line-height:1.25;margin:1.1em 0 .4em;color:#eee}"
+    "#rmweb-reader h2{font-size:1.25em}#rmweb-reader h3{font-size:1.1em}"
+    "#rmweb-reader a{color:#e8e8e8;text-decoration:underline}"
+    "#rmweb-reader blockquote{margin:.8em 0;padding-left:.8em;border-left:4px solid #555;color:#aaa}"
+    "#rmweb-reader pre{white-space:pre-wrap;word-wrap:break-word;background:#1e1e1e;padding:.6em;font-size:.8em}"
+    "#rmweb-reader code{font-family:monospace;font-size:.85em}"
+    "#rmweb-reader hr{border:none;border-top:1px solid #444;margin:1.2em 0}"
+    "#rmweb-reader table{max-width:100%;border-collapse:collapse}";
 // Glue: assumes Readability (injected before it) is in scope; returns 'ok' / 'noarticle' / 'error:...'.
 static const char *kReaderGlue = R"JS(
 (function(){
@@ -225,6 +246,7 @@ Q_SIGNALS:
     void renderingChanged(bool on);                // true at LOAD_FINISHED for http/https (compositing); false at first-content or fail
     void linkMissed();                             // a content tap hit no link -> GUI falls back to chrome toggle
     void bookmarkedChanged(bool on);               // current page bookmark state changed
+    void notice(const QString &text);              // transient toast in the chrome (find results, downloads)
 
 public Q_SLOTS:
     void start() {
@@ -240,6 +262,8 @@ public Q_SLOTS:
         m_bookmarks = rmweb::loadBookmarks(m_profileDir);
         m_history   = rmweb::loadHistory(m_profileDir);
         m_settings  = rmweb::loadSettings(m_profileDir);
+        m_scroll    = rmweb::loadScroll(m_profileDir);
+        m_tabs      = rmweb::loadTabs(m_profileDir);
         m_zoom = m_settings.zoom;
         m_readerFont = m_settings.readerFont;
         // RMWEB_READER_FONT env wins over persisted value (same guard as ctor, re-applied after settings load).
@@ -295,6 +319,15 @@ public Q_SLOTS:
         g_signal_connect(m_view, "web-process-terminated", G_CALLBACK(&WpeEngine::onWebProcessTerminated), this);
         g_signal_connect(m_view, "decide-policy", G_CALLBACK(+[](WebKitWebView*, WebKitPolicyDecision* dec,
                                            WebKitPolicyDecisionType type, gpointer data) -> gboolean {
+            // A response whose MIME type WebKit can't display (zip, epub, binary, ...) -> download it
+            // to disk instead of failing the navigation (destination handled in onDownloadStarted).
+            if (type == WEBKIT_POLICY_DECISION_TYPE_RESPONSE) {
+                if (!webkit_response_policy_decision_is_mime_type_supported(WEBKIT_RESPONSE_POLICY_DECISION(dec))) {
+                    webkit_policy_decision_download(dec);
+                    return TRUE;
+                }
+                return FALSE;
+            }
             if (type != WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION) return FALSE;
             auto* self = static_cast<WpeEngine*>(data);
             auto* nav = WEBKIT_NAVIGATION_POLICY_DECISION(dec);
@@ -308,9 +341,22 @@ public Q_SLOTS:
                 const char *cur = self->m_view ? webkit_web_view_get_uri(self->m_view) : nullptr;
                 const std::string home = "file://" + self->m_profileDir + "/home.html";
                 if (cur && std::string(cur) == home) {
-                    if (std::string(uri) == "rmweb:clear-history") {
+                    const std::string cmd = std::string(uri).substr(6);   // after "rmweb:"
+                    if (cmd == "clear-history") {
                         self->m_history.clear();
                         rmweb::saveHistory(self->m_profileDir, self->m_history);
+                        self->goHome();
+                    } else if (cmd.rfind("close-tab:", 0) == 0) {
+                        // The tab URL rides inside the command; WebKit percent-encodes non-ASCII
+                        // when resolving the link, so decode before matching the store.
+                        const std::string u = rmweb::urlDecode(cmd.substr(10));
+                        if (rmweb::removeTab(self->m_tabs, u))
+                            rmweb::saveTabs(self->m_profileDir, self->m_tabs);
+                        self->goHome();
+                    } else if (cmd == "toggle-dark") {
+                        self->m_settings.readerDark = !self->m_settings.readerDark;
+                        rmweb::saveSettings(self->m_profileDir, self->m_settings);
+                        qInfo("[reader] dark theme %s", self->m_settings.readerDark ? "on" : "off");
                         self->goHome();
                     }
                 } else {
@@ -341,8 +387,39 @@ public Q_SLOTS:
             // runs) — the debounced queueSave() exists for the runtime hot paths.
             if (uaEnv && std::string(uaEnv) == "off") rmweb::saveSettings(m_profileDir, m_settings);
         }
+        // In-page find feedback ("found N" / "no matches" toast) and downloads live on the view's
+        // session/context; all signals fire on this worker thread, like every other handler above.
+        {
+            WebKitFindController *fc = webkit_web_view_get_find_controller(m_view);
+            g_signal_connect(fc, "found-text", G_CALLBACK(+[](WebKitFindController*, guint n, gpointer data){
+                auto *self = static_cast<WpeEngine*>(data);
+                qInfo("[find] matches=%u", n);
+                Q_EMIT self->notice(QStringLiteral("%1 matches").arg(n));
+            }), this);
+            g_signal_connect(fc, "failed-to-find-text", G_CALLBACK(+[](WebKitFindController*, gpointer data){
+                auto *self = static_cast<WpeEngine*>(data);
+                qInfo("[find] no matches");
+                Q_EMIT self->notice(QStringLiteral("No matches"));
+            }), this);
+            g_signal_connect(webkit_web_view_get_network_session(m_view), "download-started",
+                             G_CALLBACK(&WpeEngine::onDownloadStarted), this);
+        }
         // Apply persisted zoom (must be done after the view is fully set up).
         webkit_web_view_set_zoom_level(m_view, m_zoom);
+
+        // Persistent cookies (default on): logins/sessions survive relaunch. Stored in the profile
+        // dir as sqlite; RMWEB_COOKIES=0 opts out (session-only). Must be set before the first load.
+        // Policy = no third-party cookies: the content blocker already drops third-party scripts,
+        // so this just starves the trackers that remain. (2022 API: the cookie manager hangs off
+        // WebKitNetworkSession, not WebKitWebContext.)
+        if (qgetenv("RMWEB_COOKIES") != "0") {
+            WebKitCookieManager *cm = webkit_network_session_get_cookie_manager(
+                webkit_web_view_get_network_session(m_view));
+            const std::string cj = m_profileDir + "/cookies.sqlite";
+            webkit_cookie_manager_set_persistent_storage(cm, cj.c_str(), WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
+            webkit_cookie_manager_set_accept_policy(cm, WEBKIT_COOKIE_POLICY_ACCEPT_NO_THIRD_PARTY);
+            qInfo("[cookies] persistent: %s", cj.c_str());
+        }
 
         // Content blocking (RMWEB_BLOCK!=0, default on): compile the WKContentRuleList, add it, THEN load —
         // so it applies to the very first resource loads. The compile is async; loadInitial() runs from its
@@ -391,7 +468,8 @@ public Q_SLOTS:
     void goHome() {
         // Marshalled: reads/writes m_bookmarks and m_history, which the worker-thread LOAD_FINISHED also touches.
         marshalToCtx([this] {
-            const std::string html = rmweb::buildStartPage(m_bookmarks, firstN(m_history, 15));
+            const std::string html = rmweb::buildStartPage(m_bookmarks, firstN(m_history, 15),
+                                                           m_tabs, m_settings.readerDark);
             const std::string path = m_profileDir + "/home.html";
             rmweb::detail::atomicWrite(path, html);
             loadUrl(QString::fromStdString("file://" + path));
@@ -410,6 +488,22 @@ public Q_SLOTS:
     void goForward() { marshalToCtx([this] { if (m_view && webkit_web_view_can_go_forward(m_view)) webkit_web_view_go_forward(m_view); }); }
     void reload()    { marshalToCtx([this] { if (m_view) webkit_web_view_reload(m_view); }); }
     void stopLoading() { marshalToCtx([this] { if (m_view) webkit_web_view_stop_loading(m_view); }); }
+    // In-page find (address bar: "/term" + Go). A fresh term starts a new search (first match is
+    // scrolled to + highlighted); repeating the SAME term steps to the next match (wraps around).
+    void findText(const QString &q) {
+        marshalToCtx([this, q] {
+            if (!m_view || q.isEmpty()) return;
+            WebKitFindController *fc = webkit_web_view_get_find_controller(m_view);
+            const std::string s = q.toStdString();
+            if (s == m_lastFind) {
+                webkit_find_controller_search_next(fc);
+            } else {
+                m_lastFind = s;
+                webkit_find_controller_search(fc, s.c_str(),
+                    WEBKIT_FIND_OPTIONS_CASE_INSENSITIVE | WEBKIT_FIND_OPTIONS_WRAP_AROUND, 128);
+            }
+        });
+    }
     // Follow a link at panel (x,y). Panel px -> CSS px: divide by dpr * zoom (both scale the painted frame).
     // Wider probe + click() fallback so buttons/role=link work, not only <a href>.
     void tapLink(int x, int y) {
@@ -482,6 +576,7 @@ private:
         WpeEngine *self = m->self;
         if (self->m_view) {
             self->m_pageUs = g_get_monotonic_time();
+            self->m_userScrolled = true;   // suppress a pending scroll-restore for this load
             // Scroll one page and force exactly ONE repaint: a bare scrollBy moves scrollY but commits no
             // buffer, so we bump a hidden marker node to dirty the page → one composite. With llvmpipe that
             // lands in ~90 ms, so one frame per turn is enough. (The earlier requestAnimationFrame burst was a
@@ -527,7 +622,19 @@ private:
         auto *self = static_cast<WpeEngine*>(data);
         std::string dbg = "?";
         if (v) { if (jsc_value_is_string(v)) { char *c = jsc_value_to_string(v); dbg = c ? c : ""; g_free(c); } g_object_unref(v); }
-        if (self) qCDebug(lcEngine, "[t] page JS done %s @%.0fms", dbg.c_str(), msSince(self->m_startUs));
+        if (!self) return;
+        qCDebug(lcEngine, "[t] page JS done %s @%.0fms", dbg.c_str(), msSince(self->m_startUs));
+        // The scroll JS answers "sy=<n> ..." — remember it as the reading position for the current
+        // URL (debounced write), so a later visit can resume where reading stopped.
+        if (!self->m_curUrl.empty()) {
+            const size_t p = dbg.find("sy=");
+            if (p != std::string::npos) {
+                const int pos = atoi(dbg.c_str() + p + 3);
+                self->m_curScroll = pos;
+                rmweb::upsertScroll(self->m_scroll, self->m_curUrl, pos);
+                self->queueSave(&self->m_scrollSaveSrc, 2);
+            }
+        }
     }
     static void onTapLink(GObject *obj, GAsyncResult *res, gpointer data) {
         bool cancelled; JSCValue *v = finishJsEval(obj, res, &cancelled);
@@ -542,7 +649,8 @@ private:
     // Build the apply script: the vendored Readability lib + our glue, with the reader CSS (font size from
     // RMWEB_READER_FONT, default 30) inlined. Injected in one shot so all symbols share the same scope.
     std::string buildReaderApplyJs() {
-        std::string css = kReaderCss;  replaceAll(css, "__FS__", std::to_string(m_readerFont));   // A-/A+ adjustable
+        std::string css = m_settings.readerDark ? kReaderCssDark : kReaderCss;   // start-page theme setting
+        replaceAll(css, "__FS__", std::to_string(m_readerFont));   // A-/A+ adjustable
         std::string glue = kReaderGlue; replaceAll(glue, "__CSS__", css);
         return m_readabilityJs + "\n" + glue;
     }
@@ -617,12 +725,44 @@ private:
         g_source_unref(s);
     }
 
+    // Per-URL scroll restore: after LOAD_FINISHED give the layout a moment to settle, then jump back
+    // to the position remembered for this URL (same marker-nudge repaint trick as the page turn).
+    // Skipped if the user already page-turned on this load, or a new navigation started meanwhile.
+    static constexpr guint kScrollRestoreMs = 800;
+    struct ScrollRestoreMsg { WpeEngine *self; guint gen; int pos; };
+    void scheduleScrollRestore(int pos) {
+        auto *m = new ScrollRestoreMsg{ this, m_loadGen, pos };
+        GSource *s = g_timeout_source_new(kScrollRestoreMs);
+        g_source_set_callback(s, [](gpointer d) -> gboolean {
+            auto *msg = static_cast<ScrollRestoreMsg*>(d);
+            WpeEngine *self = msg->self;
+            if (self->m_view && self->m_loadGen == msg->gen && !self->m_userScrolled
+                    && !self->m_readerMode && msg->pos > 0) {
+                qInfo("[scroll] restore y=%d", msg->pos);
+                gchar *js = g_strdup_printf(
+                    "(function(y){"
+                    "var se=document.scrollingElement||document.documentElement||document.body;"
+                    "se.scrollTop=y;"
+                    "var m=document.getElementById('__r');if(!m){m=document.createElement('span');m.id='__r';"
+                    "m.style.cssText='position:fixed;left:-9999px;top:0';document.body.appendChild(m);}"
+                    "m.textContent=((+m.textContent||0)+1);"
+                    "return 'sy='+se.scrollTop;"
+                    "})(%d)", msg->pos);
+                webkit_web_view_evaluate_javascript(self->m_view, js, -1, nullptr, nullptr, self->m_cancel,
+                                                    &WpeEngine::onJsDone, self);
+                g_free(js);
+            }
+            return G_SOURCE_REMOVE; }, m, [](gpointer d) { delete static_cast<ScrollRestoreMsg*>(d); });
+        g_source_attach(s, m_ctx);
+        g_source_unref(s);
+    }
+
     // Debounced profile writes (blocking flash I/O must not stall the WebKit worker): LOAD_FINISHED
     // (every page) and each A-/A+ tap used to write synchronously. Coalesce onto ONE pending
     // timeout per store on this context — a repeat inside the window re-arms it. Runs only on the
     // worker thread (like every m_history/m_settings access); flushPendingWrites() covers shutdown.
     static constexpr guint kSaveDebounceMs = 1500;
-    struct SaveMsg { WpeEngine *self; int what; };   // what: 0 = history, 1 = settings
+    struct SaveMsg { WpeEngine *self; int what; };   // what: 0 = history, 1 = settings, 2 = scroll, 3 = tabs
     void queueSave(GSource **slot, int what) {
         if (*slot) { g_source_destroy(*slot); g_source_unref(*slot); *slot = nullptr; }   // re-arm the window
         auto *m = new SaveMsg{ this, what };
@@ -636,14 +776,19 @@ private:
         auto *msg = static_cast<SaveMsg*>(d);
         WpeEngine *self = msg->self;
         const int what = msg->what;
-        GSource **slot = (what == 0) ? &self->m_historySaveSrc : &self->m_settingsSaveSrc;
+        GSource **slot = (what == 0) ? &self->m_historySaveSrc
+                       : (what == 1) ? &self->m_settingsSaveSrc
+                       : (what == 2) ? &self->m_scrollSaveSrc
+                                     : &self->m_tabsSaveSrc;
         g_source_unref(*slot); *slot = nullptr;   // fired: drop our ref (may free msg — locals only from here)
         self->runSave(what);
         return G_SOURCE_REMOVE;
     }
     void runSave(int what) {
-        if (what == 0) rmweb::saveHistory(m_profileDir, m_history);
-        else           rmweb::saveSettings(m_profileDir, m_settings);
+        if      (what == 0) rmweb::saveHistory(m_profileDir, m_history);
+        else if (what == 1) rmweb::saveSettings(m_profileDir, m_settings);
+        else if (what == 2) rmweb::saveScroll(m_profileDir, m_scroll);
+        else                rmweb::saveTabs(m_profileDir, m_tabs);
     }
     // Final flush on worker-loop exit (start()): a write still inside its debounce window would be lost.
     void flushPendingWrites() {
@@ -655,6 +800,14 @@ private:
             g_source_destroy(m_settingsSaveSrc); g_source_unref(m_settingsSaveSrc); m_settingsSaveSrc = nullptr;
             rmweb::saveSettings(m_profileDir, m_settings);
         }
+        if (m_scrollSaveSrc) {
+            g_source_destroy(m_scrollSaveSrc); g_source_unref(m_scrollSaveSrc); m_scrollSaveSrc = nullptr;
+            rmweb::saveScroll(m_profileDir, m_scroll);
+        }
+        if (m_tabsSaveSrc) {
+            g_source_destroy(m_tabsSaveSrc); g_source_unref(m_tabsSaveSrc); m_tabsSaveSrc = nullptr;
+            rmweb::saveTabs(m_profileDir, m_tabs);
+        }
     }
 
     void loadInitial() {
@@ -663,7 +816,8 @@ private:
             // marshalled to the worker context via marshalToCtx, which is safe to call from here
             // (we ARE on the worker context, so the inner marshalToCtx re-posts to the same context —
             // harmless, and keeps the identical dispatch path as a tap-router-initiated goHome()).
-            const std::string html = rmweb::buildStartPage(m_bookmarks, firstN(m_history, 15));
+            const std::string html = rmweb::buildStartPage(m_bookmarks, firstN(m_history, 15),
+                                                           m_tabs, m_settings.readerDark);
             const std::string path = m_profileDir + "/home.html";
             rmweb::detail::atomicWrite(path, html);
             webkit_web_view_load_uri(m_view, ("file://" + path).c_str());
@@ -697,12 +851,56 @@ private:
         Q_EMIT self->urlChanged(QString::fromUtf8(u ? u : ""));
     }
 
+    // A download started (decide-policy said "download"). Save under /home/root/Downloads
+    // (RMWEB_DOWNLOADS overrides), toast in the chrome on completion/failure. The suggested
+    // filename is stripped to its basename so it can never escape the downloads dir.
+    static void onDownloadStarted(WebKitNetworkSession *, WebKitDownload *dl, gpointer data) {
+        auto *self = static_cast<WpeEngine*>(data);
+        g_signal_connect(dl, "decide-destination", G_CALLBACK(+[](WebKitDownload *d, gchar *suggested, gpointer) -> gboolean {
+            const char *dirEnv = getenv("RMWEB_DOWNLOADS");
+            const std::string dir = (dirEnv && *dirEnv) ? dirEnv : "/home/root/Downloads";
+            if (g_mkdir_with_parents(dir.c_str(), 0755) != 0) {
+                qWarning("[dl] mkdir %s failed: %s", dir.c_str(), g_strerror(errno));
+                return FALSE;
+            }
+            std::string name = (suggested && *suggested) ? suggested : "download.bin";
+            const size_t slash = name.find_last_of('/');
+            if (slash != std::string::npos) name = name.substr(slash + 1);
+            if (name.empty() || name == "." || name == "..") name = "download.bin";
+            gchar *uri = g_filename_to_uri((dir + "/" + name).c_str(), nullptr, nullptr);
+            if (!uri) return FALSE;
+            webkit_download_set_destination(d, uri);
+            qInfo("[dl] -> %s/%s", dir.c_str(), name.c_str());
+            g_free(uri);
+            return TRUE;
+        }), nullptr);
+        g_signal_connect(dl, "finished", G_CALLBACK(+[](WebKitDownload *d, gpointer data) {
+            auto *self = static_cast<WpeEngine*>(data);
+            std::string shown = "Download complete";
+            if (const gchar *dest = webkit_download_get_destination(d)) {
+                std::string s = dest;
+                const size_t p = s.find_last_of('/');
+                if (p != std::string::npos) s = s.substr(p + 1);
+                if (!s.empty()) shown = "Saved " + s;
+            }
+            qInfo("[dl] finished: %s", shown.c_str());
+            Q_EMIT self->notice(QString::fromStdString(shown));
+        }), self);
+        g_signal_connect(dl, "failed", G_CALLBACK(+[](WebKitDownload *, GError *err, gpointer data) {
+            auto *self = static_cast<WpeEngine*>(data);
+            qWarning("[dl] failed: %s", err ? err->message : "?");
+            Q_EMIT self->notice(QStringLiteral("Download failed"));
+        }), self);
+    }
+
     static void onLoadChanged(WebKitWebView *view, WebKitLoadEvent ev, gpointer data) {
         auto *self = static_cast<WpeEngine*>(data);
         if (ev == WEBKIT_LOAD_STARTED) {
             self->m_loadGen++;                          // invalidate any pending render-check from a prior load
             self->m_renderFailedState = false;
             self->m_lastNonWhite = 0;                   // no frames yet => blank until onBuffer proves otherwise
+            self->m_userScrolled = false;               // re-arm scroll-restore suppression for the new load
+            self->m_lastFind.clear();                   // find state is per page; a repeat starts fresh
             // [perf] instrumentation: record per-load origin and reset milestones/flags.
             self->m_loadStartUs = g_get_monotonic_time();
             self->m_firstContentLogged = false;
@@ -720,6 +918,9 @@ private:
             qCDebug(lcEngine, "[perf] load-committed @%.0fms", msSince(self->m_loadStartUs));
             // A real navigation/reload landed fresh original content -> any reader view is gone; reset its state.
             if (self->m_readerMode) { self->m_readerMode = false; Q_EMIT self->readerModeChanged(false); }
+            // The old page is gone from here on: drop its identity NOW so a scroll completion landing
+            // in the commit->finish window isn't recorded against the previous URL (reset at FINISHED).
+            self->m_curUrl.clear(); self->m_curTitle.clear(); self->m_curScroll = 0;
             // TLS state is log-only (no UI consumes it): get_tls_info flags https + cert errors even when
             // the page still loaded, independent of tls-errors-policy.
             GTlsCertificate *cert = nullptr; GTlsCertificateFlags errs = (GTlsCertificateFlags)0;
@@ -741,6 +942,11 @@ private:
                     self->m_curUrl = url; self->m_curTitle = t ? t : "";
                     rmweb::addHistory(self->m_history, url, self->m_curTitle, (long)time(nullptr));
                     self->queueSave(&self->m_historySaveSrc, 0);   // debounced — not on the WebKit hot path
+                    rmweb::upsertTab(self->m_tabs, url, self->m_curTitle);   // tabs-lite: page = open tab
+                    self->queueSave(&self->m_tabsSaveSrc, 3);
+                    // Resume reading where this URL was left (no-op on the first visit / back at top).
+                    self->m_curScroll = rmweb::scrollPosFor(self->m_scroll, url);
+                    if (self->m_curScroll > 0) self->scheduleScrollRestore(self->m_curScroll);
                     Q_EMIT self->bookmarkedChanged(rmweb::isBookmarked(self->m_bookmarks, url));
                     // "Rendering…" only if content has not painted yet. If first-content already
                     // arrived during the load (common), do not raise the badge — and clear it if it
@@ -924,9 +1130,16 @@ private:
     std::vector<rmweb::Bookmark> m_bookmarks;
     std::vector<rmweb::HistoryEntry> m_history;
     rmweb::Settings m_settings;
+    std::vector<rmweb::ScrollEntry> m_scroll;       // per-URL reading positions (scroll.txt)
+    std::vector<rmweb::Tab> m_tabs;                 // open pages, MRU first (tabs.txt — tabs-lite)
     GSource *m_historySaveSrc = nullptr;            // pending debounced history write (worker ctx)
     GSource *m_settingsSaveSrc = nullptr;           // pending debounced settings write (worker ctx)
+    GSource *m_scrollSaveSrc = nullptr;             // pending debounced scroll-position write
+    GSource *m_tabsSaveSrc = nullptr;               // pending debounced tabs write
     std::string m_curUrl, m_curTitle;               // current committed page (for history + bookmark)
+    int m_curScroll = 0;                            // last recorded scroll offset of m_curUrl (CSS px)
+    bool m_userScrolled = false;                    // a page turn happened on this load (suppress restore)
+    std::string m_lastFind;                         // last in-page search term (repeat = search_next)
 };
 
 // ---------------------------------------------------------------------------
@@ -963,6 +1176,12 @@ public:
         connect(&m_contentFlush, &QTimer::timeout, this, [this]{
             if (m_hasPending) schedule(/*guardTouch=*/true);
         });
+        // Toast (find results, downloads): shown for a few seconds, then cleared + repainted away.
+        m_noticeTimer.setSingleShot(true);
+        connect(&m_noticeTimer, &QTimer::timeout, this, [this]{
+            m_notice.clear();
+            schedule();
+        });
     }
     // Call before user-driven actions (page turn, reload, link) so the next WPE frame paints immediately.
     void forceNextContent() {
@@ -977,6 +1196,7 @@ public:
         if (m_loading && !m_renderFailed)          drawLoadingBadge(p, w);
         else if (m_renderFailed)                   drawRenderNotice(p, w, h);
         else if (m_rendering && !m_renderFailed)   drawRenderingBadge(p, w);
+        if (!m_notice.isEmpty())                 drawNoticeToast(p, w);   // toast overlays content, not chrome
         if (!m_chromeOn) return;              // reader-fullscreen: hide chrome
         drawChromeBar(p, w);
         if (m_editing) drawKeyboard(p, w, h); // URL keyboard only while editing
@@ -1108,6 +1328,12 @@ public Q_SLOTS:
     void setReaderMode(bool v)     { if (v != m_readerMode)  { m_readerMode  = v; schedule(); } }
     void setReaderable(bool v)     { if (v != m_readerable) { m_readerable = v; schedule(); } }
     void setBookmarked(bool v) { if (v != m_bookmarked) { m_bookmarked = v; schedule(); } }
+    void setNotice(const QString &s) {           // transient toast (find results, downloads)
+        if (s.isEmpty()) return;
+        m_notice = s;
+        m_noticeTimer.start(kNoticeMs);          // re-arms if a second notice lands quickly
+        schedule();
+    }
 protected:
     void itemChange(ItemChange ch, const ItemChangeData &d) override {
         if (ch == ItemSceneChange && d.window)   // frameSwapped fires after the panel present returns
@@ -1156,6 +1382,19 @@ private:
     // "Rendering…" pill: shown after load-finished while llvmpipe composites the page (no progress data).
     void drawRenderingBadge(QPainter *p, qreal w) const {
         drawTextPill(p, w, QStringLiteral("Rendering…"));
+    }
+    // Transient toast (find results, download notices) below the badge zone — inverted so it reads
+    // as an overlay, not part of the page.
+    void drawNoticeToast(QPainter *p, qreal w) const {
+        QFont lf = p->font(); lf.setPixelSize(36); p->setFont(lf);
+        const qreal tw = p->fontMetrics().horizontalAdvance(m_notice);
+        const qreal pad = 34, bh = 88, bw = pad + tw + pad;
+        const QRectF r((w - bw) / 2, kBarH + 170, bw, bh);
+        p->setPen(Qt::NoPen); p->setBrush(Qt::black);
+        p->drawRoundedRect(r, 16, 16);
+        p->setPen(Qt::white); p->setBrush(Qt::NoBrush);
+        p->drawText(r, Qt::AlignCenter, m_notice);
+        p->setPen(Qt::black);
     }
     // Load finished but the page rendered ~nothing (a heavy JS app the CPU can't run). "(!)" + two lines.
     void drawRenderNotice(QPainter *p, qreal w, qreal h) const {
@@ -1216,7 +1455,7 @@ private:
             }
         } else if (m_addr.isEmpty()) {
             grey = true;
-            addrText = QStringLiteral("tap to enter URL");
+            addrText = QStringLiteral("URL, or /text to find in page");
         } else {
             addrText = m_addr;
         }
@@ -1362,6 +1601,9 @@ private:
     QTimer m_fallback;
     QTimer m_kbFlush;                            // keyboard address-bar coalesced redraw
     QTimer m_contentFlush;                       // delayed present of throttled SPA frames
+    QTimer m_noticeTimer;                        // toast auto-clear (find results, downloads)
+    QString m_notice;                            // toast text ("" = hidden)
+    static const int kNoticeMs = 4000;           // toast on-screen time
     // chrome state, painted into the frame (reader-first: shown on launch, hidden by a content tap).
     // Chrome layout (panel 1620): left cluster | wide address box | A- A+ ★ Reader Power
     // Give the URL field ~half the bar — previous widths left only ~220px and the box looked "gone".
@@ -1660,8 +1902,18 @@ int main(int argc, char **argv) {
         QObject::connect(&engine, &WpeEngine::renderFailed,      view, &WpeView::setRenderFailed);
         QObject::connect(&engine, &WpeEngine::renderingChanged, view,
                          [view](bool on){ view->setRendering(on); }, Qt::QueuedConnection);
-        // URL entry: the on-screen keyboard's Go (WpeView::urlEntered) -> load it (engine.loadUrl normalizes).
-        QObject::connect(view, &WpeView::urlEntered, &app, [&engine](const QString &u){ engine.loadUrl(u); });
+        // URL entry: the on-screen keyboard's Go (WpeView::urlEntered) -> load it (engine.loadUrl
+        // normalizes). "/text" goes to the in-page find instead (repeat "/text" = next match).
+        QObject::connect(view, &WpeView::urlEntered, &app, [&engine, view](const QString &u){
+            if (u.startsWith(QLatin1Char('/')) && u.size() > 1) {
+                view->forceNextContent();   // the find scroll/highlight must paint promptly
+                engine.findText(u.mid(1));
+            } else {
+                engine.loadUrl(u);
+            }
+        });
+        // Engine toasts (find results, downloads) -> the chrome overlay.
+        QObject::connect(&engine, &WpeEngine::notice, view, &WpeView::setNotice, Qt::QueuedConnection);
 
         // Drive the e-ink panel ourselves so page turns show immediately (needs QSG_RENDER_LOOP=basic so
         // afterRendering fires on the GUI thread and the EPRenderLoop's slow auto-present is out of the way).
@@ -1763,6 +2015,17 @@ int main(int argc, char **argv) {
         // DIAG (RMWEB_DEBUG_KB): open the URL keyboard after N ms so its rendering can be grabbed (RMWEB_GRAB_MS).
         if (const int kbMs = qEnvironmentVariableIntValue("RMWEB_DEBUG_KB"); kbMs > 0) {
             QTimer::singleShot(kbMs, &app, [view]{ qInfo("[kb][dbg] beginEdit"); view->beginEdit(); });
+        }
+
+        // DIAG (RMWEB_DEBUG_FIND=term): run an in-page find once after 6 s — verifies the
+        // FindController path without typing; watch for "[find] matches=N" in the log.
+        if (qEnvironmentVariableIsSet("RMWEB_DEBUG_FIND")) {
+            const QString term = qEnvironmentVariable("RMWEB_DEBUG_FIND");
+            if (!term.isEmpty())
+                QTimer::singleShot(6000, &app, [&engine, term]{
+                    qInfo("[find][dbg] term=%s", qPrintable(term));
+                    engine.findText(term);
+                });
         }
 
         // DIAG (RMWEB_DEBUG_ZOOM): bump page zoom +2 steps after N ms (verify the scaling with RMWEB_GRAB_MS).

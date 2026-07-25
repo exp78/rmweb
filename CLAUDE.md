@@ -111,6 +111,23 @@ Phase 5 ✅ DONE (verified on device 2026-07-01). **Phase 2 Engine Hardening (20
 
 **Phase 6 Batches 3/4 — claims NOT confirmed by code (corrected 2026-07-19).** These entries claimed dark mode (`RMWEB_READER_THEME`), typography presets (serif/sans, line-height/width), smooth auto-scroll with tap-to-pause, article export, night mode, focus mode (chrome auto-hide), style presets (News/Book/Academic/Minimal), a reading-progress bar with time estimate, per-URL scroll-position restore, and Phase 7 hooks (tab stubs, form/login detection signals, download hooks). Grep over `engine/wpeqt/` shows **none of these exist**: the reader stylesheet is a single hardcoded light theme (`kReaderCss`, main.cpp:173 — it does include table/code/img rules); the only reader tuning knob is `RMWEB_READER_FONT` (font size, main.cpp:222); `RMWEB_AUTOPAGE_MS` is a *diagnostic* auto-page driver (main.cpp:1712), not a user-facing auto-scroll; `RMWEB_READER_DIR` is the directory the vendored Readability.js is *loaded from* (main.cpp:164), not an export target. The only progress UI is the "Loading NN%" badge driven by WebKit's estimated-load-progress (main.cpp:1098). The original claims were erroneous; see `docs/review-2026-07-18.md` HIGH#1.
 
+**Phase 7 Batch 1 (partial, 2026-07-25) — host-tested, ON-DEVICE VERIFICATION PENDING.** Implemented:
+persistent cookies (sqlite via `webkit_network_session_get_cookie_manager` — the 2022 API moved cookie
+management off WebKitWebContext; `RMWEB_COOKIES=0` opts out, policy = no-third-party), per-URL scroll
+restore (`scroll.txt`, capture from the pageBy JS `sy=` answer in onJsDone, restore at LOAD_FINISHED+800 ms
+suppressed by a user page-turn; `m_curUrl` now clears at LOAD_COMMITTED so a scroll completion in the
+commit→finish window isn't mis-attributed), in-page find (address bar `/text` + Go, FindController with
+case-insensitive wrap-around, repeat same term = next match; toast "N matches"/"No matches"),
+downloads (decide-policy RESPONSE → unsupported MIME → `webkit_policy_decision_download`; destination via
+`WebKitDownload::decide-destination` (basename-sanitized) to `/home/root/Downloads`, `RMWEB_DOWNLOADS`
+override; toast on finished/failed), tabs-lite (every visited page = an MRU tab, cap 8, `tabs.txt`; the
+start page shows "Open tabs" with per-tab ✕ via `rmweb:close-tab:<url>` — urlDecode'd, decide-policy
+guard extended to a command parser), reader dark theme (`readerDark` in settings, toggled from the start
+page Settings line, `kReaderCssDark` applies on next Reader activation), toast overlay in the chrome
+(`WpeView::setNotice`, 4 s), `urlDecode` in url.h. DIAG: `RMWEB_DEBUG_FIND=term`. Save-debounce generalized
+to 4 stores (history/settings/scroll/tabs). Still NOT implemented: password manager, autofill, history
+search, JS console, user scripts, TLS indicator, progress bar.
+
 The production env is DRY
 in `device/rmweb-env.sh` (sourced by both the launcher and the dev runner `scripts/run-wpeqt-on-device.sh`);
 `scripts/bundle.sh` ships launcher/env/installer/VERSION/icon; user docs in `docs/install.md`. Layer B

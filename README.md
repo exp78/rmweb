@@ -8,6 +8,9 @@ A native **WPE WebKit** web browser for the **reMarkable Paper Pro** e-ink table
 > keyboard, bookmarks/history/settings persisted in the profile dir, HTML start page (`rmweb:` scheme),
 > page/reader zoom, content blocking (WebKit UserContentManager filter), and a no-brick launcher that
 > stops/restores xochitl. E-ink-safe: CPU-only llvmpipe + Skia, ~120–250 ms page turns, low RAM.
+> Implemented (host-tested, on-device verification pending): persistent cookies (sqlite), per-URL
+> scroll restore, in-page find (`/text` in the address bar), downloads to `~/Downloads`, tabs-lite
+> (open-pages switcher on the start page), reader dark theme (start page → Settings).
 > A 2026-07-18 code review ([docs/review-2026-07-18.md](docs/review-2026-07-18.md)) found open
 > security/robustness issues — not release-ready yet.
 
@@ -48,9 +51,8 @@ Full instructions: [`docs/install.md`](docs/install.md)
 ## Roadmap / Planned
 
 Not implemented yet (earlier docs claimed some of these by mistake — see the review above):
-password manager, autofill, tabs, downloads manager, history search, on-device JS console,
-user/content scripts, TLS indicator, persistent cookies, dark/night mode, reading-progress bar,
-performance dashboard, per-URL scroll restore.
+password manager, autofill, history search, on-device JS console, user/content scripts,
+TLS indicator, reading-progress bar, performance dashboard.
 
 ## License
 

@@ -105,6 +105,54 @@ int main() {
     auto hl = loadHistory(dir);
     CHECK(hl.size() == 1); CHECK(hl[0].url == "http://a"); CHECK(hl[0].ts == 100); CHECK(hl[0].title == "A");
 
+    // upsertScroll: insert, update, erase-on-zero, MRU front, cap 200
+    std::vector<ScrollEntry> sc2;
+    upsertScroll(sc2, "http://a", 1200);
+    upsertScroll(sc2, "http://b", 800);
+    CHECK(sc2.size() == 2); CHECK(sc2[0].url == "http://b");      // newest first
+    upsertScroll(sc2, "http://a", 2400);                          // update in place (no move)
+    CHECK(sc2.size() == 2); CHECK(scrollPosFor(sc2, "http://a") == 2400);
+    CHECK(scrollPosFor(sc2, "http://none") == 0);                 // unknown URL -> 0
+    upsertScroll(sc2, "http://a", 0);                             // back at top -> entry dropped
+    CHECK(sc2.size() == 1); CHECK(scrollPosFor(sc2, "http://a") == 0);
+    upsertScroll(sc2, "http://c", -5);                            // negative on a new URL -> ignored
+    CHECK(sc2.size() == 1);
+    for (int i = 0; i < 300; ++i) upsertScroll(sc2, "http://s" + std::to_string(i), i + 1);
+    CHECK(sc2.size() == 200);                                     // capped
+    // scroll.txt round-trip; a hand-edited bogus line (pos<=0) is skipped on load
+    CHECK(saveScroll(dir, sc2));
+    auto sc3 = loadScroll(dir);
+    CHECK(sc3.size() == 200); CHECK(sc3[0].url == sc2[0].url); CHECK(sc3[0].pos == sc2[0].pos);
+    CHECK(detail::atomicWrite(dir + "/scroll.txt", "http://x\t900\nno-tab\nhttp://bad\t0\nhttp://neg\t-3\n"));
+    auto sc4 = loadScroll(dir);
+    CHECK(sc4.size() == 1); CHECK(sc4[0].url == "http://x"); CHECK(sc4[0].pos == 900);
+
+    // upsertTab: insert MRU-first, revisit refreshes title + moves to front, cap 8, removeTab
+    std::vector<Tab> tabs;
+    upsertTab(tabs, "http://a", "A");
+    upsertTab(tabs, "http://b", "B");
+    CHECK(tabs.size() == 2); CHECK(tabs[0].url == "http://b");
+    upsertTab(tabs, "http://a", "A2");                            // revisit -> front + new title
+    CHECK(tabs.size() == 2); CHECK(tabs[0].url == "http://a"); CHECK(tabs[0].title == "A2");
+    upsertTab(tabs, "http://a", "");                              // empty title keeps the old one
+    CHECK(tabs[0].title == "A2");
+    for (int i = 0; i < 12; ++i) upsertTab(tabs, "http://t" + std::to_string(i), "t");
+    CHECK(tabs.size() == 8);                                      // capped
+    CHECK(removeTab(tabs, tabs[3].url)); CHECK(tabs.size() == 7);
+    CHECK(!removeTab(tabs, "http://missing"));
+    CHECK(saveTabs(dir, tabs));
+    auto tabs2 = loadTabs(dir);
+    CHECK(tabs2.size() == 7); CHECK(tabs2[0].url == tabs[0].url); CHECK(tabs2[0].title == tabs[0].title);
+    CHECK(detail::atomicWrite(dir + "/tabs.txt", "http://ok\tT\nno-tab\n"));
+    CHECK(loadTabs(dir).size() == 1);                             // malformed line skipped
+
+    // settings: readerDark round-trip + default
+    Settings sd; sd.readerDark = true;
+    CHECK(saveSettings(dir, sd));
+    CHECK(loadSettings(dir).readerDark);
+    CHECK(detail::atomicWrite(dir + "/settings.txt", "zoom=1.0\n"));
+    CHECK(!loadSettings(dir).readerDark);                         // absent key -> default off
+
     // Duplicate URLs in the store (hand-edited file): loadBookmarks keeps both — no dedupe on
     // load — and toggleBookmark removes only the FIRST match. Current behavior, pinned here.
     CHECK(detail::atomicWrite(dir + "/bookmarks.txt", "http://dup\tFirst\nhttp://dup\tSecond\n"));
