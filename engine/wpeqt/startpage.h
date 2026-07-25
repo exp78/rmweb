@@ -63,7 +63,7 @@ inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
             h += "<div class='tab'><a class='page'";
             if (isSafeLinkUrl(t.url)) h += " href='" + htmlEscape(t.url) + "'";
             h += ">" + htmlEscape(label) + "<span class='u'> \xE2\x80\x94 " + htmlEscape(t.url) + "</span></a>"
-               + "<a class='x' href='rmweb:close-tab:" + htmlEscape(t.url) + "'>\xE2\x9C\x95</a></div>";
+               + "<a class='x' href='rmweb:close-tab:" + htmlEscape(t.url) + "'>\xC3\x97</a></div>";   // × U+00D7 (the device font lacks U+2715)
         }
     }
     h += "<h2>Bookmarks</h2>";
