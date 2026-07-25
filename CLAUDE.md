@@ -180,7 +180,14 @@ whitespace-folded; `field\n<mask>\n<hint>\n<value>`, legacy no-hint answers stil
 settings (`afEmail`/`afUser`/`afName`, debounced `m_settingsSaveSrc`); the next EMPTY field of that kind
 opens the keyboard pre-filled (`fieldFocused(value,masked,suggest)` → `beginFieldEdit` + toast
 "Autofill — edit or press Go"); learning happens in `learnFieldText` off the `fieldTextEntered` wire
-(`m_pendingFieldKind` stashed at emit time).
+(`m_pendingFieldKind` stashed at emit time). **Password store (36ba1de):** per-host logins in
+`passwords.txt` (`host\tuser\tobf`; obf = XOR+hex — OBFUSCATION, not encryption, profile dir is 0700);
+`hostFromUrl` (url.h) keys it. A password commit's JS answers `pw\n<sibling-login>` (first text-ish
+input of `f.form||document` — the password CLONE keeps `.form` since `replaceWith` stays in place);
+`onFieldSet` (now `data=this`; logFieldState still passes nullptr and returns early) upserts via
+`m_lastCommitText` (plaintext of the in-flight commit, cleared right after). Prefill: an EMPTY
+password field on a known host opens the keyboard with the stored password; a User-kind field falls
+back to the stored login. Debounced save = 5th store (`what==4`, `m_pwSaveSrc`).
 
 The production env is DRY
 in `device/rmweb-env.sh` (sourced by both the launcher and the dev runner `scripts/run-wpeqt-on-device.sh`);
