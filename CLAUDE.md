@@ -187,7 +187,11 @@ input of `f.form||document` — the password CLONE keeps `.form` since `replaceW
 `onFieldSet` (now `data=this`; logFieldState still passes nullptr and returns early) upserts via
 `m_lastCommitText` (plaintext of the in-flight commit, cleared right after). Prefill: an EMPTY
 password field on a known host opens the keyboard with the stored password; a User-kind field falls
-back to the stored login. Debounced save = 5th store (`what==4`, `m_pwSaveSrc`).
+back to the stored login. Debounced save = 5th store (`what==4`, `m_pwSaveSrc`). **Reading-progress
+bar (37c6eff):** the pageBy and scroll-restore JS answer `sm=<max scroll of the USED scroller>`;
+onJsDone maps `sy/sm` to a 0..1 fraction (`sm<=40` ⇒ -1 = hide) and emits `readProgressChanged`;
+WpeView paints a 6 px white track + black fill + 1 px separator along the VERY bottom edge — even
+with chrome hidden (reader fullscreen), skipped while editing; `urlChanged` resets it to hidden.
 
 The production env is DRY
 in `device/rmweb-env.sh` (sourced by both the launcher and the dev runner `scripts/run-wpeqt-on-device.sh`);
