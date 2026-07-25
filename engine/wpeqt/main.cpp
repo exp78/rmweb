@@ -256,6 +256,7 @@ Q_SIGNALS:
     void bookmarkedChanged(bool on);               // current page bookmark state changed
     void notice(const QString &text);              // transient toast in the chrome (find results, downloads)
     void fieldFocused(const QString &value, bool masked); // a text field was tapped -> open the keyboard
+    void tlsStateChanged(int state);                 // 0 = http/none, 1 = https ok, 2 = https with cert errors
 
 public Q_SLOTS:
     void start() {
@@ -325,6 +326,7 @@ public Q_SLOTS:
         g_signal_connect(m_view, "notify::title", G_CALLBACK(&WpeEngine::onTitle), this);
         g_signal_connect(m_view, "notify::estimated-load-progress", G_CALLBACK(&WpeEngine::onProgress), this);
         g_signal_connect(m_view, "load-failed-with-tls-errors", G_CALLBACK(&WpeEngine::onTlsError), this);
+        g_signal_connect(m_view, "load-failed", G_CALLBACK(&WpeEngine::onLoadFailed), this);
         g_signal_connect(m_view, "web-process-terminated", G_CALLBACK(&WpeEngine::onWebProcessTerminated), this);
         g_signal_connect(m_view, "decide-policy", G_CALLBACK(+[](WebKitWebView*, WebKitPolicyDecision* dec,
                                            WebKitPolicyDecisionType type, gpointer data) -> gboolean {
@@ -521,13 +523,19 @@ public Q_SLOTS:
     // options) > checkbox/radio (toggle) > link/button (follow). A <label> resolves to its control.
     // Answers the fieldprobe.h line protocol ("none"/"link"/"tick\n.."/"field\n.."); wider probe
     // offsets so small controls and fat-finger taps still land.
-    void tapLink(int x, int y) {
-        marshalToCtx([this, x, y] {
+    void tapLink(int x, int y) { probeWith(x, y, false); }
+    // Long-press peek: same hit-test, but links are NOT followed — the probe answers "peek\n<href>"
+    // so the GUI can toast the target instead. Fields/selects are inert in this mode.
+    void peekLink(int x, int y) { probeWith(x, y, true); }
+    void probeWith(int x, int y, bool peek) {
+        marshalToCtx([this, x, y, peek] {
             if (!m_view) return;
+            m_lastProbePeek = peek;
             const double scale = std::max(0.5, m_dpr * m_zoom);
             const int cx = int(x / scale), cy = int(y / scale);
             gchar *js = g_strdup_printf(
                 "(function(x,y){"
+                "var PEEK=%d;"
                 "var p=[[0,0],[0,-16],[0,16],[-16,0],[16,0],[-32,0],[32,0],[0,-32],[0,32],"
                 "[-16,-16],[16,-16],[-16,16],[16,16],[-40,0],[40,0],[0,-40],[0,40]];"
                 "function isTxt(f){"
@@ -548,6 +556,9 @@ public Q_SLOTS:
                 "if(!e||!e.closest)return null;"
                 "var t=e,lb=t.closest('label');"
                 "if(lb&&lb.control)t=lb.control;"
+                "var a=t.closest('a[href],area[href],[role=link],button');"
+                "if(a&&PEEK)return a.href?('peek\\n'+a.href):null;"
+                "if(!PEEK){"
                 "var f=t.closest('input,textarea,[contenteditable]');"
                 "if(f&&isTxt(f))return field(f);"
                 "var s=t.closest('select');"
@@ -556,20 +567,30 @@ public Q_SLOTS:
                 "return 'tick\\n'+(s.options[s.selectedIndex]?s.options[s.selectedIndex].text:'');}"
                 "var c=t.closest('input[type=checkbox],input[type=radio]');"
                 "if(c&&!c.disabled){c.click();return 'tick\\n'+(c.checked?'on':'off');}"
-                "var a=t.closest('a[href],area[href],[role=link],button');"
                 "if(a){if(a.href){location.href=a.href;return 'link';}"
                 "try{a.click();return 'link';}catch(ex){}}"
                 "var b=t.closest('[onclick],input[type=submit],input[type=button],input[type=reset],input[type=image]');"
                 "if(b){try{b.click();return 'link';}catch(ex){}}"
-                "return null;}"
+                "}return null;}"
                 "for(var i=0;i<p.length;i++){"
                 "var r=probe(document.elementFromPoint(x+p[i][0],y+p[i][1]));"
                 "if(r)return r;}"
                 "return 'none';})(%d,%d)",
-                cx, cy);
-            qCDebug(lcEngine, "[link] probe panel=(%d,%d) css=(%d,%d) dpr=%.2f zoom=%.2f", x, y, cx, cy, m_dpr, m_zoom);
+                peek ? 1 : 0, cx, cy);
+            qCDebug(lcEngine, "[link] probe panel=(%d,%d) css=(%d,%d) dpr=%.2f zoom=%.2f peek=%d", x, y, cx, cy, m_dpr, m_zoom, peek ? 1 : 0);
             webkit_web_view_evaluate_javascript(m_view, js, -1, nullptr, nullptr, m_cancel, &WpeEngine::onTapLink, this);
             g_free(js);
+        });
+    }
+    // Address-bar search (typed words that aren't a URL): matching bookmarks + history rows plus a
+    // web-search link, as a generated results page (load_html — no history entry semantics needed).
+    void searchAndShow(const QString &q) {
+        marshalToCtx([this, q] {
+            if (!m_view) return;
+            const std::string term = q.toStdString();
+            const std::string html = rmweb::buildSearchResults(term,
+                rmweb::searchBookmarks(m_bookmarks, term), rmweb::searchHistory(m_history, term));
+            webkit_web_view_load_html(m_view, html.c_str(), "about:blank");
         });
     }
     // Commit the keyboard text into the last focused field (window.__rmwebField, stashed by the tap
@@ -755,8 +776,17 @@ private:
         const rmweb::TapProbe pr = rmweb::parseTapProbe(out);
         qCDebug(lcEngine, "[link] probe hit=%d", static_cast<int>(pr.hit));
         switch (pr.hit) {
-            case rmweb::TapHit::None:  Q_EMIT self->linkMissed(); break;
+            case rmweb::TapHit::None:                       // peek mode: long-press on empty space = no-op
+                if (!self->m_lastProbePeek) Q_EMIT self->linkMissed();
+                break;
             case rmweb::TapHit::Link:  break;   // the navigation proceeds on its own
+            case rmweb::TapHit::Peek: {          // long-press on a link -> toast its target (truncated)
+                if (pr.value.empty()) break;
+                std::string u = pr.value;
+                if (u.size() > 72) u = u.substr(0, 72) + "\xE2\x80\xA6";   // … (3-byte UTF-8, safe append)
+                Q_EMIT self->notice(QString::fromStdString(u));
+                break;
+            }
             case rmweb::TapHit::Tick:            // checkbox/select changed -> toast the new state
                 if (!pr.value.empty()) Q_EMIT self->notice(QString::fromStdString(pr.value));
                 break;
@@ -1046,11 +1076,12 @@ private:
             // The old page is gone from here on: drop its identity NOW so a scroll completion landing
             // in the commit->finish window isn't recorded against the previous URL (reset at FINISHED).
             self->m_curUrl.clear(); self->m_curTitle.clear(); self->m_curScroll = 0;
-            // TLS state is log-only (no UI consumes it): get_tls_info flags https + cert errors even when
+            // TLS state -> the address-bar lock: get_tls_info flags https + cert errors even when
             // the page still loaded, independent of tls-errors-policy.
             GTlsCertificate *cert = nullptr; GTlsCertificateFlags errs = (GTlsCertificateFlags)0;
             const gboolean secure = webkit_web_view_get_tls_info(view, &cert, &errs);
             qInfo("[tls] secure=%d errs=0x%x", secure, (unsigned)errs);
+            Q_EMIT self->tlsStateChanged(secure ? (errs ? 2 : 1) : 0);
         }
         if (ev == WEBKIT_LOAD_FINISHED) {
             self->m_reloadAttempts = 0;                  // a good load refills the crash auto-reload budget
@@ -1124,6 +1155,40 @@ private:
                                GTlsCertificateFlags, gpointer) {
         qWarning("[tls] cert error: %s", failing_uri ? failing_uri : "?");
         return FALSE;   // don't proceed — WebKit fails the load
+    }
+    // A navigation failed (DNS, refused, timeout — common on the flaky link): replace the dead end
+    // with a styled error page (load_alternate_html does NOT add a history entry; the address bar
+    // keeps the failed URI). Cancelled loads (superseded navigation) are swallowed silently.
+    static gboolean onLoadFailed(WebKitWebView *view, WebKitLoadEvent, gchar *failing_uri,
+                                 GError *error, gpointer) {
+        if (error && g_error_matches(error, WEBKIT_NETWORK_ERROR, WEBKIT_NETWORK_ERROR_CANCELLED))
+            return TRUE;   // superseded navigation — silent (this API has no WebKitLoadError domain)
+        const char *uri = failing_uri ? failing_uri : "";
+        qWarning("[nav] load failed: %s (%s)", uri, (error && error->message) ? error->message : "?");
+        if (!uri[0] || (std::string(uri).rfind("http://", 0) != 0 && std::string(uri).rfind("https://", 0) != 0))
+            return FALSE;
+        const std::string html = buildErrorPage(uri, (error && error->message) ? error->message : "unknown error");
+        webkit_web_view_load_alternate_html(view, html.c_str(), uri, nullptr);
+        return TRUE;
+    }
+    // Error page in the start page's design language (JS-free, e-ink-safe). Retry = the failed URL.
+    static std::string buildErrorPage(const std::string &uri, const std::string &msg) {
+        return
+            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'><title>rmweb</title><style>"
+            "body{font-family:sans-serif;margin:0;padding:90px 64px;color:#000;background:#fff;}"
+            ".glyph{width:120px;height:120px;line-height:116px;text-align:center;border:5px solid #000;"
+            "border-radius:60px;font-size:64px;font-weight:800;margin-bottom:40px;}"
+            "h1{font-size:48px;margin:0 0 16px;}"
+            ".u{color:#666;font-size:28px;word-break:break-all;margin-bottom:10px;}"
+            ".m{color:#888;font-size:26px;margin-bottom:48px;}"
+            "a.retry{display:inline-block;border:4px solid #000;border-radius:16px;padding:22px 44px;"
+            "font-size:32px;font-weight:700;color:#000;text-decoration:none;}"
+            "</style></head><body>"
+            "<div class='glyph'>!</div><h1>Couldn't load the page</h1><div class='u'>" + rmweb::htmlEscape(uri) +
+            "</div><div class='m'>" + rmweb::htmlEscape(msg) + "</div>"
+            "<a class='retry' href='" + rmweb::htmlEscape(uri) + "'>Try again</a>"
+            "</body></html>";
     }
     static void onWebProcessTerminated(WebKitWebView *view, WebKitWebProcessTerminationReason reason, gpointer data) {
         auto *self = static_cast<WpeEngine*>(data);
@@ -1264,6 +1329,7 @@ private:
     std::string m_curUrl, m_curTitle;               // current committed page (for history + bookmark)
     int m_curScroll = 0;                            // last recorded scroll offset of m_curUrl (CSS px)
     bool m_userScrolled = false;                    // a page turn happened on this load (suppress restore)
+    bool m_lastProbePeek = false;                   // the in-flight tap probe is a long-press peek (no linkMissed)
     std::string m_lastFind;                         // last in-page search term (repeat = search_next)
 };
 
@@ -1503,6 +1569,7 @@ public Q_SLOTS:
         m_loadProgress = p; if (step && m_loading) schedule();
     }
     void setRenderFailed(bool v)   { if (v != m_renderFailed) { m_renderFailed = v; schedule(); } }
+    void setTlsState(int s)        { if (s != m_tlsState) { m_tlsState = s; schedule(); } }   // 0 none, 1 https, 2 https+cert errors
     void setRendering(bool v)      { if (v != m_rendering)  { m_rendering  = v; schedule(); } }
     void setAddr(const QString &s) { if (s != m_addr)     { m_addr     = s; schedule(); } }
     void setReaderMode(bool v)     { if (v != m_readerMode)  { m_readerMode  = v; schedule(); } }
@@ -1638,15 +1705,21 @@ private:
             }
         } else if (m_addr.isEmpty()) {
             grey = true;
-            addrText = QStringLiteral("URL, or /text to find in page");
+            addrText = QStringLiteral("URL or search — /text finds in page");
         } else {
             addrText = m_addr;
         }
         p->setPen(grey ? QColor(120, 120, 120) : Qt::black);
         const auto elide = m_editing && !m_editBuf.isEmpty() ? Qt::ElideLeft : Qt::ElideRight;
         const int textRightPad = 14 + clearW;
-        const QString a = p->fontMetrics().elidedText(addrText, elide, int(addrBox.width() - 14 - textRightPad));
-        p->drawText(addrBox.adjusted(14, 0, -textRightPad, 0), Qt::AlignVCenter | Qt::AlignLeft, a);
+        const int lockPad = (!m_editing && m_tlsState > 0) ? 46 : 0;   // TLS lock inside the address box
+        if (lockPad) {
+            p->setPen(Qt::black);
+            iconLock(p, addrBox.left() + 14 + 17, addrBox.center().y(), m_tlsState == 1);
+            p->setPen(grey ? QColor(120, 120, 120) : Qt::black);
+        }
+        const QString a = p->fontMetrics().elidedText(addrText, elide, int(addrBox.width() - 14 - lockPad - textRightPad));
+        p->drawText(addrBox.adjusted(14 + lockPad, 0, -textRightPad, 0), Qt::AlignVCenter | Qt::AlignLeft, a);
         if (m_editing) {
             // Clear button: circle + × (large hit target for finger on e-ink).
             const qreal cx = addrBox.right() - kClearW / 2.0, cy = addrBox.center().y();
@@ -1721,6 +1794,14 @@ private:
         const qreal r = 17;
         p->drawArc(QRectF(cx - r, cy - r, 2 * r, 2 * r), 120 * 16, 300 * 16);   // open at the top
         p->drawLine(QPointF(cx, cy - r - 5), QPointF(cx, cy - 1));              // the "I" through the gap
+    }
+    void iconLock(QPainter *p, qreal cx, qreal cy, bool closed) const {    // TLS padlock; open shackle = cert errors
+        QPen pn = p->pen(); pn.setWidthF(3.5); p->setPen(pn);
+        const qreal bw = 24, bh = 19, by = cy - 1;                          // body sits below center
+        if (closed) p->setBrush(Qt::black); else p->setBrush(Qt::NoBrush);
+        p->drawRoundedRect(QRectF(cx - bw / 2, by, bw, bh), 4, 4);
+        p->setBrush(Qt::NoBrush);                                           // shackle arc above the body
+        p->drawArc(QRectF(cx - 8, by - 15, 16, 17), closed ? 0 : 35 * 16, (closed ? 180 : 145) * 16);
     }
     // --- Vector chrome icons (drawn, not font glyphs -> crisp + font-independent on e-ink). Caller sets pen colour.
     void iconBack(QPainter *p, qreal cx, qreal cy) const { drawArrow(p, cx, cy, -1); }
@@ -1824,6 +1905,7 @@ private:
     static const int kClearW = 72;               // × clear-button zone on the right of the address box
     bool m_chromeOn = true, m_canBack = false, m_canFwd = false, m_loading = false;
     Hit m_pressed = None;                // chrome button currently flashing its pressed state
+    int m_tlsState = 0;                  // 0 = http/none, 1 = https ok, 2 = https with cert errors
     qreal m_loadProgress = 0.0;          // 0..1 estimated load progress (drives the loading badge)
     bool m_renderFailed = false;         // load finished but the page is ~blank (heavy SPA) -> show a notice
     bool m_rendering = false;            // load finished, page compositing on llvmpipe -> show "Rendering…" badge
@@ -1855,6 +1937,7 @@ public:
 Q_SIGNALS:
     void swipe(int dir);     // page turn (+1 next / -1 prev)
     void tap(int x, int y);  // tap at panel px -> touch->mouse bridge -> QtQuick Controls
+    void longPress(int x, int y);  // stationary hold (> tapMaxDwellMs) -> link peek
 public Q_SLOTS:
     void run() {
         int fd = openByName("Elan touch input");
@@ -1944,6 +2027,13 @@ private:
             m_lastSwipeUs = now;
             if (dy < 0) { qCDebug(lcEngine, "[touch] swipe up -> next");   Q_EMIT swipe(+1); }
             else        { qCDebug(lcEngine, "[touch] swipe down -> prev"); Q_EMIT swipe(-1); }
+            return;
+        case Gesture::LongPress:
+            if (editing) return;                                         // no peeking while the keyboard is up
+            if (m_lastTapUs && now - m_lastTapUs < 250000) return;       // same anti-double as a tap
+            m_lastTapUs = now;
+            qCDebug(lcEngine, "[touch] long-press @ %d,%d", x, y);
+            Q_EMIT longPress(x, y);
             return;
         case Gesture::None:
             return;
@@ -2121,16 +2211,22 @@ int main(int argc, char **argv) {
         QObject::connect(&engine, &WpeEngine::bookmarkedChanged, view,
                          [view](bool on){ view->setBookmarked(on); }, Qt::QueuedConnection);
         QObject::connect(&engine, &WpeEngine::renderFailed,      view, &WpeView::setRenderFailed);
+        QObject::connect(&engine, &WpeEngine::tlsStateChanged,   view, &WpeView::setTlsState);
         QObject::connect(&engine, &WpeEngine::renderingChanged, view,
                          [view](bool on){ view->setRendering(on); }, Qt::QueuedConnection);
         // URL entry: the on-screen keyboard's Go (WpeView::urlEntered) -> load it (engine.loadUrl
         // normalizes). "/text" goes to the in-page find instead (repeat "/text" = next match).
+        // Anything that isn't a URL (spaces, no dot) becomes an address-bar SEARCH (local
+        // bookmarks+history results page with a web-search link on top).
         QObject::connect(view, &WpeView::urlEntered, &app, [&engine, view](const QString &u){
             if (u.startsWith(QLatin1Char('/')) && u.size() > 1) {
                 view->forceNextContent();   // the find scroll/highlight must paint promptly
                 engine.findText(u.mid(1));
-            } else {
+            } else if (rmweb::looksLikeUrl(u.toStdString())) {
                 engine.loadUrl(u);
+            } else {
+                view->forceNextContent();   // the results page must paint promptly
+                engine.searchAndShow(u);
             }
         });
         // Engine toasts (find results, downloads) -> the chrome overlay.
@@ -2218,6 +2314,9 @@ int main(int argc, char **argv) {
         // A content tap with no link underneath -> the old behaviour: toggle the chrome (show <-> hide).
         QObject::connect(&engine, &WpeEngine::linkMissed, win ? win : qobject_cast<QObject*>(&app),
             [view]{ view->setChromeOn(!view->chromeOn()); }, Qt::QueuedConnection);
+        // Long-press on a link -> toast its target URL without navigating (peek, read-only probe).
+        QObject::connect(&touchReader, &TouchReader::longPress, win ? win : qobject_cast<QObject*>(&app),
+            [&engine](int x, int y){ engine.peekLink(x, y); }, Qt::QueuedConnection);
         touchThread.start();
 
         // DIAG: GUI event-loop heartbeat. If these "[gui] tick" lines stop, the GUI thread is blocked
@@ -2257,6 +2356,17 @@ int main(int argc, char **argv) {
                 QTimer::singleShot(6000, &app, [&engine, term]{
                     qInfo("[find][dbg] term=%s", qPrintable(term));
                     engine.findText(term);
+                });
+        }
+
+        // DIAG (RMWEB_DEBUG_SEARCH=words): run the address-bar search once after 4 s — shows the
+        // generated results page (local matches + web-search link) without typing. Pair with RMWEB_GRAB_MS.
+        if (qEnvironmentVariableIsSet("RMWEB_DEBUG_SEARCH")) {
+            const QString term = qEnvironmentVariable("RMWEB_DEBUG_SEARCH");
+            if (!term.isEmpty())
+                QTimer::singleShot(4000, &app, [&engine, term]{
+                    qInfo("[search][dbg] term=%s", qPrintable(term));
+                    engine.searchAndShow(term);
                 });
         }
 

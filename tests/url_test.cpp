@@ -25,6 +25,21 @@ int main() {
     CHECK(urlDecode("a%2")                   == "a%2");                  // truncated sequence untouched
     CHECK(urlDecode("%zz")                   == "%zz");                  // invalid hex untouched
     CHECK(urlDecode("")                      == "");
+
+    // looksLikeUrl (address bar: URL vs search query)
+    CHECK(looksLikeUrl("example.com"));                    // bare host
+    CHECK(looksLikeUrl("https://x.org/p"));                // scheme'd
+    CHECK(looksLikeUrl("  ex.com  "));                     // trims first
+    CHECK(!looksLikeUrl("wiki e ink"));                    // spaces -> query
+    CHECK(!looksLikeUrl("localhost"));                     // no dot, no scheme -> query
+    CHECK(!looksLikeUrl(""));                              // empty
+    CHECK(!looksLikeUrl("   "));                           // all-space
+
+    // urlEncode (search URLs)
+    CHECK(urlEncode("wiki e ink") == "wiki%20e%20ink");
+    CHECK(urlEncode("a+b&c")      == "a%2Bb%26c");
+    CHECK(urlEncode("plain-ok_1.~") == "plain-ok_1.~");    // unreserved untouched
+    CHECK(urlEncode("")           == "");
     if (fails == 0) std::printf("url_test: OK\n");
     return fails ? 1 : 0;
 }

@@ -28,7 +28,8 @@ REMOTE_ENV="$(printf '%q ' \
   "RMWEB_PRESENT_DWELL=${RMWEB_PRESENT_DWELL:-}" "RMWEB_DPR=${RMWEB_DPR:-}" \
   "RMWEB_READER_FONT=${RMWEB_READER_FONT:-}" "RMWEB_READER_DIR=${RMWEB_READER_DIR:-}" "RMWEB_UA=${RMWEB_UA:-}" \
   "RMWEB_DEBUG_FIND=${RMWEB_DEBUG_FIND:-}" "RMWEB_DEBUG_PROBE=${RMWEB_DEBUG_PROBE:-}" \
-  "RMWEB_DEBUG_FORM=${RMWEB_DEBUG_FORM:-}" "QT_LOGGING_RULES=${QT_LOGGING_RULES:-}")"
+  "RMWEB_DEBUG_FORM=${RMWEB_DEBUG_FORM:-}" "RMWEB_DEBUG_SEARCH=${RMWEB_DEBUG_SEARCH:-}" \
+  "QT_LOGGING_RULES=${QT_LOGGING_RULES:-}")"
 ssh "$DUSER@$HOST" "$REMOTE_ENV bash -s" <<'EOS'
 set -e
 R=/home/root/rmweb
@@ -84,6 +85,7 @@ if [ "$MODE" = show ]; then
   export RMWEB_DEBUG_FIND    # diagnostic: run an in-page find for this term once after 6 s
   export RMWEB_DEBUG_PROBE   # diagnostic: content tap probe at panel "x,y" once after 4 s
   export RMWEB_DEBUG_FORM    # diagnostic: tap probe + commit text into the focused field ("x,y,text")
+  export RMWEB_DEBUG_SEARCH  # diagnostic: run the address-bar search for these words once after 4 s
   export QT_LOGGING_RULES    # e.g. rmweb.engine.debug=true enables the qCDebug [t]/[perf] traces
   if [ "${SHOW_SECS:-180}" = "0" ]; then
     echo "[device] showing on e-ink until process exits (SHOW_SECS=0) ..."

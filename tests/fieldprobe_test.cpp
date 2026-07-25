@@ -15,6 +15,11 @@ int main() {
     CHECK(parseTapProbe("whatever").hit == TapHit::None);      // unexpected JS answer -> safe fallback
     CHECK(parseTapProbe("link\nx").hit == TapHit::None);        // exact match required
 
+    // peek (long-press): everything after the first \n is the href
+    CHECK(parseTapProbe("peek\nhttps://ex.com/a").hit == TapHit::Peek);
+    CHECK(parseTapProbe("peek\nhttps://ex.com/a").value == "https://ex.com/a");
+    CHECK(parseTapProbe("peek\n").value == "");
+
     // tick: everything after the first \n is the label (labels may contain anything)
     CHECK(parseTapProbe("tick\non").hit == TapHit::Tick);
     CHECK(parseTapProbe("tick\non").value == "on");
