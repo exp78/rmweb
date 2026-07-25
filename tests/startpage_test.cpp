@@ -44,8 +44,15 @@ int main() {
     std::vector<Bookmark> noTitleBm = {{"http://ex.com/notitle", ""}};
     std::vector<HistoryEntry> noTitleH = {{"http://ex.com/h2", "", 5}};
     std::string nt = buildStartPage(noTitleBm, noTitleH);
-    CHECK(has(nt, ">http://ex.com/notitle</a>"));         // bookmark tile label = url
+    CHECK(has(nt, "<span class='n'>http://ex.com/notitle</span>")); // bookmark tile label = url
     CHECK(has(nt, ">http://ex.com/h2<span"));             // history label = url (before the url span)
+
+    // avatar chips: first letter uppercased; multibyte UTF-8 kept whole (never a sliced continuation byte)
+    CHECK(utf8First("alpha") == "A");
+    CHECK(utf8First("") == "?");
+    CHECK(utf8First("\xD0\x91\xD0\xBB\xD0\xBE\xD0\xB3") == "\xD0\x91");   // "Блог" -> "Б"
+    CHECK(urlHost("https://ex.com/path?q=1") == "ex.com");
+    CHECK(has(nt, "<span class='chip'>H</span>"));        // history row chip from the url fallback label
 
     // tabs-lite section: rendered only when tabs exist; page link + close command, both escaped
     CHECK(!has(html, "Open tabs"));                       // no tabs -> no section

@@ -27,6 +27,30 @@ inline bool isSafeLinkUrl(const std::string& url) {
     return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
 }
 
+// First UTF-8 codepoint of s as an uppercase-ish letter chip label (ASCII uppercased, multibyte
+// kept whole — never slice a continuation byte). "?" when empty.
+inline std::string utf8First(const std::string& s) {
+    if (s.empty()) return "?";
+    const unsigned char c = static_cast<unsigned char>(s[0]);
+    size_t n = 1;
+    if ((c & 0x80) == 0) n = 1;
+    else if ((c & 0xE0) == 0xC0) n = 2;
+    else if ((c & 0xF0) == 0xE0) n = 3;
+    else if ((c & 0xF8) == 0xF0) n = 4;
+    if (n > s.size()) n = 1;
+    std::string f = s.substr(0, n);
+    if (n == 1 && f[0] >= 'a' && f[0] <= 'z') f[0] = char(f[0] - 32);
+    return f;
+}
+
+// Domain part of an http(s) URL for the grey subtitle / avatar fallback ("" when unparseable).
+inline std::string urlHost(const std::string& url) {
+    const size_t p = url.find("://");
+    if (p == std::string::npos) return url;
+    const size_t b = p + 3, e = url.find('/', b);
+    return url.substr(b, e == std::string::npos ? std::string::npos : e - b);
+}
+
 // `recent` is the already-trimmed most-recent slice (the caller passes ~15). `tabs` is the
 // tabs-lite session list (MRU first); each row pairs the page link with a "✕" close command.
 // `readerDark` only flips the label of the settings toggle — the theme itself applies on the
@@ -39,30 +63,40 @@ inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'><title>rmweb</title>"
         "<style>"
-        "body{font-family:sans-serif;color:#000;background:#fff;margin:0;padding:40px 48px;}"
-        "h1{font-size:44px;margin:0 0 8px;}"
-        "h2{font-size:30px;margin:40px 0 16px;border-bottom:3px solid #000;padding-bottom:8px;}"
-        ".tiles{display:flex;flex-wrap:wrap;gap:20px;}"
-        ".tile{display:block;border:3px solid #000;border-radius:14px;padding:22px 26px;font-size:30px;"
-        "min-width:280px;text-decoration:none;color:#000;}"
-        ".recent a{display:block;font-size:30px;padding:16px 4px;border-bottom:1px solid #bbb;"
-        "text-decoration:none;color:#000;}"
-        ".tab{display:flex;align-items:stretch;}"
-        ".tab .page{flex:1;}"
-        ".tab .x{display:block;font-size:30px;padding:16px 20px;border-bottom:1px solid #bbb;"
-        "color:#666;text-decoration:none;}"
-        ".u{color:#666;font-size:22px;} .empty{color:#666;font-size:28px;padding:16px 0;}"
-        ".clear{display:inline-block;margin-top:28px;font-size:26px;color:#666;}"
-        "</style></head><body><h1>rmweb</h1>";
+        "*{box-sizing:border-box}"
+        "body{font-family:sans-serif;color:#000;background:#fff;margin:0;padding:52px 60px;}"
+        ".hero{font-size:64px;font-weight:800;letter-spacing:-1px;margin:0;}"
+        ".tag{color:#666;font-size:26px;margin:8px 0 4px;}"
+        "h2{font-size:24px;font-weight:700;letter-spacing:4px;color:#666;margin:48px 0 12px;"
+        "border-bottom:2px solid #000;padding-bottom:10px;}"
+        ".row{display:flex;align-items:center;padding:16px 0;border-bottom:1px solid #ddd;}"
+        "a.page,a.rowlink{display:flex;align-items:center;flex:1;min-width:0;text-decoration:none;color:#000;}"
+        ".t{flex:1;font-size:30px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}"
+        ".u{color:#888;font-size:22px;margin-left:16px;}"
+        ".chip{flex:none;width:56px;height:56px;line-height:56px;text-align:center;background:#000;"
+        "color:#fff;border-radius:12px;font-size:28px;font-weight:700;margin-right:20px;}"
+        ".x{flex:none;color:#666;text-decoration:none;font-size:36px;padding:8px 16px;}"
+        ".tiles{display:flex;flex-wrap:wrap;gap:22px;}"
+        ".tile{display:block;width:208px;border:3px solid #000;border-radius:16px;padding:22px 16px;"
+        "text-decoration:none;color:#000;text-align:center;}"
+        ".tile .av{display:inline-block;width:76px;height:76px;line-height:76px;background:#000;color:#fff;"
+        "border-radius:18px;font-size:38px;font-weight:700;}"
+        ".tile .n{display:block;font-size:26px;margin-top:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}"
+        ".empty{color:#666;font-size:28px;padding:16px 0;}"
+        ".clear{display:inline-block;margin-top:24px;font-size:26px;color:#666;}"
+        "</style></head><body><div class='hero'>rmweb</div>"
+        "<div class='tag'>read the web on e-ink</div>";
     if (!tabs.empty()) {
         // Tabs-lite: the pages this session remembers, newest first. "✕" drops one from the list
         // (rmweb:close-tab:, honoured only from this page — see the decide-policy guard).
         h += "<h2>Open tabs</h2>";
         for (const auto& t : tabs) {
             const std::string label = t.title.empty() ? t.url : t.title;
-            h += "<div class='tab'><a class='page'";
+            h += "<div class='row'><a class='page'";
             if (isSafeLinkUrl(t.url)) h += " href='" + htmlEscape(t.url) + "'";
-            h += ">" + htmlEscape(label) + "<span class='u'> \xE2\x80\x94 " + htmlEscape(t.url) + "</span></a>"
+            h += "><span class='chip'>" + htmlEscape(utf8First(label)) + "</span>"
+               + "<span class='t'>" + htmlEscape(label)
+               + "<span class='u'>" + htmlEscape(urlHost(t.url)) + "</span></span></a>"
                + "<a class='x' href='rmweb:close-tab:" + htmlEscape(t.url) + "'>\xC3\x97</a></div>";   // × U+00D7 (the device font lacks U+2715)
         }
     }
@@ -75,7 +109,8 @@ inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
             const std::string t = b.title.empty() ? b.url : b.title;
             h += "<a class='tile'";
             if (isSafeLinkUrl(b.url)) h += " href='" + htmlEscape(b.url) + "'";
-            h += ">" + htmlEscape(t) + "</a>";
+            h += "><span class='av'>" + htmlEscape(utf8First(t)) + "</span>"
+               + "<span class='n'>" + htmlEscape(t) + "</span></a>";
         }
         h += "</div>";
     }
@@ -83,19 +118,19 @@ inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
     if (recent.empty()) {
         h += "<div class='empty'>Nothing yet.</div>";
     } else {
-        h += "<div class='recent'>";
         for (const auto& e : recent) {
             const std::string t = e.title.empty() ? e.url : e.title;
-            h += "<a";
+            h += "<div class='row'><a class='rowlink'";
             if (isSafeLinkUrl(e.url)) h += " href='" + htmlEscape(e.url) + "'";
-            h += ">" + htmlEscape(t)
-               + "<span class='u'> \xE2\x80\x94 " + htmlEscape(e.url) + "</span></a>";
+            h += "><span class='chip'>" + htmlEscape(utf8First(t)) + "</span>"
+               + "<span class='t'>" + htmlEscape(t)
+               + "<span class='u'>" + htmlEscape(urlHost(e.url)) + "</span></span></a></div>";
         }
-        h += "</div><a class='clear' href='rmweb:clear-history'>Clear recent</a>";
+        h += "<a class='clear' href='rmweb:clear-history'>Clear recent</a>";
     }
-    h += "<h2>Settings</h2><div class='recent'><a href='rmweb:toggle-dark'>Reader theme: ";
+    h += "<h2>Settings</h2><div class='row'><a class='rowlink' href='rmweb:toggle-dark'><span class='t'>Reader theme: ";
     h += readerDark ? "dark" : "light";
-    h += "</a></div></body></html>";
+    h += "</span></a></div></body></html>";
     return h;
 }
 

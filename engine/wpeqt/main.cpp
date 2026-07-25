@@ -1290,6 +1290,7 @@ public:
         // Keyboard: buffer keystrokes, paint once after a short idle (e-ink can't keep up with per-key presents).
         m_kbFlush.setSingleShot(true);
         connect(&m_kbFlush, &QTimer::timeout, this, [this]{
+            m_kbPressed = -1;                                // release the flashed key
             if (m_editing) schedule(/*guardTouch=*/false);   // flush address+keys without re-arming touch blank
         });
         // Content present throttle: heavy SPAs (a heavy news portal etc.) emit NEW frames every ~300ms forever
@@ -1354,6 +1355,32 @@ public:
     bool chromeOn()  const { return m_chromeOn; }
     bool isLoading() const { return m_loading; }
     bool isEditing() const { return m_editing; }
+    // Brief inverted flash on a tapped chrome button — on a ~200 ms-latency panel an instant
+    // acknowledgement is what makes the UI feel responsive. One present now, one to restore.
+    void pressChrome(Hit h) {
+        if (h == None || h == Address || h == AddressClear) return;   // the keyboard opening is feedback enough
+        m_pressed = h;
+        schedule(/*guardTouch=*/false);
+        QTimer::singleShot(180, this, [this]{ m_pressed = None; schedule(/*guardTouch=*/false); });
+    }
+    // Panel-px rect of a chrome control (same layout math as hitChrome), for the pressed overlay.
+    QRectF chromeHitRect(Hit h) const {
+        const qreal w = width();
+        const qreal powerX = w - kPowerW, readerX = powerX - kReaderW, starX = readerX - kStarW;
+        const qreal zInX = starX - kZoomW, zOutX = zInX - kZoomW;
+        switch (h) {
+            case Back:     return QRectF(0, 0, kBackX, kBarH);
+            case Fwd:      return QRectF(kBackX, 0, kFwdX - kBackX, kBarH);
+            case Reload:   return QRectF(kFwdX, 0, kRelX - kFwdX, kBarH);
+            case Home:     return QRectF(kRelX, 0, kHomeW, kBarH);
+            case ZoomOut:  return QRectF(zOutX, 0, kZoomW, kBarH);
+            case ZoomIn:   return QRectF(zInX, 0, kZoomW, kBarH);
+            case Bookmark: return QRectF(starX, 0, kStarW, kBarH);
+            case Reader:   return QRectF(readerX, 0, kReaderW, kBarH);
+            case Power:    return QRectF(powerX, 0, kPowerW, kBarH);
+            default:       return QRectF();
+        }
+    }
     // URL entry: tap address -> empty field + keyboard. Cancel / empty Go keep the previous URL.
     // × in the field clears the typed buffer. Go with non-empty text navigates.
     void beginEdit() {
@@ -1383,6 +1410,7 @@ public:
         m_kbFlush.stop();
         m_editing = false;
         m_editField = false; m_editMasked = false;
+        m_kbPressed = -1;
         g_urlEditing.store(false, std::memory_order_release);
         m_editBuf.clear();
         schedule(/*guardTouch=*/false);
@@ -1390,6 +1418,7 @@ public:
     void clearEditBuf() {
         if (!m_editing || m_editBuf.isEmpty()) return;
         m_editBuf.clear();
+        m_kbPressed = -1;
         m_kbFlush.stop();
         schedule(/*guardTouch=*/false);
     }
@@ -1402,7 +1431,11 @@ public:
             case rmweb::KeyKind::Char:
                 m_editBuf += QString::fromStdString(m_keys[i].insert);
                 if (m_kbShift) { m_kbShift = false; rebuildKeys(); }   // one-shot Shift
-                m_kbFlush.start(kKbFlushMs);                     // buffer; one present after typing pause
+                // Flash the key NOW (inverted) — on a 200 ms-latency panel immediate feedback is
+                // the difference between "responsive" and "did it register?"; kbFlush restores it.
+                m_kbPressed = i;
+                schedule(/*guardTouch=*/false);
+                m_kbFlush.start(kKbFlushMs);
                 return;
             case rmweb::KeyKind::Shift:
                 m_kbShift = !m_kbShift;
@@ -1416,6 +1449,8 @@ public:
                 return;
             case rmweb::KeyKind::Backspace:
                 m_editBuf.chop(1);
+                m_kbPressed = i;
+                schedule(/*guardTouch=*/false);
                 m_kbFlush.start(kKbFlushMs);
                 return;
             case rmweb::KeyKind::Cancel:
@@ -1636,6 +1671,32 @@ private:
         } else { pen(m_readerable); iconReader(p, rcx, cy); }
         pen(true); iconStar(p, starX + kStarW / 2.0, cy, m_bookmarked);
         pen(true); iconPower(p, powerX + kPowerW / 2.0, cy);
+
+        // Pressed-button flash: black rounded chip + the same icon in white, over the normal bar.
+        if (m_pressed != None) {
+            const QRectF r = chromeHitRect(m_pressed).adjusted(6, 6, -6, -6);
+            p->setPen(Qt::NoPen); p->setBrush(Qt::black);
+            p->drawRoundedRect(r, 12, 12);
+            p->setPen(Qt::white); p->setBrush(Qt::NoBrush);
+            const qreal pcx = r.center().x(), pcy = r.center().y();
+            switch (m_pressed) {
+                case Back:     iconBack(p, pcx, pcy); break;
+                case Fwd:      iconFwd(p, pcx, pcy); break;
+                case Reload:   m_loading ? iconStop(p, pcx, pcy) : iconReload(p, pcx, pcy); break;
+                case Home:     iconHome(p, pcx, pcy); break;
+                case Bookmark: iconStar(p, pcx, pcy, m_bookmarked); break;
+                case Reader:   iconReader(p, pcx, pcy); break;
+                case Power:    iconPower(p, pcx, pcy); break;
+                case ZoomOut:
+                case ZoomIn: {
+                    QFont pf = p->font(); pf.setPixelSize(40); pf.setBold(true); p->setFont(pf);
+                    p->drawText(r, Qt::AlignCenter, m_pressed == ZoomOut ? "A-" : "A+");
+                    break;
+                }
+                default: break;
+            }
+            p->setPen(Qt::black); p->setBrush(Qt::NoBrush);
+        }
     }
     void iconHome(QPainter *p, qreal cx, qreal cy) const {                 // a simple house
         QPen pn = p->pen(); pn.setWidthF(4); pn.setJoinStyle(Qt::RoundJoin); p->setPen(pn); p->setBrush(Qt::NoBrush);
@@ -1699,12 +1760,15 @@ private:
         p->fillRect(QRectF(0, kKbTopY, w, h - kKbTopY), Qt::white);
         p->fillRect(QRectF(0, kKbTopY, w, 2), Qt::black);
         QFont kf = p->font(); kf.setPixelSize(44); p->setFont(kf);
-        for (const rmweb::Key &k : m_keys) {
+        for (size_t ki = 0; ki < m_keys.size(); ++ki) {
+            const rmweb::Key &k = m_keys[ki];
             const QRectF r(k.x, k.y, k.w, k.h);
-            // Inverted (black) keys: Go always; Shift while armed; ?123/ABC while the symbols page is on.
+            // Inverted (black) keys: Go always; Shift while armed; ?123/ABC while the symbols page is on;
+            // and the just-tapped key for its ~120 ms flash (e-ink press feedback).
             const bool armed = k.kind == rmweb::KeyKind::Go
                 || (k.kind == rmweb::KeyKind::Shift && m_kbShift)
-                || (k.kind == rmweb::KeyKind::Sym   && m_kbSym);
+                || (k.kind == rmweb::KeyKind::Sym   && m_kbSym)
+                || int(ki) == m_kbPressed;
             if (armed) { p->fillRect(r.adjusted(3, 3, -3, -3), Qt::black); p->setPen(Qt::white); }
             else { p->setPen(Qt::black); p->drawRect(r.adjusted(2, 2, -2, -2)); }
             p->drawText(r, Qt::AlignCenter, QString::fromStdString(k.label));
@@ -1759,6 +1823,7 @@ private:
     static const int kHomeW = 120, kStarW = 100;
     static const int kClearW = 72;               // × clear-button zone on the right of the address box
     bool m_chromeOn = true, m_canBack = false, m_canFwd = false, m_loading = false;
+    Hit m_pressed = None;                // chrome button currently flashing its pressed state
     qreal m_loadProgress = 0.0;          // 0..1 estimated load progress (drives the loading badge)
     bool m_renderFailed = false;         // load finished but the page is ~blank (heavy SPA) -> show a notice
     bool m_rendering = false;            // load finished, page compositing on llvmpipe -> show "Rendering…" badge
@@ -1772,6 +1837,7 @@ private:
     std::vector<rmweb::Key> m_keys;     // keyboard layout, rebuilt on page/Shift change (rebuildKeys)
     bool m_kbShift = false;             // one-shot Shift armed (letters page)
     bool m_kbSym = false;               // symbols page ("?123") is showing
+    int m_kbPressed = -1;               // key index flashing its pressed state (kbFlush releases it)
     static const int kKbTopY = 1340;    // keyboard occupies [kKbTopY, kPanelH) in panel px
 };
 
@@ -2107,7 +2173,9 @@ int main(int argc, char **argv) {
         QObject::connect(&touchReader, &TouchReader::tap, win ? win : qobject_cast<QObject*>(&app),
             [&engine, view](int x, int y) {
                 if (view->isEditing()) { view->handleEditTap(x, y); return; }   // keyboard captures all taps
-                switch (view->hitChrome(x, y)) {
+                const WpeView::Hit ch = view->hitChrome(x, y);
+                view->pressChrome(ch);   // instant inverted flash on the tapped button (ignored for None/Address)
+                switch (ch) {
                     case WpeView::Back:    view->forceNextContent(); engine.goBack();    return;
                     case WpeView::Fwd:     view->forceNextContent(); engine.goForward(); return;
                     case WpeView::Reload:  view->forceNextContent();
