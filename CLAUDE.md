@@ -159,6 +159,21 @@ at 7 s, `logFieldState` read-back at 8.5 s — tag/type/len/conn/attr, password-
 runner. Verified against a local form page: text "John Doe" rendered, password bullets rendered (len=6),
 textarea commit, checkbox toggle + toast "on", radio toggle via label, select one→two + toast "two".
 
+**UI+browser batch (2026-07-25, commits 7c30fdf/4b51426) — start page verified on-device, rest coded + host-tested.**
+Start page redesign (startpage.h): hero wordmark "rmweb" + tagline, letter-spaced section labels, UTF-8-safe
+letter avatars (`utf8First` — кириллица ок), bookmark tiles, grey host sublabels. Press feedback: chrome
+buttons invert for 180 ms (`pressChrome`/`chromeHitRect`/`m_pressed`), pressed key inverts (`m_kbPressed`,
+reset in `m_kbFlush`). Error page: `load-failed` → `buildErrorPage` via `webkit_web_view_load_alternate_html`
+(Retry = failed URL; **this SDK has no `WebKitLoadError` — cancelled loads are `WEBKIT_NETWORK_ERROR_CANCELLED`**).
+TLS padlock in the address bar: `WebKitWebView::tlsStateChanged(int)` 0/1/2 → `WpeView::setTlsState`,
+`iconLock` (filled body = https, open shackle = cert errors). Address-bar search: `looksLikeUrl` (url.h);
+non-URL input → `engine.searchAndShow` → `buildSearchResults` (startpage.h) = DDG link
+`https://html.duckduckgo.com/html/?q=` + local matches via `searchBookmarks`/`searchHistory` (profile.h).
+Long-press link peek: stationary hold >700 ms = `Gesture::LongPress` (TouchReader) → `engine.peekLink` →
+probe with `peek\n<href>` (no navigation) → toast with the URL (≤72 chars + "…"); `TapHit::Peek` in
+fieldprobe.h; `m_lastProbePeek` suppresses linkMissed. Address-bar hint now reads "URL or search — /text
+finds in page". DIAG: `RMWEB_DEBUG_SEARCH=words` (forwarded by the runner).
+
 The production env is DRY
 in `device/rmweb-env.sh` (sourced by both the launcher and the dev runner `scripts/run-wpeqt-on-device.sh`);
 `scripts/bundle.sh` ships launcher/env/installer/VERSION/icon; user docs in `docs/install.md`. Layer B

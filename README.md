@@ -4,13 +4,16 @@ A native **WPE WebKit** web browser for the **reMarkable Paper Pro** e-ink table
 
 > **Status: v0.8.0 — beta.** The primary use case is **reading**; general browsing is basic.
 > Implemented and verified on-device: reader mode (Mozilla Readability, light/dark theme), B2 chrome
-> painted into the frame (with C++ hit-test), touch/pen input via evdev with a phantom-touch guard,
-> on-screen URL keyboard, bookmarks/history/settings persisted in the profile dir, HTML start page
-> (`rmweb:` scheme) with a tabs-lite open-pages switcher, page/reader zoom, content blocking (WebKit
+> painted into the frame (with C++ hit-test and inverted press feedback on every button and key),
+> touch/pen input via evdev with a phantom-touch guard, on-screen URL keyboard, bookmarks/history/
+> settings persisted in the profile dir, a redesigned HTML start page (`rmweb:` scheme) with letter
+> avatars and a tabs-lite open-pages switcher, page/reader zoom, content blocking (WebKit
 > UserContentManager filter), persistent cookies (sqlite — logins survive relaunch), per-URL scroll
 > restore, in-page find (`/text` in the address bar), downloads to `~/Downloads`, form filling (tap a
 > text field → on-screen keyboard with its current value, password masked; tap toggles
-> checkbox/radio and cycles selects), and a no-brick
+> checkbox/radio and cycles selects), styled error pages for failed loads (with Retry), a TLS
+> padlock in the address bar, address-bar search over local bookmarks+history (with a web-search
+> link), long-press link peek (toast with the target URL), and a no-brick
 > launcher that stops/restores xochitl. E-ink-safe: CPU-only llvmpipe + Skia, ~120–250 ms page
 > turns, low RAM.
 > A 2026-07-18 code review ([docs/review-2026-07-18.md](docs/review-2026-07-18.md)) found open
@@ -53,8 +56,8 @@ Full instructions: [`docs/install.md`](docs/install.md)
 ## Roadmap / Planned
 
 Not implemented yet (earlier docs claimed some of these by mistake — see the review above):
-password manager, autofill, history search, on-device JS console, user/content scripts,
-TLS indicator, reading-progress bar, performance dashboard.
+password manager, autofill, on-device JS console, user/content scripts,
+reading-progress bar, performance dashboard.
 
 ## License
 
