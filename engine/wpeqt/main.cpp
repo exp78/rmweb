@@ -94,35 +94,13 @@ extern "C" void crashHandler(int sig) {
     const int n = backtrace(bt, 64);
     char buf[160];
     int len = snprintf(buf, sizeof buf, "\n[CRASH] signal %d (Phase2-hardened) — backtrace (%d frames):\n", sig, n);
-    if (len > 0) write(STDERR_FILENO, buf, (size_t)len < sizeof buf ? (size_t)len : sizeof buf - 1);
+    if (len > 0) { const ssize_t w = write(STDERR_FILENO, buf, (size_t)len < sizeof buf ? (size_t)len : sizeof buf - 1); (void)w; }
     backtrace_symbols_fd(bt, n, STDERR_FILENO);
     len = snprintf(buf, sizeof buf, "[CRASH] PID=%d TID=%d\n", getpid(), gettid());
-    if (len > 0) write(STDERR_FILENO, buf, (size_t)len < sizeof buf ? (size_t)len : sizeof buf - 1);
+    if (len > 0) { const ssize_t w = write(STDERR_FILENO, buf, (size_t)len < sizeof buf ? (size_t)len : sizeof buf - 1); (void)w; }
     signal(sig, SIG_DFL);
     raise(sig);
 }
-
-// A small self-contained test page (no network needed; HTTPS waits on glib-networking). Taller than the
-// 2160 px viewport so there is something to page through; the lines are injected by JS to also exercise JSC.
-static const char *kTestPage =
-    "<html><head><meta charset='utf-8'><style>"
-    "html,body{margin:0;padding:0;font-family:sans-serif;color:#111}"
-    ".bar{height:120px;background:#1565c0;color:#fff;display:flex;align-items:center;"
-        "padding:0 40px;font-size:48px;font-weight:700}"
-    "h1{font-size:64px;margin:40px}"
-    "p{font-size:32px;margin:20px 40px}"
-    ".box{width:300px;height:200px;margin:40px;border-radius:20px;display:inline-block;"
-        "color:#fff;font-size:30px;padding:24px;box-sizing:border-box}"
-    ".r{background:#e53935}.g{background:#2e7d32}"
-    "</style></head><body>"
-    "<div class='bar'>rmweb &mdash; WPE on Qt</div>"
-    "<h1>Hello from WPE WebKit</h1>"
-    "<p>Rendered by WPE (Skia CPU) on a Qt worker thread, software GL. aarch64. Swipe up for next page.</p>"
-    "<div class='box r'>RED</div><div class='box g'>GREEN</div>"
-    "<div id='lines'></div>"
-    "<script>var h='';for(var i=1;i<=60;i++){h+='<p>Line '+i+' &mdash; the quick brown fox jumps over the lazy dog. 0123456789.</p>';}"
-    "document.getElementById('lines').innerHTML=h;</script>"
-    "</body></html>";
 
 // WKContentRuleList (Safari/WebKit content-blocker JSON): drop third-party scripts/media/fonts — i.e. ads,
 // trackers, analytics, and other heavy cross-origin JS — so the interpreter-only JSC isn't swamped. First-
@@ -1446,7 +1424,7 @@ private:
     static int openByName(const char *want) {
         DIR *dir = opendir("/dev/input");
         if (!dir) return -1;
-        struct dirent *e; char path[64], name[256]; int found = -1;
+        struct dirent *e; char path[320], name[256]; int found = -1;  /* path: "/dev/input/" + d_name(255) + NUL */
         while ((e = readdir(dir))) {
             if (strncmp(e->d_name, "event", 5) != 0) continue;
             snprintf(path, sizeof path, "/dev/input/%s", e->d_name);

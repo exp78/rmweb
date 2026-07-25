@@ -9,7 +9,10 @@ cd "$(dirname "$0")/.."
 HOST="${REMARKABLE_HOST:-10.11.99.1}"; DUSER="${REMARKABLE_USER:-${DEVICE_USER:-root}}"   # REMARKABLE_USER (.env) is canonical; DEVICE_USER = legacy fallback
 MODE="${1:-save}"; URL="${2:-}"
 
-scp -q build/rmweb-wpeqt "$DUSER@$HOST:/home/root/rmweb/bin/rmweb-wpeqt"
+# Upload to a temp name, then atomic mv into place: overwriting a RUNNING binary in place fails with
+# ETXTBSY, and a mid-scp disconnect must not leave a half-written binary behind.
+scp -q build/rmweb-wpeqt "$DUSER@$HOST:/home/root/rmweb/bin/.rmweb-wpeqt.new"
+ssh "$DUSER@$HOST" 'mv -f /home/root/rmweb/bin/.rmweb-wpeqt.new /home/root/rmweb/bin/rmweb-wpeqt'
 
 # SHOW_SECS: seconds to leave the app on e-ink (default 180). Use 0 to run until Ctrl-C / kill.
 # Shell-escape every value interpolated into the remote command (run-on-device.sh:13 pattern) —
