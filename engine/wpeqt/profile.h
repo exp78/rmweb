@@ -15,7 +15,9 @@ namespace rmweb {
 
 struct Bookmark { std::string url, title; };
 struct HistoryEntry { std::string url, title; long ts = 0; };
-struct Settings { double zoom = 1.0; int readerFont = 30; std::string ua; };
+struct Settings { double zoom = 1.0; int readerFont = 30; std::string ua; bool readerDark = false; };
+struct ScrollEntry { std::string url; int pos = 0; };   // per-URL reading position (page offset, CSS px)
+struct Tab { std::string url, title; };                 // tabs-lite: one entry per open page, MRU first
 
 // Strip tab/newline/control chars so a value can't corrupt the line-based store.
 inline std::string sanitizeField(const std::string& s) {
@@ -39,6 +41,45 @@ inline void addHistory(std::vector<HistoryEntry>& h, const std::string& url, con
     for (auto it = h.begin(); it != h.end(); ++it) if (it->url == url) { h.erase(it); break; }  // dedupe
     h.insert(h.begin(), HistoryEntry{url, sanitizeField(title), ts});                            // move to front
     if (h.size() > 300) h.resize(300);                                                           // cap
+}
+// Record a reading position (MRU front, cap 200). pos <= 0 = the reader is back at the top of the
+// page -> drop the entry, so a later visit starts at the top instead of jumping to a stale offset.
+inline void upsertScroll(std::vector<ScrollEntry>& v, const std::string& url, int pos) {
+    for (auto it = v.begin(); it != v.end(); ++it) {
+        if (it->url == url) {
+            if (pos > 0) it->pos = pos;
+            else v.erase(it);
+            return;
+        }
+    }
+    if (pos > 0) {
+        v.insert(v.begin(), ScrollEntry{url, pos});
+        if (v.size() > 200) v.resize(200);
+    }
+}
+inline int scrollPosFor(const std::vector<ScrollEntry>& v, const std::string& url) {
+    for (const auto& e : v) if (e.url == url) return e.pos;
+    return 0;
+}
+// Tabs-lite (one shared WebKitWebView, so a "tab" is a remembered page the start page can switch
+// back to): upsert MRU-first with a hard cap of 8; revisiting a URL refreshes its title + position.
+inline void upsertTab(std::vector<Tab>& tabs, const std::string& url, const std::string& title) {
+    for (auto it = tabs.begin(); it != tabs.end(); ++it) {
+        if (it->url == url) {
+            Tab t = *it;
+            if (!title.empty()) t.title = sanitizeField(title);
+            tabs.erase(it);
+            tabs.insert(tabs.begin(), t);
+            return;
+        }
+    }
+    tabs.insert(tabs.begin(), Tab{url, sanitizeField(title)});
+    if (tabs.size() > 8) tabs.resize(8);
+}
+inline bool removeTab(std::vector<Tab>& tabs, const std::string& url) {
+    for (auto it = tabs.begin(); it != tabs.end(); ++it)
+        if (it->url == url) { tabs.erase(it); return true; }
+    return false;
 }
 
 // --- line-based file I/O ------------------------------------------------------
@@ -125,6 +166,34 @@ inline bool saveHistory(const std::string& dir, const std::vector<HistoryEntry>&
     for (const auto& e : h) s += std::to_string(e.ts) + "\t" + sanitizeField(e.url) + "\t" + sanitizeField(e.title) + "\n";
     return detail::atomicWrite(dir + "/history.txt", s);
 }
+inline std::vector<ScrollEntry> loadScroll(const std::string& dir) {
+    std::vector<ScrollEntry> out;
+    for (const auto& ln : detail::readLines(dir + "/scroll.txt")) {
+        auto t = ln.find('\t'); if (t == std::string::npos) continue;
+        const int pos = std::atoi(ln.substr(t + 1).c_str());
+        if (pos <= 0) continue;                                   // corrupt/stale -> skip
+        out.push_back(ScrollEntry{ln.substr(0, t), pos});
+    }
+    return out;
+}
+inline bool saveScroll(const std::string& dir, const std::vector<ScrollEntry>& v) {
+    std::string s;
+    for (const auto& e : v) s += sanitizeField(e.url) + "\t" + std::to_string(e.pos) + "\n";
+    return detail::atomicWrite(dir + "/scroll.txt", s);
+}
+// tabs.txt shares the bookmarks.txt line format (url \t title).
+inline std::vector<Tab> loadTabs(const std::string& dir) {
+    std::vector<Tab> out;
+    for (const auto& ln : detail::readLines(dir + "/tabs.txt")) {
+        auto t = ln.find('\t'); if (t == std::string::npos) continue;
+        out.push_back(Tab{ln.substr(0, t), ln.substr(t + 1)});
+    }
+    return out;
+}
+inline bool saveTabs(const std::string& dir, const std::vector<Tab>& tabs) {
+    std::string s; for (const auto& t : tabs) s += sanitizeField(t.url) + "\t" + sanitizeField(t.title) + "\n";
+    return detail::atomicWrite(dir + "/tabs.txt", s);
+}
 inline Settings loadSettings(const std::string& dir) {
     Settings s;
     for (const auto& ln : detail::readLines(dir + "/settings.txt")) {
@@ -133,6 +202,7 @@ inline Settings loadSettings(const std::string& dir) {
         if (k == "zoom") s.zoom = std::strtod(v.c_str(), nullptr);
         else if (k == "readerFont") s.readerFont = std::atoi(v.c_str());
         else if (k == "ua") s.ua = sanitizeField(v);
+        else if (k == "readerDark") s.readerDark = (v == "1");
     }
     if (!(s.zoom >= 0.5 && s.zoom <= 3.0)) s.zoom = 1.0;                 // clamp corrupt values
     if (!(s.readerFont >= 14 && s.readerFont <= 96)) s.readerFont = 30;
@@ -141,7 +211,8 @@ inline Settings loadSettings(const std::string& dir) {
 inline bool saveSettings(const std::string& dir, const Settings& s) {
     std::string out = "zoom=" + std::to_string(s.zoom) + "\n"
                     + "readerFont=" + std::to_string(s.readerFont) + "\n"
-                    + "ua=" + sanitizeField(s.ua) + "\n";
+                    + "ua=" + sanitizeField(s.ua) + "\n"
+                    + "readerDark=" + std::string(s.readerDark ? "1" : "0") + "\n";
     return detail::atomicWrite(dir + "/settings.txt", out);
 }
 

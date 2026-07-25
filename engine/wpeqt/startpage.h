@@ -27,9 +27,14 @@ inline bool isSafeLinkUrl(const std::string& url) {
     return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
 }
 
-// `recent` is the already-trimmed most-recent slice (the caller passes ~15).
+// `recent` is the already-trimmed most-recent slice (the caller passes ~15). `tabs` is the
+// tabs-lite session list (MRU first); each row pairs the page link with a "✕" close command.
+// `readerDark` only flips the label of the settings toggle — the theme itself applies on the
+// next Reader activation.
 inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
-                                  const std::vector<HistoryEntry>& recent) {
+                                  const std::vector<HistoryEntry>& recent,
+                                  const std::vector<Tab>& tabs = {},
+                                  bool readerDark = false) {
     std::string h =
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'><title>rmweb</title>"
@@ -42,9 +47,26 @@ inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
         "min-width:280px;text-decoration:none;color:#000;}"
         ".recent a{display:block;font-size:30px;padding:16px 4px;border-bottom:1px solid #bbb;"
         "text-decoration:none;color:#000;}"
+        ".tab{display:flex;align-items:stretch;}"
+        ".tab .page{flex:1;}"
+        ".tab .x{display:block;font-size:30px;padding:16px 20px;border-bottom:1px solid #bbb;"
+        "color:#666;text-decoration:none;}"
         ".u{color:#666;font-size:22px;} .empty{color:#666;font-size:28px;padding:16px 0;}"
         ".clear{display:inline-block;margin-top:28px;font-size:26px;color:#666;}"
-        "</style></head><body><h1>rmweb</h1><h2>Bookmarks</h2>";
+        "</style></head><body><h1>rmweb</h1>";
+    if (!tabs.empty()) {
+        // Tabs-lite: the pages this session remembers, newest first. "✕" drops one from the list
+        // (rmweb:close-tab:, honoured only from this page — see the decide-policy guard).
+        h += "<h2>Open tabs</h2>";
+        for (const auto& t : tabs) {
+            const std::string label = t.title.empty() ? t.url : t.title;
+            h += "<div class='tab'><a class='page'";
+            if (isSafeLinkUrl(t.url)) h += " href='" + htmlEscape(t.url) + "'";
+            h += ">" + htmlEscape(label) + "<span class='u'> \xE2\x80\x94 " + htmlEscape(t.url) + "</span></a>"
+               + "<a class='x' href='rmweb:close-tab:" + htmlEscape(t.url) + "'>\xE2\x9C\x95</a></div>";
+        }
+    }
+    h += "<h2>Bookmarks</h2>";
     if (bookmarks.empty()) {
         h += "<div class='empty'>No bookmarks yet \xE2\x80\x94 tap \xE2\x98\x85 on a page to save it.</div>";
     } else {
@@ -71,7 +93,9 @@ inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
         }
         h += "</div><a class='clear' href='rmweb:clear-history'>Clear recent</a>";
     }
-    h += "</body></html>";
+    h += "<h2>Settings</h2><div class='recent'><a href='rmweb:toggle-dark'>Reader theme: ";
+    h += readerDark ? "dark" : "light";
+    h += "</a></div></body></html>";
     return h;
 }
 

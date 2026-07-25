@@ -15,4 +15,24 @@ inline std::string normalizeUrl(std::string s) {
     return s;
 }
 
+// Percent-decode ("a%20b" -> "a b") — used on rmweb: command payloads, whose non-ASCII bytes the
+// WebKit URL parser percent-encodes when resolving the start-page link. '+' stays literal (these
+// are URL bytes, not form data); an invalid/truncated % sequence passes through untouched.
+inline std::string urlDecode(const std::string& s) {
+    auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::string o; o.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        const int hi = (i + 1 < s.size()) ? hex(s[i + 1]) : -1;
+        const int lo = (i + 2 < s.size()) ? hex(s[i + 2]) : -1;
+        if (s[i] == '%' && hi >= 0 && lo >= 0) { o += char(hi * 16 + lo); i += 2; }
+        else o += s[i];
+    }
+    return o;
+}
+
 } // namespace rmweb
