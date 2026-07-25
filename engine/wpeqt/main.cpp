@@ -257,6 +257,7 @@ Q_SIGNALS:
     void notice(const QString &text);              // transient toast in the chrome (find results, downloads)
     void fieldFocused(const QString &value, bool masked, const QString &suggest); // a text field was tapped -> open the keyboard (suggest = autofill prefill for an empty field, may be empty)
     void tlsStateChanged(int state);                 // 0 = http/none, 1 = https ok, 2 = https with cert errors
+    void readProgressChanged(double frac);           // reading position 0..1 of the scrollable page; -1 = hide (page doesn't scroll)
 
 public Q_SLOTS:
     void start() {
@@ -761,7 +762,8 @@ private:
                 "var m=document.getElementById('__r');if(!m){m=document.createElement('span');m.id='__r';"
                 "m.style.cssText='position:fixed;left:-9999px;top:0';document.body.appendChild(m);}"
                 "m.textContent=((+m.textContent||0)+1);"
-                "return 'sy='+(sc?sc.scrollTop:se.scrollTop)+' ih='+innerHeight+' sh='+se.scrollHeight+' used='+used;"
+                "return 'sy='+(sc?sc.scrollTop:se.scrollTop)+' ih='+innerHeight+' sh='+se.scrollHeight"
+                "+' sm='+Math.round(sc?(sc.scrollHeight-sc.clientHeight):Math.max(0,se.scrollHeight-innerHeight))+' used='+used;"
                 "})(%d)",
                 static_cast<int>(m->dy));
             webkit_web_view_evaluate_javascript(self->m_view, js, -1, nullptr, nullptr, self->m_cancel,
@@ -792,13 +794,22 @@ private:
         qCDebug(lcEngine, "[t] page JS done %s @%.0fms", dbg.c_str(), msSince(self->m_startUs));
         // The scroll JS answers "sy=<n> ..." — remember it as the reading position for the current
         // URL (debounced write), so a later visit can resume where reading stopped.
-        if (!self->m_curUrl.empty()) {
-            const size_t p = dbg.find("sy=");
-            if (p != std::string::npos) {
-                const int pos = atoi(dbg.c_str() + p + 3);
+        const size_t p = dbg.find("sy=");
+        if (p != std::string::npos) {
+            const int pos = atoi(dbg.c_str() + p + 3);
+            if (!self->m_curUrl.empty()) {
                 self->m_curScroll = pos;
                 rmweb::upsertScroll(self->m_scroll, self->m_curUrl, pos);
                 self->queueSave(&self->m_scrollSaveSrc, 2);
+            }
+            // Reading-progress bar: sm = max scroll of the USED scroller (pageBy/restore answer it);
+            // <=40 px of scroll range = the page doesn't really scroll -> hide the bar (-1).
+            const size_t sm = dbg.find(" sm=");
+            if (sm != std::string::npos) {
+                const int maxY = atoi(dbg.c_str() + sm + 4);
+                double frac = -1.0;
+                if (maxY > 40) frac = std::min(1.0, std::max(0.0, double(pos) / maxY));
+                Q_EMIT self->readProgressChanged(frac);
             }
         }
     }
@@ -957,7 +968,8 @@ private:
                     "var m=document.getElementById('__r');if(!m){m=document.createElement('span');m.id='__r';"
                     "m.style.cssText='position:fixed;left:-9999px;top:0';document.body.appendChild(m);}"
                     "m.textContent=((+m.textContent||0)+1);"
-                    "return 'sy='+(sc?sc.scrollTop:se.scrollTop);"
+                    "return 'sy='+(sc?sc.scrollTop:se.scrollTop)"
+                    "+' sm='+Math.round(sc?(sc.scrollHeight-sc.clientHeight):Math.max(0,se.scrollHeight-innerHeight));"
                     "})(%d)", msg->pos);
                 webkit_web_view_evaluate_javascript(self->m_view, js, -1, nullptr, nullptr, self->m_cancel,
                                                     &WpeEngine::onJsDone, self);
@@ -1453,6 +1465,7 @@ public:
         else if (m_renderFailed)                   drawRenderNotice(p, w, h);
         else if (m_rendering && !m_renderFailed)   drawRenderingBadge(p, w);
         if (!m_notice.isEmpty())                 drawNoticeToast(p, w);   // toast overlays content, not chrome
+        if (m_readProgress >= 0.0 && !m_editing) drawReadProgress(p, w, h);  // bottom edge, even in reader-fullscreen
         if (!m_chromeOn && !m_editing) return;  // reader-fullscreen: hide chrome (an open keyboard
                                                 //  — e.g. a tapped form field — still needs the bar)
         drawChromeBar(p, w);
@@ -1648,6 +1661,9 @@ public Q_SLOTS:
         m_noticeTimer.start(kNoticeMs);          // re-arms if a second notice lands quickly
         schedule();
     }
+    void setReadProgress(double f) {             // reading position 0..1; -1 hides the bar
+        if (f != m_readProgress) { m_readProgress = f; schedule(); }
+    }
 protected:
     void itemChange(ItemChange ch, const ItemChangeData &d) override {
         if (ch == ItemSceneChange && d.window)   // frameSwapped fires after the panel present returns
@@ -1707,8 +1723,21 @@ private:
         p->setPen(Qt::NoPen); p->setBrush(Qt::black);
         p->drawRoundedRect(r, 16, 16);
         p->setPen(Qt::white); p->setBrush(Qt::NoBrush);
+
         p->drawText(r, Qt::AlignCenter, m_notice);
         p->setPen(Qt::black);
+    }
+    // Reading-progress bar (KOReader-style): a thin track along the very bottom edge, black fill =
+    // fraction read. Painted even with the chrome hidden (reader fullscreen); skipped while the
+    // keyboard is up (it covers the bottom edge anyway).
+    void drawReadProgress(QPainter *p, qreal w, qreal h) const {
+        const qreal th = 6;
+        p->setPen(Qt::NoPen);
+        p->setBrush(Qt::white);
+        p->drawRect(QRectF(0, h - th, w, th));                            // track
+        p->setBrush(Qt::black);
+        p->drawRect(QRectF(0, h - th, w * std::min(1.0, m_readProgress), th));   // fill
+        p->drawRect(QRectF(0, h - th - 1, w, 1));                         // 1 px separator from content
     }
     // Load finished but the page rendered ~nothing (a heavy JS app the CPU can't run). "(!)" + two lines.
     void drawRenderNotice(QPainter *p, qreal w, qreal h) const {
@@ -1963,6 +1992,7 @@ private:
     QTimer m_contentFlush;                       // delayed present of throttled SPA frames
     QTimer m_noticeTimer;                        // toast auto-clear (find results, downloads)
     QString m_notice;                            // toast text ("" = hidden)
+    double m_readProgress = -1.0;                // reading position 0..1; <0 = bar hidden
     static const int kNoticeMs = 4000;           // toast on-screen time
     // chrome state, painted into the frame (reader-first: shown on launch, hidden by a content tap).
     // Chrome layout (panel 1620): left cluster | wide address box | A- A+ ★ Reader Power
@@ -2279,6 +2309,9 @@ int main(int argc, char **argv) {
                          [view](bool on){ view->setBookmarked(on); }, Qt::QueuedConnection);
         QObject::connect(&engine, &WpeEngine::renderFailed,      view, &WpeView::setRenderFailed);
         QObject::connect(&engine, &WpeEngine::tlsStateChanged,   view, &WpeView::setTlsState);
+        QObject::connect(&engine, &WpeEngine::readProgressChanged, view, &WpeView::setReadProgress);
+        QObject::connect(&engine, &WpeEngine::urlChanged, view,   // a new page resets the bar until
+                         [view]{ view->setReadProgress(-1); });   // the first scroll/restore answers
         QObject::connect(&engine, &WpeEngine::renderingChanged, view,
                          [view](bool on){ view->setRendering(on); }, Qt::QueuedConnection);
         // URL entry: the on-screen keyboard's Go (WpeView::urlEntered) -> load it (engine.loadUrl
