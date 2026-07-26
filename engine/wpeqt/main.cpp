@@ -918,8 +918,10 @@ private:
 
     // After a load finishes, wait a grace period (let a slow SPA populate) then check whether the page rendered
     // any visible content — a heavy client-side app finishes loading but builds ~nothing on the CPU interpreter.
-    // m_loadGen invalidates the check if the user navigated away during the grace period.
-    static constexpr int kRenderTimeoutMs = 13000;  // after load-start: time to give a heavy page to paint
+    // m_loadGen invalidates the check if the user navigated away during the grace period. The timer RE-ARMS
+    // itself while the load is still in progress: on a slow site (15 s+ of network) a fixed 13 s-from-start
+    // deadline would otherwise judge the page "blank" while bytes are still arriving (rbc.ru false positive).
+    static constexpr int kRenderTimeoutMs = 13000;  // after load-start (re-armed while loading): time to paint
     static constexpr int kBlankSamples = 8;         // fewer than this many non-white frame samples = ~blank
     struct RenderCheckMsg { WpeEngine *self; guint gen; };
     void scheduleRenderCheck() {
@@ -928,11 +930,14 @@ private:
         g_source_set_callback(s, [](gpointer d) -> gboolean {
             auto *msg = static_cast<RenderCheckMsg*>(d);
             WpeEngine *self = msg->self;
+            if (self->m_loadGen != msg->gen) return G_SOURCE_REMOVE;
+            // Still loading (slow network): don't judge yet — re-check after another interval.
+            if (self->m_loadInProgress) return G_SOURCE_CONTINUE;
             // Same load, not in reader: if the latest web frame is essentially WHITE, the page rendered no
             // visible content (a heavy SPA whose JS the CPU can't run). Flag it so the shell shows a notice.
             // Pixel-based (not DOM): an SPA shell has DOM nodes but paints nothing, so DOM heuristics lie.
             // A later non-white frame auto-clears the flag in onBuffer (a slow-but-rendering site recovers).
-            if (self->m_loadGen == msg->gen && !self->m_readerMode) {
+            if (!self->m_readerMode) {
                 const bool blank = self->m_lastNonWhite < kBlankSamples;
                 qInfo("[render] nonWhite=%d blank=%d", self->m_lastNonWhite, blank);
                 self->m_renderFailedState = blank;
@@ -1127,6 +1132,7 @@ private:
         auto *self = static_cast<WpeEngine*>(data);
         if (ev == WEBKIT_LOAD_STARTED) {
             self->m_loadGen++;                          // invalidate any pending render-check from a prior load
+            self->m_loadInProgress = true;              // the blank-check re-arms while this is true
             self->m_renderFailedState = false;
             self->m_lastNonWhite = 0;                   // no frames yet => blank until onBuffer proves otherwise
             self->m_userScrolled = false;               // re-arm scroll-restore suppression for the new load
@@ -1159,6 +1165,7 @@ private:
             Q_EMIT self->tlsStateChanged(secure ? (errs ? 2 : 1) : 0);
         }
         if (ev == WEBKIT_LOAD_FINISHED) {
+            self->m_loadInProgress = false;              // the blank-check may now judge
             self->m_reloadAttempts = 0;                  // a good load refills the crash auto-reload budget
             Q_EMIT self->loadingChanged(false);
             self->checkReaderable();                     // article? -> enable/disable the Reader button
@@ -1235,9 +1242,11 @@ private:
     // with a styled error page (load_alternate_html does NOT add a history entry; the address bar
     // keeps the failed URI). Cancelled loads (superseded navigation) are swallowed silently.
     static gboolean onLoadFailed(WebKitWebView *view, WebKitLoadEvent, gchar *failing_uri,
-                                 GError *error, gpointer) {
+                                 GError *error, gpointer data) {
         if (error && g_error_matches(error, WEBKIT_NETWORK_ERROR, WEBKIT_NETWORK_ERROR_CANCELLED))
             return TRUE;   // superseded navigation — silent (this API has no WebKitLoadError domain)
+        auto *self = static_cast<WpeEngine*>(data);
+        self->m_loadInProgress = false;   // failed load never emits LOAD_FINISHED — un-block the blank-check
         const char *uri = failing_uri ? failing_uri : "";
         qWarning("[nav] load failed: %s (%s)", uri, (error && error->message) ? error->message : "?");
         if (!uri[0] || !rmweb::isSafeLinkUrl(uri))   // only http(s) gets an error page
@@ -1379,6 +1388,7 @@ private:
     int m_lastNonWhite = 9999; // non-white grid samples in the latest frame (low => ~blank => render failed)
     bool m_renderFailedState = false; // currently flagged blank (so a later content frame can auto-clear it)
     int m_reloadAttempts = 0; // WebProcess-crash auto-reload budget (reset on a successful load)
+    bool m_loadInProgress = false;   // LOAD_STARTED..FINISHED/failed — the blank-check re-arms while true
     guint m_loadGen = 0;           // bumped on each load start -> a stale render-check (grace timer) is skipped
     gint64 m_loadStartUs = 0;      // monotonic time of the current LOAD_STARTED (for [perf] ms offsets)
     bool m_firstContentLogged = false; // true once [perf] first-content has been emitted for this load
