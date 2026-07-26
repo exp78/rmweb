@@ -93,6 +93,10 @@ facts, all verified on-device and written up in `docs/research/` (4 sourced docs
   miscompiles / state corrupts). So all JIT tiers are broken — likely a JSC codegen issue for this
   toolchain (cortex-a53 + `-mbranch-protection`/PAC, or pointer compression). Keep the interpreter; lighten
   heavy pages via content-blocking instead. Toggles: `RMWEB_JIT=1`, `RMWEB_JSC_OPTS="JSC_x=y ..."`.
+  **Measured 2026-07-26:** a heavy news portal on the interpreter — load finished @40s (network FINE, WPENetworkProcess
+  idle), then WPEWebProcess pegged 93–98% CPU for 150s straight and the page NEVER hydrates past its SSR
+  skeleton. Heavy SPAs are CPU-bound, not network-bound; 150s is not "slow", it's "effectively never".
+  Wikipedia-class (server-rendered, light JS) works great. This is the platform ceiling, not a shell bug.
 - **Device:** a process **segfault reboots the device** (watchdog/memfault, ~100 s) — logs go to `/home/root` to
   survive; a SIGSEGV backtrace handler is compiled in (`-rdynamic`).
 **Phase 4 "~6 s per page-turn" SOLVED (2026-06-26):** the culprit was **Mesa softpipe** — the single-threaded,
