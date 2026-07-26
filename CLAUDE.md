@@ -130,10 +130,12 @@ the chrome (`WpeView::setNotice`, 4 s), `urlDecode` in url.h. DIAG: `RMWEB_DEBUG
 now also forwards `QT_LOGGING_RULES`. Save-debounce generalized to 4 stores (history/settings/scroll/tabs).
 **SIGTERM→`_Exit(0)`** (termHandler): the runner's timed kill used to land in the crash-prone WebKit
 teardown and the watchdog REBOOTED the device ~1–2 min later (3 reboots this session); with the handler
-no post-kill reboots. On-device verified: cookies.sqlite written, `[scroll] restore y=1191` (+ visual),
+reboots are much rarer but NOT zero — the 2026-07-26 verification session still saw the device reboot
+after ~30% of timed kills (xochitl stopped, heavy WebKit state). If ssh drops mid-session: wait
+~40–60 s, the device comes back; grabs in /home/root/rmweb survive the reboot. On-device verified: cookies.sqlite written, `[scroll] restore y=1191` (+ visual),
 find highlights + toast, `Saved testfile.zip` in ~/Downloads, dark reader grab, Open tabs × glyphs.
-Still NOT implemented: password manager, autofill, history search, JS console, user scripts, TLS indicator,
-progress bar. Known quirk: the restore JS targets the same inner-scroller detection as pageBy (Wikipedia
+Still NOT implemented: JS console, user scripts (password manager, autofill, history search, TLS
+indicator and the progress bar landed in the later batches below). Known quirk: the restore JS targets the same inner-scroller detection as pageBy (Wikipedia
 scrolls an inner div, not the document).
 
 **Phase 7 Batch 2, form filling (2026-07-25) — VERIFIED ON-DEVICE.** One tap probe classifies everything
@@ -159,7 +161,9 @@ at 7 s, `logFieldState` read-back at 8.5 s — tag/type/len/conn/attr, password-
 runner. Verified against a local form page: text "John Doe" rendered, password bullets rendered (len=6),
 textarea commit, checkbox toggle + toast "on", radio toggle via label, select one→two + toast "two".
 
-**UI+browser batch (2026-07-25, commits 7c30fdf/4b51426) — start page verified on-device, rest coded + host-tested.**
+**UI+browser batch (2026-07-25, commits 7c30fdf/4b51426) — FULLY VERIFIED on-device 2026-07-26**
+(start, error-page+Retry, TLS padlock, address-bar search, autofill learn→prefill, password
+learn→prefill, reading-progress bar; grabs in build/verify/).
 Start page redesign (startpage.h): hero wordmark "rmweb" + tagline, letter-spaced section labels, UTF-8-safe
 letter avatars (`utf8First` — кириллица ок), bookmark tiles, grey host sublabels. Press feedback: chrome
 buttons invert for 180 ms (`pressChrome`/`chromeHitRect`/`m_pressed`), pressed key inverts (`m_kbPressed`,
@@ -193,14 +197,22 @@ bar (37c6eff):** the pageBy and scroll-restore JS answer `sm=<max scroll of the 
 onJsDone maps `sy/sm` to a 0..1 fraction (`sm<=40` ⇒ -1 = hide) and emits `readProgressChanged`;
 WpeView paints a 6 px white track + black fill + 1 px separator along the VERY bottom edge — even
 with chrome hidden (reader fullscreen), skipped while editing; `urlChanged` resets it to hidden.
-Review (6376daa) + simplify (baecf4b) checkpoints done (review findings fixed: no self-present in
-setReadProgress, progress gated on m_curUrl, hint includes f.type, long-press hit-tests chrome,
-looksLikeUrl accepts localhost/host:port). **Batch verification:** `scripts/verify-on-device.sh` —
-one command runs start/error-page/search/TLS grabs, spins a local form+long page on
-10.11.99.5:8765 (steps skipped when the USB link IP is absent) for autofill learn→prefill and
-password learn→prefill (probe coords assume RMWEB_DPR=2), auto-page progress-bar grab; pulls
-build/verify/<step>.{png,log} with log-grep hints. Deferred till after on-device verification:
-chrome layout/icon dedup, start-page CSS sharing (touch geometry + visuals, must be eyeballed).
+Review (6376daa) + simplify (baecf4b, b59b1e8 — chrome layout/icon dedup done) checkpoints done
+(review findings fixed: no self-present in setReadProgress, progress gated on m_curUrl, hint includes
+f.type, long-press hit-tests chrome, looksLikeUrl accepts localhost/host:port). **Batch verification:**
+`scripts/verify-on-device.sh` — one command runs start/error-page/search/TLS grabs, spins a local
+form+long page on 10.11.99.5:8765 (steps skipped when the USB link IP is absent) for autofill
+learn→prefill and password learn→prefill, auto-page progress-bar grab; pulls
+build/verify/<step>.{png,log} with log-grep hints. Verification fixes (c2d6c90): `onUri` ignores
+`about:blank` (load_html search page must not clobber the typed query in the bar; the
+RMWEB_DEBUG_SEARCH diag path now mirrors urlEntered: setAddr(term) + hide progress);
+RMWEB_DEBUG_FORM feeds the learner (`engine.learnFieldText` after `setFieldText`). **Verify gotchas:**
+probe coords = css px * dpr * **zoom** — the script pins `zoom=1.0` in the device profile first (a
+leftover zoom silently shifts every hit target); the auto-pager ALTERNATES direction (down @4s,
+up @8s) so grab @6s, not ≥8s; a grab can come out pure black mid-refresh (transient — just retake);
+qCDebug(lcEngine) lines ([t] pageBy / page JS done sy=) are compiled OUT of the device log — autopage
+proof is the grab, not the log. Start-page CSS sharing stayed deferred (touch geometry + visuals,
+must be eyeballed).
 
 The production env is DRY
 in `device/rmweb-env.sh` (sourced by both the launcher and the dev runner `scripts/run-wpeqt-on-device.sh`);
