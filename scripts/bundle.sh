@@ -54,9 +54,10 @@ cp -a build/wpe_render              "$B/bin/"
 [ -f build/rmweb-wpeqt ] && cp -a build/rmweb-wpeqt "$B/bin/" \
   || echo "[bundle] WARN: build/rmweb-wpeqt missing — run scripts/build-wpeqt.sh (a release bundle needs the app binary)"
 # Phase 5 — installable app: on-device launcher, shared env, installer, version stamp, and (layer B) the
-# rm-appload descriptor + icon. These live under device/ in the repo and ship at the bundle root.
-cp -a device/rmweb device/rmweb-env.sh device/install.sh "$B/"
-chmod +x "$B/rmweb" "$B/install.sh"
+# AppLoad/XOVI external-app manifest + icon + entry wrapper. These live under device/ in the repo and
+# ship at the bundle root (the appload/ subdir ships as-is).
+cp -a device/rmweb device/rmweb-env.sh device/install.sh device/appload-entry.sh "$B/"
+chmod +x "$B/rmweb" "$B/install.sh" "$B/appload-entry.sh"
 cp VERSION "$B/VERSION"   # single source of truth: the repo-root VERSION file
 [ -d device/appload ] && cp -a device/appload "$B/"
 [ -f device/icon.svg ] && cp -a device/icon.svg "$B/"

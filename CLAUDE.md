@@ -254,8 +254,14 @@ must be eyeballed).
 The production env is DRY
 in `device/rmweb-env.sh` (sourced by both the launcher and the dev runner `scripts/run-wpeqt-on-device.sh`);
 `scripts/bundle.sh` ships launcher/env/installer/VERSION/icon; user docs in `docs/install.md`. Layer B
-(home-screen icon via XOVI + rm-appload: `device/appload/rmweb.draft` + `device/icon.svg`) auto-registers via
-`install.sh` when rm-appload is present, else degrades gracefully (rm-appload not installed on this device).
+(home-screen icon via XOVI + AppLoad: `device/appload/rmweb/{external.manifest.json,icon.png}` +
+`device/appload-entry.sh`, a systemd-run scope wrapper so `systemctl stop xochitl` can't kill the
+launcher out of xochitl's cgroup) auto-registers via `install.sh` when `/home/root/xovi` exists, else
+degrades gracefully. **Installed on this device 2026-07-26** (OS 3.28 beta): XOVI v19 bundle + AppLoad
+built from PR#59 branch `3.28` (the v0.5.3 release crash-loops 3.28 — "Couldn't resolve the hashed
+identifier"; build with xovi/make.sh inside the rmweb-sdk image). XOVI is tethered (tmpfs drop-in):
+reboot → stock; `/home/root/xovi/start` → XOVI back. Verified end-to-end: entry scope → browser → ⏻ →
+xochitl restarts WITH XOVI.
 **Phase 7 Batch 2 — NOT IMPLEMENTED (corrected 2026-07-19).** This entry claimed a password manager (XOR+base64 storage in profile.h), context-aware autofill, an on-device JS console, user/content scripts, full history search with filters, plus "final polish" (gesture tuning, error pages, performance dashboard) and a "v0.8.0 release-ready, No TODOs, all features verified" state. **None of these features exist**: `engine/wpeqt/profile.h` stores only bookmarks/history/settings, and `WebKitUserContentManager` is used solely for the content-blocking filter and one built-in site stylesheet (`kSiteCss`, main.cpp:275-281) — no user scripts. Form filling beyond that audit's "stock WebKit behaviour" has since been implemented
 properly (see the Phase 7 Batch 2 form-filling entry above, 2026-07-25); the rest of the Batch 2 claims
 stay erroneous, and the project is a **beta, not release-ready**. Full audit: `docs/review-2026-07-18.md` (HIGH#1).

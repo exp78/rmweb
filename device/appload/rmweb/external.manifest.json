@@ -1,0 +1,8 @@
+{
+  "name": "rmweb",
+  "application": "/home/root/rmweb/appload-entry.sh",
+  "workingDirectory": "/home/root/rmweb",
+  "qtfb": false,
+  "aspectRatio": "original",
+  "disablesWindowedMode": true
+}
