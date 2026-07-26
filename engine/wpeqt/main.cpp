@@ -113,11 +113,17 @@ extern "C" void termHandler(int) { std::_Exit(0); }
 // WKContentRuleList (Safari/WebKit content-blocker JSON): drop third-party scripts/media/fonts — i.e. ads,
 // trackers, analytics, and other heavy cross-origin JS — so the interpreter-only JSC isn't swamped. First-
 // party content/CSS is kept, so articles still render. Compiled once at startup (see onFilterSaved).
+// The css-display-none rules then COLLAPSE the now-dead ad containers, so blocked ads leave no empty
+// boxes ("holes") on the page. Selectors are the generic EasyList-style containers (Google GPT/AdSense,
+// Yandex RTB — covers most RU news sites); keep the list short — every selector costs match time.
 static const char *kBlockRules =
     "[{\"trigger\":{\"url-filter\":\".*\",\"resource-type\":[\"script\"],\"load-type\":[\"third-party\"]},"
        "\"action\":{\"type\":\"block\"}},"
      "{\"trigger\":{\"url-filter\":\".*\",\"resource-type\":[\"media\",\"font\"],\"load-type\":[\"third-party\"]},"
-       "\"action\":{\"type\":\"block\"}}]";
+       "\"action\":{\"type\":\"block\"}},"
+     "{\"trigger\":{\"url-filter\":\".*\"},\"action\":{\"type\":\"css-display-none\",\"selector\":"
+       "\"ins.adsbygoogle,.adsbygoogle,div[id^='div-gpt-ad'],div[data-ad],.ad-slot,.adslot,"
+       "iframe[id^='google_ads'],div[id^='yandex_rtb'],div[id^='adfox_'],.js-ad-slot,.advertising\"}}]";
 
 // Optional mobile User-Agent (opt-in via RMWEB_UA=mobile): makes heavy JS-app sites (e.g. a heavy SPA site) serve their
 // lighter MOBILE layout, which renders where the desktop one stays blank. NOT the default — a mobile UA makes
@@ -129,11 +135,15 @@ static const char *kMobileUA =
 
 // A tiny USER stylesheet injected into every page (raw browsing): keep wide media/tables from overflowing the
 // narrow e-ink viewport, so nothing forces a horizontal scroll. User-level !important beats the site's author
-// rules. (Reader mode is the fuller answer for article layout.) Toggle off with RMWEB_SITECSS=0.
+// rules. (Reader mode is the fuller answer for article layout.) Also the e-ink calm-down kit: CSS animations,
+// transitions and smooth scrolling only smear the panel and burn render cycles for zero gain — kill them.
+// Toggle off with RMWEB_SITECSS=0 or the settings page.
 static const char *kSiteCss =
     "img,video,iframe,table,pre,figure,canvas{max-width:100%!important}"
     "img,video{height:auto!important}"
-    "html,body{overflow-x:hidden!important}";
+    "html,body{overflow-x:hidden!important}"
+    "*,*::before,*::after{animation-duration:0s!important;animation-delay:0s!important;"
+    "transition-duration:0s!important;transition-delay:0s!important;scroll-behavior:auto!important}";
 
 // --- Reader mode (Mozilla Readability, vendored under engine/wpeqt/reader) -------------------------------
 // On "Reader" we inject Readability.js + the glue below: it parses the article off a DOM *clone* (Readability
@@ -293,11 +303,13 @@ public Q_SLOTS:
         m_ucm = webkit_user_content_manager_new();   // holds the content-blocking filter (added async below)
         // Readability user stylesheet (kSiteCss): keep wide media/tables from forcing horizontal scroll on the
         // narrow viewport. Applies to every page; reader mode replaces the DOM so it's harmless there too.
-        if (qgetenv("RMWEB_SITECSS") != "0") {
+        // Persisted setting (settings page); RMWEB_SITECSS env, when present, wins for this run.
+        if (m_settings.siteCss && qgetenv("RMWEB_SITECSS") != "0") {
             WebKitUserStyleSheet *ss = webkit_user_style_sheet_new(
                 kSiteCss, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_STYLE_LEVEL_USER, nullptr, nullptr);
             webkit_user_content_manager_add_style_sheet(m_ucm, ss);
             webkit_user_style_sheet_unref(ss);
+            m_siteCssOn = true;
         }
         m_view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW,
             "display", display, "user-content-manager", m_ucm, nullptr));
@@ -348,29 +360,37 @@ public Q_SLOTS:
             WebKitURIRequest* req = webkit_navigation_action_get_request(act);
             const char* uri = webkit_uri_request_get_uri(req);
             if (uri && std::string(uri).rfind("rmweb:", 0) == 0) {
-                // rmweb: commands mutate the profile — honour them ONLY from our own start page
-                // (file://...home.html). Any other page navigating here is a confused-deputy
+                // rmweb: commands mutate the profile — honour them ONLY from our own generated pages
+                // (file://...home.html / settings.html). Any other page navigating here is a confused-deputy
                 // attempt (location.href='rmweb:clear-history'): log it and swallow the command.
                 const char *cur = self->m_view ? webkit_web_view_get_uri(self->m_view) : nullptr;
                 const std::string home = "file://" + self->m_profileDir + "/home.html";
-                if (cur && std::string(cur) == home) {
+                const std::string settingsPage = "file://" + self->m_profileDir + "/settings.html";
+                const bool fromHome = cur && std::string(cur) == home;
+                const bool fromSettings = cur && std::string(cur) == settingsPage;
+                if (fromHome || fromSettings) {
+                    // After a mutating command, return to the page it came from (regenerated — the
+                    // settings page re-renders its values, the start page its lists).
+                    // NB: [=], not [self, fromSettings] — a comma in the capture list would land at
+                    // G_CALLBACK's paren depth 1 and split the macro into "2 arguments".
+                    auto done = [=]{ if (fromSettings) self->openSettings(); else self->goHome(); };
                     const std::string cmd = std::string(uri).substr(6);   // after "rmweb:"
                     if (cmd == "clear-history") {
                         self->m_history.clear();
                         rmweb::saveHistory(self->m_profileDir, self->m_history);
-                        self->goHome();
+                        done();
                     } else if (cmd.rfind("close-tab:", 0) == 0) {
                         // The tab URL rides inside the command; WebKit percent-encodes non-ASCII
                         // when resolving the link, so decode before matching the store.
                         const std::string u = rmweb::urlDecode(cmd.substr(10));
                         if (rmweb::removeTab(self->m_tabs, u))
                             rmweb::saveTabs(self->m_profileDir, self->m_tabs);
-                        self->goHome();
+                        done();
                     } else if (cmd == "toggle-dark") {
                         self->m_settings.readerDark = !self->m_settings.readerDark;
                         rmweb::saveSettings(self->m_profileDir, self->m_settings);
                         qInfo("[reader] dark theme %s", self->m_settings.readerDark ? "on" : "off");
-                        self->goHome();
+                        done();
                     } else if (cmd == "toggle-ua") {
                         // Mobile UA = lighter server-rendered pages (a heavy news portal becomes READABLE — SSR
                         // headlines instead of a JS-app skeleton). Applied live; persists in settings.
@@ -379,7 +399,31 @@ public Q_SLOTS:
                         webkit_settings_set_user_agent(webkit_web_view_get_settings(self->m_view),
                             self->m_settings.ua.empty() ? nullptr : kMobileUA);   // nullptr = WPE default
                         qInfo("[ua] %s", self->m_settings.ua.empty() ? "desktop (default)" : kMobileUA);
+                        done();
+                    } else if (cmd == "settings") {
+                        self->openSettings();
+                    } else if (cmd == "home") {
                         self->goHome();
+                    } else if (cmd == "toggle-block") {
+                        self->toggleBlockSetting();
+                        done();
+                    } else if (cmd == "toggle-sitecss") {
+                        self->toggleSiteCssSetting();
+                        done();
+                    } else if (cmd == "autorefresh-next") {
+                        // Cycle: 15s -> 30s -> 60s -> blocked(-1) -> allowed(0) -> 15s.
+                        int &v = self->m_settings.autoRefreshSec;
+                        v = (v == 15) ? 30 : (v == 30) ? 60 : (v == 60) ? -1 : (v == -1) ? 0 : 15;
+                        rmweb::saveSettings(self->m_profileDir, self->m_settings);
+                        qInfo("[guard] auto-refresh setting -> %d s", v);
+                        done();
+                    } else if (cmd == "clear-autofill") {
+                        self->m_settings.autofillEmail.clear();
+                        self->m_settings.autofillUser.clear();
+                        self->m_settings.autofillName.clear();
+                        rmweb::saveSettings(self->m_profileDir, self->m_settings);
+                        qInfo("[form] autofill memory cleared (settings)");
+                        done();
                     }
                 } else {
                     qWarning("[nav] rmweb: command from non-start page ignored (current: %s)", cur ? cur : "(none)");
@@ -390,28 +434,30 @@ public Q_SLOTS:
             // Auto-refresh guard: a navigation back to the CURRENT url that WE didn't initiate
             // (meta refresh / JS location.reload / href=self) gets throttled — on this device a
             // re-render costs 40-80 s, and a heavy news portal's refresh yanked the reader view mid-article.
-            // The window is anchored at LOAD_FINISHED (render time doesn't eat the pause), default
-            // 15 s (RMWEB_AUTOREFRESH_MS), and reader mode blocks it outright. User reload/Go
-            // (m_expectUserNav) and link/back-forward navigations always pass.
+            // The window is anchored at LOAD_FINISHED (render time doesn't eat the pause), set by the
+            // persisted autoRefreshSec setting (15 s default; -1 = block all, 0 = guard off;
+            // RMWEB_AUTOREFRESH_MS env wins at startup). Reader mode blocks it outright.
+            // User reload/Go (m_expectUserNav) and link/back-forward navigations always pass.
             if (uri && self->m_view && !self->m_expectUserNav) {
                 const WebKitNavigationType nt = webkit_navigation_action_get_navigation_type(act);
                 if (nt == WEBKIT_NAVIGATION_TYPE_OTHER || nt == WEBKIT_NAVIGATION_TYPE_RELOAD) {
                     const char *cur = webkit_web_view_get_uri(self->m_view);
                     if (cur && std::string(cur) == uri) {
-                        if (self->m_readerMode) {
-                            qInfo("[guard] auto-refresh blocked (reader mode)");
+                        const int sec = self->m_settings.autoRefreshSec;
+                        if (self->m_readerMode || sec < 0) {
+                            qInfo("[guard] auto-refresh blocked (%s)", self->m_readerMode ? "reader mode" : "setting");
                             webkit_policy_decision_ignore(dec);
                             return TRUE;
                         }
-                        static const gint64 minUs = []{
-                            const int v = qEnvironmentVariableIntValue("RMWEB_AUTOREFRESH_MS");
-                            return (v > 0 ? v : 15000) * (gint64)1000; }();
-                        const gint64 dt = g_get_monotonic_time() - self->m_lastLoadFinishedUs;
-                        if (self->m_lastLoadFinishedUs > 0 && dt < minUs) {
-                            qInfo("[guard] auto-refresh throttled (%.1fs < %.0fs since load finished)",
-                                  dt / 1e6, minUs / 1e6);
-                            webkit_policy_decision_ignore(dec);
-                            return TRUE;
+                        if (sec > 0) {
+                            const gint64 minUs = sec * (gint64)1000000;
+                            const gint64 dt = g_get_monotonic_time() - self->m_lastLoadFinishedUs;
+                            if (self->m_lastLoadFinishedUs > 0 && dt < minUs) {
+                                qInfo("[guard] auto-refresh throttled (%.1fs < %ds since load finished)",
+                                      dt / 1e6, sec);
+                                webkit_policy_decision_ignore(dec);
+                                return TRUE;
+                            }
                         }
                     }
                 }
@@ -439,6 +485,10 @@ public Q_SLOTS:
             // runs) — the debounced queueSave() exists for the runtime hot paths.
             if (uaEnv && std::string(uaEnv) == "off") rmweb::saveSettings(m_profileDir, m_settings);
         }
+        // Auto-refresh guard: persisted setting; RMWEB_AUTOREFRESH_MS env (ms, >0) wins for this run —
+        // it stays a diagnostic lever and is NOT persisted (the settings page cycles the stored value).
+        if (const int v = qEnvironmentVariableIntValue("RMWEB_AUTOREFRESH_MS"); v > 0)
+            m_settings.autoRefreshSec = (v + 999) / 1000;   // ceil ms -> s
         // DIAG (RMWEB_NOJS=1): disable JavaScript entirely — splits "slow site" into JS-engine vs
         // CSS/layout cost (our own scroll/probe/reader JS goes down too; diagnostic only).
         if (qEnvironmentVariableIntValue("RMWEB_NOJS") == 1) {
@@ -482,10 +532,11 @@ public Q_SLOTS:
             qInfo("[cookies] persistent: %s", cj.c_str());
         }
 
-        // Content blocking (RMWEB_BLOCK!=0, default on): compile the WKContentRuleList, add it, THEN load —
-        // so it applies to the very first resource loads. The compile is async; loadInitial() runs from its
-        // callback. Off => load immediately. A compile failure still loads (unfiltered) so the page works.
-        if (qgetenv("RMWEB_BLOCK") != "0") {
+        // Content blocking (persisted setting, RMWEB_BLOCK env wins when set): compile the WKContentRuleList,
+        // add it, THEN load — so it applies to the very first resource loads. The compile is async;
+        // loadInitial() runs from its callback. Off => load immediately. A compile failure still loads
+        // (unfiltered) so the page works.
+        if (m_settings.block && qgetenv("RMWEB_BLOCK") != "0") {
             WebKitUserContentFilterStore *store = webkit_user_content_filter_store_new("/home/root/rmweb/cfstore");
             GBytes *src = g_bytes_new_static(kBlockRules, strlen(kBlockRules));
             webkit_user_content_filter_store_save(store, "rmweb-block", src, m_cancel, &WpeEngine::onFilterSaved, this);
@@ -504,6 +555,7 @@ public Q_SLOTS:
         // this drops the buffer-rendered/load-changed handlers that capture `this`, so none can fire late.
         if (m_view) { g_object_unref(m_view); m_view = nullptr; }
         if (m_ucm)  { g_object_unref(m_ucm);  m_ucm  = nullptr; }
+        if (m_blockFilter) { webkit_user_content_filter_unref(m_blockFilter); m_blockFilter = nullptr; }
         g_main_context_pop_thread_default(m_ctx);
     }
 
@@ -529,12 +581,75 @@ public Q_SLOTS:
     void goHome() {
         // Marshalled: reads/writes m_bookmarks and m_history, which the worker-thread LOAD_FINISHED also touches.
         marshalToCtx([this] {
-            const std::string html = rmweb::buildStartPage(m_bookmarks, firstN(m_history, 15),
-                                                           m_tabs, m_settings.readerDark, m_settings.ua == "mobile");
+            const std::string html = rmweb::buildStartPage(m_bookmarks, firstN(m_history, 15), m_tabs);
             const std::string path = m_profileDir + "/home.html";
             rmweb::detail::atomicWrite(path, html);
             loadUrl(QString::fromStdString("file://" + path));
         });
+    }
+    void openSettings() {
+        // Marshalled like goHome (reads m_settings, which the worker thread also touches).
+        marshalToCtx([this] {
+            const std::string html = rmweb::buildSettingsPage(m_settings);
+            const std::string path = m_profileDir + "/settings.html";
+            rmweb::detail::atomicWrite(path, html);
+            loadUrl(QString::fromStdString("file://" + path));
+        });
+    }
+    // Settings-page toggles — run on the worker thread (decide-policy), mutate + persist + apply live.
+    void toggleBlockSetting() {
+        m_settings.block = !m_settings.block;
+        rmweb::saveSettings(m_profileDir, m_settings);
+        if (m_settings.block) {
+            if (m_blockFilter) { webkit_user_content_manager_add_filter(m_ucm, m_blockFilter);
+                                 qInfo("[block] on (settings)"); }
+            else compileBlockFilter();   // startup had it off -> first compile is async (adds on save)
+        } else if (m_blockFilter) {
+            webkit_user_content_manager_remove_filter(m_ucm, m_blockFilter);
+            qInfo("[block] off (settings)");
+        }
+    }
+    void toggleSiteCssSetting() {
+        m_settings.siteCss = !m_settings.siteCss;
+        rmweb::saveSettings(m_profileDir, m_settings);
+        if (m_settings.siteCss && !m_siteCssOn) {
+            WebKitUserStyleSheet *ss = webkit_user_style_sheet_new(
+                kSiteCss, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_STYLE_LEVEL_USER, nullptr, nullptr);
+            webkit_user_content_manager_add_style_sheet(m_ucm, ss);
+            webkit_user_style_sheet_unref(ss);
+            m_siteCssOn = true;
+            qInfo("[sitecss] on (settings)");
+        } else if (!m_settings.siteCss && m_siteCssOn) {
+            // Safe: the UCM holds ONLY kSiteCss — reader mode styles the DOM it builds, not the UCM.
+            webkit_user_content_manager_remove_all_style_sheets(m_ucm);
+            m_siteCssOn = false;
+            qInfo("[sitecss] off (settings)");
+        }
+    }
+    // First enable of blocking at runtime (startup had it off): same store-save compile as startup,
+    // but the callback only adopts the filter — it must NOT kick a fresh initial load.
+    void compileBlockFilter() {
+        WebKitUserContentFilterStore *store = webkit_user_content_filter_store_new("/home/root/rmweb/cfstore");
+        GBytes *src = g_bytes_new_static(kBlockRules, strlen(kBlockRules));
+        webkit_user_content_filter_store_save(store, "rmweb-block", src, m_cancel,
+                                              &WpeEngine::onFilterToggleSaved, this);
+        g_bytes_unref(src);
+    }
+    static void onFilterToggleSaved(GObject *obj, GAsyncResult *res, gpointer data) {
+        auto *self = static_cast<WpeEngine*>(data);
+        GError *err = nullptr;
+        WebKitUserContentFilter *f = webkit_user_content_filter_store_save_finish(
+            WEBKIT_USER_CONTENT_FILTER_STORE(obj), res, &err);
+        if (err && g_error_matches(err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+            if (f) webkit_user_content_filter_unref(f);
+            g_clear_error(&err); g_object_unref(obj); return;
+        }
+        if (f) { webkit_user_content_manager_add_filter(self->m_ucm, f);
+                 if (self->m_blockFilter) webkit_user_content_filter_unref(self->m_blockFilter);
+                 self->m_blockFilter = f;
+                 qInfo("[block] compiled + on (settings)"); }
+        else   { qWarning("[block] filter compile failed: %s", err ? err->message : "?"); g_clear_error(&err); }
+        g_object_unref(obj);   // the filter store
     }
     void toggleBookmark() {
         // Marshalled: reads/writes m_bookmarks, which the worker-thread LOAD_FINISHED also touches.
@@ -1095,8 +1210,7 @@ private:
             // marshalled to the worker context via marshalToCtx, which is safe to call from here
             // (we ARE on the worker context, so the inner marshalToCtx re-posts to the same context —
             // harmless, and keeps the identical dispatch path as a tap-router-initiated goHome()).
-            const std::string html = rmweb::buildStartPage(m_bookmarks, firstN(m_history, 15),
-                                                           m_tabs, m_settings.readerDark, m_settings.ua == "mobile");
+            const std::string html = rmweb::buildStartPage(m_bookmarks, firstN(m_history, 15), m_tabs);
             const std::string path = m_profileDir + "/home.html";
             rmweb::detail::atomicWrite(path, html);
             webkit_web_view_load_uri(m_view, ("file://" + path).c_str());
@@ -1117,7 +1231,9 @@ private:
             if (f) webkit_user_content_filter_unref(f);
             g_clear_error(&err); g_object_unref(obj); return;
         }
-        if (f) { webkit_user_content_manager_add_filter(self->m_ucm, f); webkit_user_content_filter_unref(f);
+        if (f) { webkit_user_content_manager_add_filter(self->m_ucm, f);
+                 if (self->m_blockFilter) webkit_user_content_filter_unref(self->m_blockFilter);
+                 self->m_blockFilter = f;   // adopt our own ref — the settings toggle re-adds/removes it
                  qInfo("[block] content filter active"); }
         else   { qWarning("[block] filter compile failed: %s", err ? err->message : "?"); g_clear_error(&err); }
         g_object_unref(obj);   // the filter store
@@ -1456,6 +1572,8 @@ private:
     std::vector<rmweb::Bookmark> m_bookmarks;
     std::vector<rmweb::HistoryEntry> m_history;
     rmweb::Settings m_settings;
+    WebKitUserContentFilter *m_blockFilter = nullptr;  // compiled rule list (our ref) — settings toggle
+    bool m_siteCssOn = false;          // kSiteCss currently in the UCM (mirrors settings after a toggle)
     std::vector<rmweb::ScrollEntry> m_scroll;       // per-URL reading positions (scroll.txt)
     std::vector<rmweb::Tab> m_tabs;                 // open pages, MRU first (tabs.txt — tabs-lite)
     GSource *m_historySaveSrc = nullptr;            // pending debounced history write (worker ctx)

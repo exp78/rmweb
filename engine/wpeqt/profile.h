@@ -16,7 +16,12 @@ namespace rmweb {
 struct Bookmark { std::string url, title; };
 struct HistoryEntry { std::string url, title; long ts = 0; };
 struct Settings { double zoom = 1.0; int readerFont = 30; std::string ua; bool readerDark = false;
-                  std::string autofillEmail, autofillUser, autofillName; };   // learn-as-you-type autofill
+                  std::string autofillEmail, autofillUser, autofillName;   // learn-as-you-type autofill
+                  bool block = true;        // content blocker (3rd-party scripts/media/fonts + cosmetic)
+                  bool siteCss = true;      // kSiteCss fit-to-width + e-ink calm-down user stylesheet
+                  int autoRefreshSec = 15;  // >0: min seconds between same-URL auto-navigations;
+                                            // 0: guard off (allow all); -1: block all auto-refreshes
+                };
 struct ScrollEntry { std::string url; int pos = 0; };   // per-URL reading position (page offset, CSS px)
 struct Tab { std::string url, title; };                 // tabs-lite: one entry per open page, MRU first
 
@@ -285,9 +290,15 @@ inline Settings loadSettings(const std::string& dir) {
         else if (k == "afEmail") s.autofillEmail = sanitizeField(v);
         else if (k == "afUser") s.autofillUser = sanitizeField(v);
         else if (k == "afName") s.autofillName = sanitizeField(v);
+        else if (k == "block") s.block = (v != "0");
+        else if (k == "siteCss") s.siteCss = (v != "0");
+        else if (k == "autoRefreshSec") s.autoRefreshSec = std::atoi(v.c_str());
     }
     if (!(s.zoom >= 0.5 && s.zoom <= 3.0)) s.zoom = 1.0;                 // clamp corrupt values
     if (!(s.readerFont >= 14 && s.readerFont <= 96)) s.readerFont = 30;
+    // autoRefreshSec has a fixed valid set (the settings page cycles through it); snap anything else.
+    if (s.autoRefreshSec != -1 && s.autoRefreshSec != 0 && s.autoRefreshSec != 15 &&
+        s.autoRefreshSec != 30 && s.autoRefreshSec != 60) s.autoRefreshSec = 15;
     return s;
 }
 inline bool saveSettings(const std::string& dir, const Settings& s) {
@@ -297,7 +308,10 @@ inline bool saveSettings(const std::string& dir, const Settings& s) {
                     + "readerDark=" + std::string(s.readerDark ? "1" : "0") + "\n"
                     + "afEmail=" + sanitizeField(s.autofillEmail) + "\n"
                     + "afUser=" + sanitizeField(s.autofillUser) + "\n"
-                    + "afName=" + sanitizeField(s.autofillName) + "\n";
+                    + "afName=" + sanitizeField(s.autofillName) + "\n"
+                    + "block=" + std::string(s.block ? "1" : "0") + "\n"
+                    + "siteCss=" + std::string(s.siteCss ? "1" : "0") + "\n"
+                    + "autoRefreshSec=" + std::to_string(s.autoRefreshSec) + "\n";
     return detail::atomicWrite(dir + "/settings.txt", out);
 }
 

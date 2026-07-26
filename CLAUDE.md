@@ -251,6 +251,24 @@ qCDebug(lcEngine) lines ([t] pageBy / page JS done sy=) are compiled OUT of the 
 proof is the grab, not the log. Start-page CSS sharing stayed deferred (touch geometry + visuals,
 must be eyeballed).
 
+**Settings window + ad-gap/e-ink CSS (2026-07-26).** Settings are their own page now: the start page
+keeps one "Open settings" row (`rmweb:settings`); `buildSettingsPage(m_settings)` (startpage.h:134)
+renders one tap-row per lever — Reader theme, Site version, Ad & tracker blocking, Fit pages to screen,
+Site auto-refresh (cycles 15 s → 30 → 60 → "blocked (never)" = -1 → "allowed (no limit)" = 0), Clear
+form fields, Clear history, "« Start page" — JS-free, same design language as the start page,
+regenerated after every change. The decide-policy guard honours rmweb: commands from BOTH home.html
+and settings.html and navigates back to whichever page the command came from (the `done` lambda must
+capture `[=]` — an explicit capture list with a comma breaks the G_CALLBACK macro). New persisted
+Settings keys (profile.h): `block`, `siteCss` (both default on), `autoRefreshSec` (snapped to
+{-1,0,15,30,60}); RMWEB_BLOCK / RMWEB_SITECSS / RMWEB_AUTOREFRESH_MS stay startup-only overrides and
+are NOT persisted. Block/siteCss toggles apply at runtime: compileBlockFilter + onFilterToggleSaved
+swap the WebKitUserContentFilter without touching the page. Against blocked-ad white holes:
+kBlockRules gains `css-display-none` selectors that collapse the dead containers (.adsbygoogle,
+div[id^=div-gpt-ad], div[data-ad], .ad-slot, iframe[id^=google_ads], div[id^=yandex_rtb],
+div[id^=adfox_], .js-ad-slot, .advertising) — the generic EasyList-style set, kept short since every
+selector costs match time. kSiteCss gains the e-ink calm-down kit: `animation/transition-duration:0s`
+and `scroll-behavior:auto` on `*` — animations only smear the panel and burn render cycles.
+
 The production env is DRY
 in `device/rmweb-env.sh` (sourced by both the launcher and the dev runner `scripts/run-wpeqt-on-device.sh`);
 `scripts/bundle.sh` ships launcher/env/installer/VERSION/icon; user docs in `docs/install.md`. Layer B
