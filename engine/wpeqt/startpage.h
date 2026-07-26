@@ -48,13 +48,10 @@ inline std::string utf8First(const std::string& s) {
 
 // `recent` is the already-trimmed most-recent slice (the caller passes ~15). `tabs` is the
 // tabs-lite session list (MRU first); each row pairs the page link with a "✕" close command.
-// `readerDark` only flips the label of the settings toggle — the theme itself applies on the
-// next Reader activation.
+// Settings live on their own page now — the last row here is just the link to it.
 inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
                                   const std::vector<HistoryEntry>& recent,
-                                  const std::vector<Tab>& tabs = {},
-                                  bool readerDark = false,
-                                  bool mobileUa = false) {
+                                  const std::vector<Tab>& tabs = {}) {
     std::string h =
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'><title>rmweb</title>"
@@ -124,12 +121,63 @@ inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
         }
         h += "<a class='clear' href='rmweb:clear-history'>Clear recent</a>";
     }
-    h += "<h2>Settings</h2><div class='row'><a class='rowlink' href='rmweb:toggle-dark'><span class='t'>Reader theme: ";
-    h += readerDark ? "dark" : "light";
-    h += "</span></a></div>"
-         "<div class='row'><a class='rowlink' href='rmweb:toggle-ua'><span class='t'>Sites: ";
-    h += mobileUa ? "mobile (lighter)" : "desktop";
-    h += "</span></a></div></body></html>";
+    h += "<h2>Settings</h2><div class='row'><a class='rowlink' href='rmweb:settings'>"
+         "<span class='t'>Open settings</span>"
+         "<span class='u'>theme, sites, blocking, refresh &#187;</span></a></div></body></html>";
+    return h;
+}
+
+// The settings page: one row per lever, tap cycles/toggles it (rmweb: commands, honoured only from
+// our own generated pages — see the decide-policy guard). Current values render into the labels, so
+// the page is regenerated after every change (the handler navigates back here). JS-free, same design
+// language as the start page.
+inline std::string buildSettingsPage(const Settings& s) {
+    const char* onoff[] = { "off", "on" };
+    std::string ar;
+    switch (s.autoRefreshSec) {
+        case -1: ar = "blocked (never)"; break;
+        case 0:  ar = "allowed (no limit)"; break;
+        default: ar = "every " + std::to_string(s.autoRefreshSec) + " s"; break;
+    }
+    std::string h =
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'><title>rmweb settings</title>"
+        "<style>"
+        "*{box-sizing:border-box}"
+        "body{font-family:sans-serif;color:#000;background:#fff;margin:0;padding:52px 60px;}"
+        ".hero{font-size:64px;font-weight:800;letter-spacing:-1px;margin:0;}"
+        ".tag{color:#666;font-size:26px;margin:8px 0 4px;}"
+        "h2{font-size:24px;font-weight:700;letter-spacing:4px;color:#666;margin:48px 0 12px;"
+        "border-bottom:2px solid #000;padding-bottom:10px;}"
+        ".row{display:flex;align-items:center;padding:22px 0;border-bottom:1px solid #ddd;}"
+        "a.rowlink{display:flex;align-items:center;flex:1;min-width:0;text-decoration:none;color:#000;}"
+        ".t{flex:1;font-size:30px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}"
+        ".v{color:#000;font-size:26px;font-weight:700;margin-left:16px;padding:6px 18px;"
+        "border:2px solid #000;border-radius:10px;}"
+        ".hint{color:#888;font-size:22px;padding:6px 0 0;}"
+        ".back{display:inline-block;margin-top:40px;font-size:28px;color:#000;text-decoration:none;"
+        "border:3px solid #000;border-radius:14px;padding:16px 26px;}"
+        "</style></head><body><div class='hero'>Settings</div>"
+        "<div class='tag'>tap a row to change &mdash; applies immediately</div>";
+    auto row = [&h](const char* cmd, const std::string& label, const std::string& val) {
+        h += "<div class='row'><a class='rowlink' href='";
+        h += cmd;
+        h += "'><span class='t'>" + label + "</span><span class='v'>" + val + "</span></a></div>";
+    };
+    h += "<h2>Reading</h2>";
+    row("rmweb:toggle-dark", "Reader theme", s.readerDark ? "dark" : "light");
+    h += "<div class='hint'>Font size: the A- / A+ buttons while reading.</div>";
+    h += "<h2>Sites</h2>";
+    row("rmweb:toggle-ua", "Site version", s.ua == "mobile" ? "mobile (lighter)" : "desktop");
+    row("rmweb:toggle-block", "Ad &amp; tracker blocking", onoff[s.block ? 1 : 0]);
+    h += "<div class='hint'>Blocking off renders heavy sites fully, but slowly.</div>";
+    row("rmweb:toggle-sitecss", "Fit pages to screen", onoff[s.siteCss ? 1 : 0]);
+    row("rmweb:autorefresh-next", "Site auto-refresh", ar);
+    h += "<div class='hint'>Blocks pages reloading themselves while you read.</div>";
+    h += "<h2>Data</h2>";
+    row("rmweb:clear-autofill", "Clear remembered form fields", "clear");
+    row("rmweb:clear-history", "Clear recent history", "clear");
+    h += "<a class='back' href='rmweb:home'>&#171; Start page</a></body></html>";
     return h;
 }
 
