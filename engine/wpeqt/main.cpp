@@ -1473,6 +1473,9 @@ public:
         const qreal w = width(), h = height();
         if (!m_img.isNull()) p->drawImage(QRectF(0, 0, w, h), m_img);
         else                 p->fillRect(QRectF(0, 0, w, h), Qt::white);
+        // A failed (blank) render is a PAGE state, not an overlay: white out the stale page or the
+        // previous site bleeds through around the notice box and reads as a half-rendered mess.
+        if (m_renderFailed) p->fillRect(QRectF(0, 0, w, h), Qt::white);
         // Badge precedence: Loading > RenderFailed > Rendering > nothing.
         if (m_loading && !m_renderFailed)          drawLoadingBadge(p, w);
         else if (m_renderFailed)                   drawRenderNotice(p, w, h);
