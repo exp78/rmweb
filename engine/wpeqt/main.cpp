@@ -1077,6 +1077,9 @@ private:
         auto *self = static_cast<WpeEngine*>(data);
         const char *u = webkit_web_view_get_uri(WEBKIT_WEB_VIEW(obj));
         qInfo("[nav] uri=%s", u ? u : "");
+        // Generated pages loaded with an about:blank base (address-bar search results) must not
+        // clobber the address bar — the typed query stays (set when the search was kicked off).
+        if (u && std::string(u) == "about:blank") return;
         Q_EMIT self->urlChanged(QString::fromUtf8(u ? u : ""));
     }
 
@@ -2339,6 +2342,7 @@ int main(int argc, char **argv) {
                 view->forceNextContent();   // the results page must paint promptly
                 engine.searchAndShow(u);
                 view->setAddr(u);           // keep the typed query visible (not "about:blank")
+                view->setReadProgress(-1);  // generated page: no scroll metrics -> hide the bar
             }
         });
         // Engine toasts (find results, downloads) -> the chrome overlay.
@@ -2482,9 +2486,11 @@ int main(int argc, char **argv) {
         if (qEnvironmentVariableIsSet("RMWEB_DEBUG_SEARCH")) {
             const QString term = qEnvironmentVariable("RMWEB_DEBUG_SEARCH");
             if (!term.isEmpty())
-                QTimer::singleShot(4000, &app, [&engine, term]{
+                QTimer::singleShot(4000, &app, [&engine, view, term]{
                     qInfo("[search][dbg] term=%s", qPrintable(term));
                     engine.searchAndShow(term);
+                    view->setAddr(term);           // mirror the urlEntered path (query, not the start URL)
+                    view->setReadProgress(-1);
                 });
         }
 
@@ -2511,6 +2517,7 @@ int main(int argc, char **argv) {
                         qInfo("[form][dbg] commit: %s", qPrintable(ftext));
                         view->forceNextContent();   // mirror the real Go path so the edit frame paints
                         engine.setFieldText(ftext);
+                        engine.learnFieldText(ftext);   // mirror the fieldTextEntered wire (autofill learn)
                     });
                     QTimer::singleShot(8500, &app, [&engine]{ engine.logFieldState(); });
                 }
