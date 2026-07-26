@@ -387,6 +387,36 @@ public Q_SLOTS:
                 webkit_policy_decision_ignore(dec);
                 return TRUE;
             }
+            // Auto-refresh guard: a navigation back to the CURRENT url that WE didn't initiate
+            // (meta refresh / JS location.reload / href=self) gets throttled — on this device a
+            // re-render costs 40-80 s, and rbc.ru's refresh yanked the reader view mid-article.
+            // The window is anchored at LOAD_FINISHED (render time doesn't eat the pause), default
+            // 15 s (RMWEB_AUTOREFRESH_MS), and reader mode blocks it outright. User reload/Go
+            // (m_expectUserNav) and link/back-forward navigations always pass.
+            if (uri && self->m_view && !self->m_expectUserNav) {
+                const WebKitNavigationType nt = webkit_navigation_action_get_navigation_type(act);
+                if (nt == WEBKIT_NAVIGATION_TYPE_OTHER || nt == WEBKIT_NAVIGATION_TYPE_RELOAD) {
+                    const char *cur = webkit_web_view_get_uri(self->m_view);
+                    if (cur && std::string(cur) == uri) {
+                        if (self->m_readerMode) {
+                            qInfo("[guard] auto-refresh blocked (reader mode)");
+                            webkit_policy_decision_ignore(dec);
+                            return TRUE;
+                        }
+                        static const gint64 minUs = []{
+                            const int v = qEnvironmentVariableIntValue("RMWEB_AUTOREFRESH_MS");
+                            return (v > 0 ? v : 15000) * (gint64)1000; }();
+                        const gint64 dt = g_get_monotonic_time() - self->m_lastLoadFinishedUs;
+                        if (self->m_lastLoadFinishedUs > 0 && dt < minUs) {
+                            qInfo("[guard] auto-refresh throttled (%.1fs < %.0fs since load finished)",
+                                  dt / 1e6, minUs / 1e6);
+                            webkit_policy_decision_ignore(dec);
+                            return TRUE;
+                        }
+                    }
+                }
+            }
+            self->m_expectUserNav = false;   // consumed by the first navigation decision it reaches
             return FALSE;
         }), this);
 
@@ -495,7 +525,7 @@ public Q_SLOTS:
     // Navigation — WebKit's own history/loading API, marshalled onto the worker GMainContext.
     // Safe to call from the GUI thread (g_main_context_invoke_full is MT-safe); QML calls these directly.
     void loadUrl(const QString &u) { const std::string s = rmweb::normalizeUrl(u.toStdString());
-        marshalToCtx([this, s] { if (m_view) webkit_web_view_load_uri(m_view, s.c_str()); }); }
+        marshalToCtx([this, s] { m_expectUserNav = true; if (m_view) webkit_web_view_load_uri(m_view, s.c_str()); }); }
     void goHome() {
         // Marshalled: reads/writes m_bookmarks and m_history, which the worker-thread LOAD_FINISHED also touches.
         marshalToCtx([this] {
@@ -517,7 +547,7 @@ public Q_SLOTS:
     }
     void goBack()    { marshalToCtx([this] { if (m_view && webkit_web_view_can_go_back(m_view))    webkit_web_view_go_back(m_view); }); }
     void goForward() { marshalToCtx([this] { if (m_view && webkit_web_view_can_go_forward(m_view)) webkit_web_view_go_forward(m_view); }); }
-    void reload()    { marshalToCtx([this] { if (m_view) webkit_web_view_reload(m_view); }); }
+    void reload()    { marshalToCtx([this] { m_expectUserNav = true; if (m_view) webkit_web_view_reload(m_view); }); }
     void stopLoading() { marshalToCtx([this] { if (m_view) webkit_web_view_stop_loading(m_view); }); }
     // In-page find (address bar: "/term" + Go). A fresh term starts a new search (first match is
     // scrolled to + highlighted); repeating the SAME term steps to the next match (wraps around).
@@ -1181,6 +1211,7 @@ private:
         }
         if (ev == WEBKIT_LOAD_FINISHED) {
             self->m_loadInProgress = false;              // the blank-check may now judge
+            self->m_lastLoadFinishedUs = g_get_monotonic_time();   // auto-refresh throttle anchor
             self->m_reloadAttempts = 0;                  // a good load refills the crash auto-reload budget
             Q_EMIT self->loadingChanged(false);
             self->checkReaderable();                     // article? -> enable/disable the Reader button
@@ -1404,6 +1435,8 @@ private:
     bool m_renderFailedState = false; // currently flagged blank (so a later content frame can auto-clear it)
     int m_reloadAttempts = 0; // WebProcess-crash auto-reload budget (reset on a successful load)
     bool m_loadInProgress = false;   // LOAD_STARTED..FINISHED/failed — the blank-check re-arms while true
+    bool m_expectUserNav = false;    // UI-initiated navigation (reload/Go) — exempt from the auto-refresh guard
+    gint64 m_lastLoadFinishedUs = 0; // auto-refresh throttle anchor (set at LOAD_FINISHED)
     guint m_loadGen = 0;           // bumped on each load start -> a stale render-check (grace timer) is skipped
     gint64 m_loadStartUs = 0;      // monotonic time of the current LOAD_STARTED (for [perf] ms offsets)
     bool m_firstContentLogged = false; // true once [perf] first-content has been emitted for this load
