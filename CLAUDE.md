@@ -113,6 +113,15 @@ LOAD_FINISHED after the cancelled load, so the badge never sticks. Related UX: w
 is open (`m_editing && !m_editField`) the render-failed NOTICE is suppressed in paint() — the user came
 to go elsewhere; the white-out still hides the stale page, so typing happens over a clean white
 backdrop (verified: blank.html verdict → RMWEB_DEBUG_KB → grab shows chrome + white + keyboard).
+**Auto-refresh guard (2026-07-26):** a same-URL navigation we didn't initiate (meta refresh / JS
+location.reload / href=self) is throttled to one per `RMWEB_AUTOREFRESH_MS` (default 15000) anchored
+at LOAD_FINISHED — render time doesn't eat the pause — and blocked OUTRIGHT in reader mode (a heavy news portal's
+auto-refresh used to yank the reader view mid-article after an 80 s re-render). `m_expectUserNav`
+(set by reload()/loadUrl() = toolbar Reload, keyboard Go) always passes; link/back-forward types are
+exempt. Verified on-device with a meta-refresh=5s page: auto fire at 5s → `[guard] auto-refresh
+throttled (5.0s < 15s since load finished)`; UITAP on Reload → `[t] load started` (passes), next
+auto fire throttled again. Meta refresh is one-shot — an ignored one does not re-fire; JS
+setInterval-style reloads retry and get throttled each time.
 - **Device:** a process **segfault reboots the device** (watchdog/memfault, ~100 s) — logs go to `/home/root` to
   survive; a SIGSEGV backtrace handler is compiled in (`-rdynamic`).
 **Phase 4 "~6 s per page-turn" SOLVED (2026-06-26):** the culprit was **Mesa softpipe** — the single-threaded,
