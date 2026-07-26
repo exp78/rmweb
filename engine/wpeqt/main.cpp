@@ -1491,10 +1491,14 @@ public:
         // A failed (blank) render is a PAGE state, not an overlay: white out the stale page or the
         // previous site bleeds through around the notice box and reads as a half-rendered mess.
         if (m_renderFailed) p->fillRect(QRectF(0, 0, w, h), Qt::white);
-        // Badge precedence: Loading > RenderFailed > Rendering > nothing.
-        if (m_loading && !m_renderFailed)          drawLoadingBadge(p, w);
-        else if (m_renderFailed)                   drawRenderNotice(p, w, h);
-        else if (m_rendering && !m_renderFailed)   drawRenderingBadge(p, w);
+        // Badge precedence: Loading > RenderFailed > Rendering > nothing. While the URL keyboard is
+        // open the old page's states are noise — the user came here to go ELSEWHERE: the white-out
+        // still hides the stale page, but the notice itself stays out of the way (field edits keep
+        // everything — the page is the context you're typing into).
+        const bool urlEditing = m_editing && !m_editField;
+        if (m_loading && !m_renderFailed)            drawLoadingBadge(p, w);
+        else if (m_renderFailed && !urlEditing)      drawRenderNotice(p, w, h);
+        else if (m_rendering && !m_renderFailed)     drawRenderingBadge(p, w);
         if (!m_notice.isEmpty())                 drawNoticeToast(p, w);   // toast overlays content, not chrome
         if (m_readProgress >= 0.0 && !m_editing) drawReadProgress(p, w, h);  // bottom edge, even in reader-fullscreen
         if (!m_chromeOn && !m_editing) return;  // reader-fullscreen: hide chrome (an open keyboard
