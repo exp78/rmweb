@@ -168,7 +168,8 @@ reset in `m_kbFlush`). Error page: `load-failed` → `buildErrorPage` via `webki
 TLS padlock in the address bar: `WebKitWebView::tlsStateChanged(int)` 0/1/2 → `WpeView::setTlsState`,
 `iconLock` (filled body = https, open shackle = cert errors). Address-bar search: `looksLikeUrl` (url.h);
 non-URL input → `engine.searchAndShow` → `buildSearchResults` (startpage.h) = DDG link
-`https://html.duckduckgo.com/html/?q=` + local matches via `searchBookmarks`/`searchHistory` (profile.h).
+`https://html.duckduckgo.com/html/?q=` + local matches via `searchStore` (profile.h — one template
+for Bookmark/HistoryEntry).
 Long-press link peek: stationary hold >700 ms = `Gesture::LongPress` (TouchReader) → `engine.peekLink` →
 probe with `peek\n<href>` (no navigation) → toast with the URL (≤72 chars + "…"); `TapHit::Peek` in
 fieldprobe.h; `m_lastProbePeek` suppresses linkMissed. Address-bar hint now reads "URL or search — /text

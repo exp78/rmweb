@@ -44,19 +44,13 @@ inline bool containsCI(const std::string& hay, const std::string& needle) {
 }
 
 // Address-bar search over the local stores: case-insensitive substring on title OR url, capped.
-inline std::vector<HistoryEntry> searchHistory(const std::vector<HistoryEntry>& h, const std::string& q, size_t cap = 20) {
-    std::vector<HistoryEntry> out;
-    for (const auto& e : h) {
+// Works for any entry type with .title/.url (HistoryEntry, Bookmark).
+template<typename T>
+inline std::vector<T> searchStore(const std::vector<T>& v, const std::string& q, size_t cap = 20) {
+    std::vector<T> out;
+    for (const auto& e : v) {
         if (out.size() >= cap) break;
         if (containsCI(e.title, q) || containsCI(e.url, q)) out.push_back(e);
-    }
-    return out;
-}
-inline std::vector<Bookmark> searchBookmarks(const std::vector<Bookmark>& bm, const std::string& q, size_t cap = 20) {
-    std::vector<Bookmark> out;
-    for (const auto& b : bm) {
-        if (out.size() >= cap) break;
-        if (containsCI(b.title, q) || containsCI(b.url, q)) out.push_back(b);
     }
     return out;
 }
