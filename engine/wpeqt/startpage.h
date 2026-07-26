@@ -44,13 +44,7 @@ inline std::string utf8First(const std::string& s) {
     return f;
 }
 
-// Domain part of an http(s) URL for the grey subtitle / avatar fallback ("" when unparseable).
-inline std::string urlHost(const std::string& url) {
-    const size_t p = url.find("://");
-    if (p == std::string::npos) return url;
-    const size_t b = p + 3, e = url.find('/', b);
-    return url.substr(b, e == std::string::npos ? std::string::npos : e - b);
-}
+// Domain part of an http(s) URL for the grey subtitle / avatar fallback — hostFromUrl (url.h).
 
 // `recent` is the already-trimmed most-recent slice (the caller passes ~15). `tabs` is the
 // tabs-lite session list (MRU first); each row pairs the page link with a "✕" close command.
@@ -97,7 +91,7 @@ inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
             if (isSafeLinkUrl(t.url)) h += " href='" + htmlEscape(t.url) + "'";
             h += "><span class='chip'>" + htmlEscape(utf8First(label)) + "</span>"
                + "<span class='t'>" + htmlEscape(label)
-               + "<span class='u'>" + htmlEscape(urlHost(t.url)) + "</span></span></a>"
+               + "<span class='u'>" + htmlEscape(hostFromUrl(t.url)) + "</span></span></a>"
                + "<a class='x' href='rmweb:close-tab:" + htmlEscape(t.url) + "'>\xC3\x97</a></div>";   // × U+00D7 (the device font lacks U+2715)
         }
     }
@@ -125,7 +119,7 @@ inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
             if (isSafeLinkUrl(e.url)) h += " href='" + htmlEscape(e.url) + "'";
             h += "><span class='chip'>" + htmlEscape(utf8First(t)) + "</span>"
                + "<span class='t'>" + htmlEscape(t)
-               + "<span class='u'>" + htmlEscape(urlHost(e.url)) + "</span></span></a></div>";
+               + "<span class='u'>" + htmlEscape(hostFromUrl(e.url)) + "</span></span></a></div>";
         }
         h += "<a class='clear' href='rmweb:clear-history'>Clear recent</a>";
     }
@@ -172,7 +166,7 @@ inline std::string buildSearchResults(const std::string& query,
             if (isSafeLinkUrl(url)) h += " href='" + htmlEscape(url) + "'";
             h += "><span class='chip'>" + htmlEscape(utf8First(t)) + "</span>"
                + "<span class='t'>" + htmlEscape(t)
-               + "<span class='u'>" + htmlEscape(urlHost(url)) + "</span></span></a></div>";
+               + "<span class='u'>" + htmlEscape(hostFromUrl(url)) + "</span></span></a></div>";
         }
     };
     rows("Bookmarks", bm.begin(), bm.end(),

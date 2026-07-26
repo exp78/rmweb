@@ -51,7 +51,7 @@ int main() {
     CHECK(utf8First("alpha") == "A");
     CHECK(utf8First("") == "?");
     CHECK(utf8First("\xD0\x91\xD0\xBB\xD0\xBE\xD0\xB3") == "\xD0\x91");   // "Блог" -> "Б"
-    CHECK(urlHost("https://ex.com/path?q=1") == "ex.com");
+    CHECK(hostFromUrl("https://ex.com/path?q=1") == "ex.com");
     CHECK(has(nt, "<span class='chip'>H</span>"));        // history row chip from the url fallback label
 
     // tabs-lite section: rendered only when tabs exist; page link + close command, both escaped
@@ -72,10 +72,10 @@ int main() {
     // address-bar search: case-insensitive substring on title/url, results page renders matches
     CHECK(containsCI("E-Reader Wiki", "reader"));
     CHECK(!containsCI("E-Reader Wiki", "xyz"));
-    std::vector<HistoryEntry> sh = searchHistory({{"https://a.com/x", "Alpha page", 1},
+    std::vector<HistoryEntry> sh = searchStore(std::vector<HistoryEntry>{{"https://a.com/x", "Alpha page", 1},
                                                   {"https://b.com/y", "Beta", 2}}, "alpha");
     CHECK(sh.size() == 1 && sh[0].url == "https://a.com/x");
-    std::vector<Bookmark> sb = searchBookmarks({{"https://a.com", "Alpha"}, {"https://b.com", "Beta"}}, "b.com");
+    std::vector<Bookmark> sb = searchStore(std::vector<Bookmark>{{"https://a.com", "Alpha"}, {"https://b.com", "Beta"}}, "b.com");
     CHECK(sb.size() == 1 && sb[0].title == "Beta");       // url substring matches too
     std::string sr = buildSearchResults("wiki e ink", sb, sh);
     CHECK(has(sr, "Search: wiki e ink"));

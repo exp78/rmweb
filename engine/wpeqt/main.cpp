@@ -595,7 +595,7 @@ public Q_SLOTS:
             if (!m_view) return;
             const std::string term = q.toStdString();
             const std::string html = rmweb::buildSearchResults(term,
-                rmweb::searchBookmarks(m_bookmarks, term), rmweb::searchHistory(m_history, term));
+                rmweb::searchStore(m_bookmarks, term), rmweb::searchStore(m_history, term));
             webkit_web_view_load_html(m_view, html.c_str(), "about:blank");
         });
     }
@@ -991,7 +991,19 @@ private:
     // timeout per store on this context — a repeat inside the window re-arms it. Runs only on the
     // worker thread (like every m_history/m_settings access); flushPendingWrites() covers shutdown.
     static constexpr guint kSaveDebounceMs = 1500;
-    struct SaveMsg { WpeEngine *self; int what; };   // what: 0 = history, 1 = settings, 2 = scroll, 3 = tabs
+    struct SaveMsg { WpeEngine *self; int what; };   // what: 0 = history, 1 = settings, 2 = scroll, 3 = tabs, 4 = passwords
+    static constexpr int kNumStores = 5;
+    // what -> the debounce-slot member. ONE mapping used by onSaveTimer and flushPendingWrites, so
+    // adding a store touches only this and runSave.
+    GSource **saveSlot(int what) {
+        switch (what) {
+            case 0: return &m_historySaveSrc;
+            case 1: return &m_settingsSaveSrc;
+            case 2: return &m_scrollSaveSrc;
+            case 3: return &m_tabsSaveSrc;
+            default: return &m_pwSaveSrc;
+        }
+    }
     void queueSave(GSource **slot, int what) {
         if (*slot) { g_source_destroy(*slot); g_source_unref(*slot); *slot = nullptr; }   // re-arm the window
         auto *m = new SaveMsg{ this, what };
@@ -1005,11 +1017,7 @@ private:
         auto *msg = static_cast<SaveMsg*>(d);
         WpeEngine *self = msg->self;
         const int what = msg->what;
-        GSource **slot = (what == 0) ? &self->m_historySaveSrc
-                       : (what == 1) ? &self->m_settingsSaveSrc
-                       : (what == 2) ? &self->m_scrollSaveSrc
-                       : (what == 3) ? &self->m_tabsSaveSrc
-                                     : &self->m_pwSaveSrc;
+        GSource **slot = self->saveSlot(what);
         g_source_unref(*slot); *slot = nullptr;   // fired: drop our ref (may free msg — locals only from here)
         self->runSave(what);
         return G_SOURCE_REMOVE;
@@ -1023,25 +1031,11 @@ private:
     }
     // Final flush on worker-loop exit (start()): a write still inside its debounce window would be lost.
     void flushPendingWrites() {
-        if (m_historySaveSrc) {
-            g_source_destroy(m_historySaveSrc); g_source_unref(m_historySaveSrc); m_historySaveSrc = nullptr;
-            rmweb::saveHistory(m_profileDir, m_history);
-        }
-        if (m_settingsSaveSrc) {
-            g_source_destroy(m_settingsSaveSrc); g_source_unref(m_settingsSaveSrc); m_settingsSaveSrc = nullptr;
-            rmweb::saveSettings(m_profileDir, m_settings);
-        }
-        if (m_scrollSaveSrc) {
-            g_source_destroy(m_scrollSaveSrc); g_source_unref(m_scrollSaveSrc); m_scrollSaveSrc = nullptr;
-            rmweb::saveScroll(m_profileDir, m_scroll);
-        }
-        if (m_tabsSaveSrc) {
-            g_source_destroy(m_tabsSaveSrc); g_source_unref(m_tabsSaveSrc); m_tabsSaveSrc = nullptr;
-            rmweb::saveTabs(m_profileDir, m_tabs);
-        }
-        if (m_pwSaveSrc) {
-            g_source_destroy(m_pwSaveSrc); g_source_unref(m_pwSaveSrc); m_pwSaveSrc = nullptr;
-            rmweb::savePasswords(m_profileDir, m_passwords);
+        for (int what = 0; what < kNumStores; ++what) {
+            GSource **slot = saveSlot(what);
+            if (!*slot) continue;
+            g_source_destroy(*slot); g_source_unref(*slot); *slot = nullptr;
+            runSave(what);
         }
     }
 
@@ -1243,7 +1237,7 @@ private:
             return TRUE;   // superseded navigation — silent (this API has no WebKitLoadError domain)
         const char *uri = failing_uri ? failing_uri : "";
         qWarning("[nav] load failed: %s (%s)", uri, (error && error->message) ? error->message : "?");
-        if (!uri[0] || (std::string(uri).rfind("http://", 0) != 0 && std::string(uri).rfind("https://", 0) != 0))
+        if (!uri[0] || !rmweb::isSafeLinkUrl(uri))   // only http(s) gets an error page
             return FALSE;
         const std::string html = buildErrorPage(uri, (error && error->message) ? error->message : "unknown error");
         webkit_web_view_load_alternate_html(view, html.c_str(), uri, nullptr);
@@ -1551,8 +1545,9 @@ public:
         m_editField = true; m_editMasked = masked;
         m_chromeOn = true;                      // the keyboard needs the bar (chrome may be hidden)
         g_urlEditing.store(true, std::memory_order_release);
-        m_editBuf = (value.isEmpty() && !suggest.isEmpty()) ? suggest : value;
-        if (value.isEmpty() && !suggest.isEmpty()) setNotice("Autofill — edit or press Go");
+        const bool useSuggest = value.isEmpty() && !suggest.isEmpty();   // prefill an EMPTY field only
+        m_editBuf = useSuggest ? suggest : value;
+        if (useSuggest) setNotice("Autofill — edit or press Go");
         m_kbShift = false; m_kbSym = false; rebuildKeys();
         m_kbFlush.stop();
         schedule(/*guardTouch=*/false);
