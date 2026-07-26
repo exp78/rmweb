@@ -1328,6 +1328,9 @@ private:
             self->m_reloadAttempts++;
             int backoffMs = 500 * (1 << (self->m_reloadAttempts - 1));
             qInfo("[recovery] scheduling reload in %d ms (attempt %d)", backoffMs, self->m_reloadAttempts);
+            // The recovery reload is ENGINE-initiated, not a site auto-refresh — exempt it from
+            // the auto-refresh guard or a crash within the throttle window would never recover.
+            self->m_expectUserNav = true;
             // glib timer on the worker context (same pattern as scheduleRenderCheck): the worker
             // thread runs NO Qt event loop, so QTimer::singleShot here could never fire. The view
             // is ref'd for the wait; the destroy-notify drops the ref whether the timer fires or
