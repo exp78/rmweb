@@ -211,7 +211,10 @@ positive fixed (2026-07-26): the blank-check timer (`scheduleRenderCheck`, 13 s 
 to judge the page while a slow load was STILL in progress (rbc.ru: load finished @34s, verdict @31s →
 bogus "Couldn't display the page"); it now RE-ARMS itself while `m_loadInProgress` (set at
 LOAD_STARTED, cleared at LOAD_FINISHED / non-cancelled load-failed) and only judges a finished load —
-verified on rbc.ru (`[render] nonWhite=912 blank=0` after finish, no notice over the site skeleton). **Verify gotchas:**
+verified on rbc.ru (`[render] nonWhite=912 blank=0` after finish, no notice over the site skeleton).
+The notice itself is now a PAGE state, not an overlay: `paint()` whites out the stale frame when
+`m_renderFailed` (before: the box floated over the previous site → "notice + half-rendered page" mess).
+Regression step in verify-on-device.sh [8/9]: blank.html must yield the clean white notice. **Verify gotchas:**
 probe coords = css px * dpr * **zoom** — the script pins `zoom=1.0` in the device profile first (a
 leftover zoom silently shifts every hit target); the auto-pager ALTERNATES direction (down @4s,
 up @8s) so grab @6s, not ≥8s; a grab can come out pure black mid-refresh (transient — just retake);
