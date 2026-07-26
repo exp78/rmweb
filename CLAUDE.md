@@ -193,6 +193,14 @@ bar (37c6eff):** the pageBy and scroll-restore JS answer `sm=<max scroll of the 
 onJsDone maps `sy/sm` to a 0..1 fraction (`sm<=40` ⇒ -1 = hide) and emits `readProgressChanged`;
 WpeView paints a 6 px white track + black fill + 1 px separator along the VERY bottom edge — even
 with chrome hidden (reader fullscreen), skipped while editing; `urlChanged` resets it to hidden.
+Review (6376daa) + simplify (baecf4b) checkpoints done (review findings fixed: no self-present in
+setReadProgress, progress gated on m_curUrl, hint includes f.type, long-press hit-tests chrome,
+looksLikeUrl accepts localhost/host:port). **Batch verification:** `scripts/verify-on-device.sh` —
+one command runs start/error-page/search/TLS grabs, spins a local form+long page on
+10.11.99.5:8765 (steps skipped when the USB link IP is absent) for autofill learn→prefill and
+password learn→prefill (probe coords assume RMWEB_DPR=2), auto-page progress-bar grab; pulls
+build/verify/<step>.{png,log} with log-grep hints. Deferred till after on-device verification:
+chrome layout/icon dedup, start-page CSS sharing (touch geometry + visuals, must be eyeballed).
 
 The production env is DRY
 in `device/rmweb-env.sh` (sourced by both the launcher and the dev runner `scripts/run-wpeqt-on-device.sh`);
