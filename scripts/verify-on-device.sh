@@ -75,7 +75,9 @@ EOF
   python3 -m http.server "$SRV_PORT" --bind "$MAC_IP" --directory "$SRV" >/dev/null 2>&1 &
   SRV_PID=$!
   sleep 1
-  # Probe/commit coords: panel px = CSS px * dpr (RMWEB_DPR=2 forced), fields at left:40 width:300.
+  # Probe/commit coords: panel px = CSS px * dpr * zoom. A zoom left over in the profile shifts
+  # every hit target, so pin it to 1.0 for the coordinate-based steps (RMWEB_DPR=2 forced too).
+  ssh "$DUSER@$HOST" "sed -i 's/^zoom=.*/zoom=1.0/' /home/root/.rmweb/settings.txt" 2>/dev/null || true
   FORM="http://$MAC_IP:$SRV_PORT/form.html"
 
   echo "== [5/8] autofill: learn email, then prefill on next visit =="
@@ -102,9 +104,11 @@ EOF
 
   echo "== [7/8] reading-progress bar (auto page-turns on a long page) =="
   fresh
-  SHOW_SECS=13 RMWEB_DPR=2 RMWEB_AUTOPAGE_MS=4000 RMWEB_GRAB_MS=10500 \
+  # The auto-pager ALTERNATES direction (4 s down, 8 s up, ...), so grab at 6 s — right after the
+  # first page-down — or the shot lands back at the top where the fill is zero-width (invisible).
+  SHOW_SECS=9 RMWEB_DPR=2 RMWEB_AUTOPAGE_MS=4000 RMWEB_GRAB_MS=6000 \
     ./scripts/run-wpeqt-on-device.sh show "http://$MAC_IP:$SRV_PORT/long.html"
-  pull progress            # expect: black fill along the bottom edge after 2 turns
+  pull progress            # expect: black fill along the bottom edge after the first turn
 else
   echo "== steps 5-8 SKIPPED: $MAC_IP not configured on this Mac (USB link down?) =="
 fi
