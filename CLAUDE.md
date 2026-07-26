@@ -104,6 +104,12 @@ facts, all verified on-device and written up in `docs/research/` (4 sourced docs
   "Sites: mobile (lighter)/desktop" (`rmweb:toggle-ua` — flips `settings.ua`, applies live via
   `webkit_settings_set_user_agent(..., nullptr|kMobileUA)`, persists). ua=mobile is ON in this device's
   profile. Desktop-mode heavy SPAs remain the platform ceiling, not a shell bug.
+**Loading-badge abort (2026-07-26):** the "Loading NN%" pill gained an X at its right end —
+`drawLoadingBadge` stashes `m_loadingStopRect`, `hitLoadingStop(x,y)` routes a tap there to the same
+`engine.stopLoading()` as the toolbar Stop (verified end-to-end via the new `RMWEB_DEBUG_UITAP="x,y"`
+diag, which emits a synthetic ROUTER tap — `[uitap][dbg]` → `[nav] stop via badge` → LOAD_FINISHED
+@4.7s, badge gone, Reload icon back). Stop cancels a stuck load cleanly: WebKit still emits
+LOAD_FINISHED after the cancelled load, so the badge never sticks.
 - **Device:** a process **segfault reboots the device** (watchdog/memfault, ~100 s) — logs go to `/home/root` to
   survive; a SIGSEGV backtrace handler is compiled in (`-rdynamic`).
 **Phase 4 "~6 s per page-turn" SOLVED (2026-06-26):** the culprit was **Mesa softpipe** — the single-threaded,

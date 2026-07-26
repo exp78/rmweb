@@ -1537,6 +1537,10 @@ public:
     bool chromeOn()  const { return m_chromeOn; }
     bool isLoading() const { return m_loading; }
     bool isEditing() const { return m_editing; }
+    // Tap on the X at the right end of the "Loading NN%" pill (rect stashed by drawLoadingBadge).
+    bool hitLoadingStop(int x, int y) const {
+        return m_loading && !m_renderFailed && m_loadingStopRect.contains(x, y);
+    }
     // Brief inverted flash on a tapped chrome button — on a ~200 ms-latency panel an instant
     // acknowledgement is what makes the UI feel responsive. One present now, one to restore.
     void pressChrome(Hit h) {
@@ -1746,10 +1750,10 @@ private Q_SLOTS:
 private:
     // --- B2 frame painters (called by paint(); kept here so paint() stays a short orchestrator) -------------
     // Shared pill: draws a centered rounded-rect badge with a text label at kBarH+50. Returns the pill rect.
-    QRectF drawTextPill(QPainter *p, qreal w, const QString &lbl, qreal extraLeftW = 0) const {
+    QRectF drawTextPill(QPainter *p, qreal w, const QString &lbl, qreal extraLeftW = 0, qreal extraRightW = 0) const {
         QFont lf = p->font(); lf.setPixelSize(40); p->setFont(lf);
         const qreal tw = p->fontMetrics().horizontalAdvance(lbl);
-        const qreal pad = 30, bh = 96, bw = pad + extraLeftW + tw + pad;
+        const qreal pad = 30, bh = 96, bw = pad + extraLeftW + tw + extraRightW + pad;
         const qreal bx = (w - bw) / 2, by = kBarH + 50;
         p->setPen(Qt::black); p->setBrush(Qt::white);
         p->drawRoundedRect(QRectF(bx, by, bw, bh), 18, 18);
@@ -1757,11 +1761,12 @@ private:
         p->drawText(QRectF(bx + pad + extraLeftW, by, tw + 6, bh), Qt::AlignVCenter | Qt::AlignLeft, lbl);
         return QRectF(bx, by, bw, bh);
     }
-    // "Working hard" indicator while a page loads: an hourglass + "Loading NN%" from the real load progress.
+    // "Working hard" indicator while a page loads: an hourglass + "Loading NN%" from the real load progress,
+    // plus an X at the right end — tap it to abort a load that's going nowhere (see hitLoadingStop).
     void drawLoadingBadge(QPainter *p, qreal w) const {
         const QString lbl = QStringLiteral("Loading %1%").arg(int(m_loadProgress * 100));
-        const qreal iconW = 34, gap = 18;
-        QRectF pill = drawTextPill(p, w, lbl, iconW + gap);
+        const qreal iconW = 34, gap = 18, stopW = 34, stopGap = 18;
+        QRectF pill = drawTextPill(p, w, lbl, iconW + gap, stopGap + stopW);
         // Hourglass icon inside the left padding area of the pill.
         const qreal ix = pill.x() + 30, iy = pill.y() + (pill.height() - 48) / 2;
         QPolygonF top, bot;
@@ -1769,6 +1774,13 @@ private:
         bot << QPointF(ix + iconW / 2, iy + 24) << QPointF(ix, iy + 48) << QPointF(ix + iconW, iy + 48);
         p->setBrush(Qt::black); p->drawPolygon(top); p->drawPolygon(bot);
         p->setBrush(Qt::NoBrush);
+        // X (abort) inside the right padding area; the whole right end of the pill is the hit zone.
+        const qreal sx = pill.right() - 30 - stopW, sy = pill.y() + (pill.height() - stopW) / 2;
+        QPen xp(Qt::black); xp.setWidth(6); xp.setCapStyle(Qt::RoundCap); p->setPen(xp);
+        p->drawLine(QPointF(sx, sy), QPointF(sx + stopW, sy + stopW));
+        p->drawLine(QPointF(sx + stopW, sy), QPointF(sx, sy + stopW));
+        p->setPen(Qt::black);
+        m_loadingStopRect = QRectF(sx - stopGap, pill.y(), pill.right() - sx + stopGap, pill.height());
     }
     // "Rendering…" pill: shown after load-finished while llvmpipe composites the page (no progress data).
     void drawRenderingBadge(QPainter *p, qreal w) const {
@@ -2035,6 +2047,7 @@ private:
     QTimer m_noticeTimer;                        // toast auto-clear (find results, downloads)
     QString m_notice;                            // toast text ("" = hidden)
     double m_readProgress = -1.0;                // reading position 0..1; <0 = bar hidden
+    mutable QRectF m_loadingStopRect;            // X zone of the "Loading NN%" pill (stashed by its painter)
     static const int kNoticeMs = 4000;           // toast on-screen time
     // chrome state, painted into the frame (reader-first: shown on launch, hidden by a content tap).
     // Chrome layout (panel 1620): left cluster | wide address box | A- A+ ★ Reader Power
@@ -2435,6 +2448,13 @@ int main(int argc, char **argv) {
                     case WpeView::None:    break;             // tap not on the bar
                     default:              break;
                 }
+                // The "Loading NN%" pill carries its own abort X — same engine path as the toolbar Stop.
+                if (view->hitLoadingStop(x, y)) {
+                    qInfo("[nav] stop via badge");
+                    view->forceNextContent();
+                    engine.stopLoading();
+                    return;
+                }
                 // Page-turn zones: when chrome is HIDDEN use left/right edges (reading mode).
                 // When chrome is SHOWN, edges would steal link taps — only swipe pages then.
                 // Swipe always pages (connected above).
@@ -2550,6 +2570,19 @@ int main(int argc, char **argv) {
                     QTimer::singleShot(8500, &app, [&engine]{ engine.logFieldState(); });
                 }
             } else qWarning("[form][dbg] bad spec (want x,y[,text]): %s", qPrintable(spec));
+        }
+
+        // DIAG (RMWEB_DEBUG_UITAP="x,y"): emit a synthetic ROUTER tap at panel (x,y) once after 5 s —
+        // exercises the full touch route (chrome hit-test, loading-badge stop, page zones), unlike
+        // RMWEB_DEBUG_PROBE which goes straight to the content probe.
+        if (qEnvironmentVariableIsSet("RMWEB_DEBUG_UITAP")) {
+            const QString spec = qEnvironmentVariable("RMWEB_DEBUG_UITAP");
+            const int c1 = spec.indexOf(QLatin1Char(','));
+            const int px = spec.left(c1).toInt(), py = (c1 > 0 ? spec.mid(c1 + 1) : QString()).toInt();
+            if (c1 > 0) QTimer::singleShot(5000, &app, [&touchReader, px, py]{
+                qInfo("[uitap][dbg] tap @ %d,%d", px, py);
+                Q_EMIT touchReader.tap(px, py);
+            });
         }
 
         // DIAG (RMWEB_DEBUG_ZOOM): bump page zoom +2 steps after N ms (verify the scaling with RMWEB_GRAB_MS).
