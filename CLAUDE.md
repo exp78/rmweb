@@ -206,7 +206,12 @@ learn→prefill and password learn→prefill, auto-page progress-bar grab; pulls
 build/verify/<step>.{png,log} with log-grep hints. Verification fixes (c2d6c90): `onUri` ignores
 `about:blank` (load_html search page must not clobber the typed query in the bar; the
 RMWEB_DEBUG_SEARCH diag path now mirrors urlEntered: setAddr(term) + hide progress);
-RMWEB_DEBUG_FORM feeds the learner (`engine.learnFieldText` after `setFieldText`). **Verify gotchas:**
+RMWEB_DEBUG_FORM feeds the learner (`engine.learnFieldText` after `setFieldText`). Slow-site false
+positive fixed (2026-07-26): the blank-check timer (`scheduleRenderCheck`, 13 s from LOAD_STARTED) used
+to judge the page while a slow load was STILL in progress (a heavy news portal: load finished @34s, verdict @31s →
+bogus "Couldn't display the page"); it now RE-ARMS itself while `m_loadInProgress` (set at
+LOAD_STARTED, cleared at LOAD_FINISHED / non-cancelled load-failed) and only judges a finished load —
+verified on a heavy news portal (`[render] nonWhite=912 blank=0` after finish, no notice over the site skeleton). **Verify gotchas:**
 probe coords = css px * dpr * **zoom** — the script pins `zoom=1.0` in the device profile first (a
 leftover zoom silently shifts every hit target); the auto-pager ALTERNATES direction (down @4s,
 up @8s) so grab @6s, not ≥8s; a grab can come out pure black mid-refresh (transient — just retake);
