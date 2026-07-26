@@ -161,7 +161,7 @@ inline std::string buildSearchResults(const std::string& query,
         ".empty{color:#666;font-size:28px;padding:16px 0;}"
         "</style></head><body><div class='hero'>Search: " + htmlEscape(query) + "</div>"
         "<a class='web' href='https://html.duckduckgo.com/html/?q=" + urlEncode(query) + "'>"
-        "<span class='chip'>&#8594;</span>Search the web<span class='q'>" + htmlEscape(query) + "</span></a>";
+        "<span class='chip'>&#187;</span>Search the web<span class='q'>" + htmlEscape(query) + "</span></a>";
     auto rows = [&](const char* head, auto begin, auto end, auto labelOf, auto urlOf) {
         if (begin == end) return;
         h += std::string("<h2>") + head + "</h2>";

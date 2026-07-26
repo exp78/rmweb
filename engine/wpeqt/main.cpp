@@ -554,7 +554,8 @@ public Q_SLOTS:
                 "var v=f.isContentEditable?(f.textContent||''):(f.value||'');"
                 "var m=(f.type||'').toLowerCase()==='password'?'1':'0';"
                 // Identity clues for autofill classification — one line, whitespace-folded.
-                "var h=((f.autocomplete||'')+' '+(f.name||'')+' '+(f.id||'')+' '+"
+                // f.type included: type="email" is the most common email-field marker.
+                "var h=((f.autocomplete||'')+' '+(f.name||'')+' '+(f.id||'')+' '+(f.type||'')+' '+"
                 "(f.getAttribute('placeholder')||'')).replace(/\\s+/g,' ').slice(0,80);"
                 "return 'field\\n'+m+'\\n'+h+'\\n'+v;}"
                 "function probe(e){"
@@ -663,9 +664,11 @@ public Q_SLOTS:
         // password). m_lastCommitText holds the plaintext of this commit (cleared right after).
         if (out.rfind("pw\n", 0) == 0 && !self->m_lastCommitText.empty()) {
             const std::string host = rmweb::hostFromUrl(self->m_curUrl);
-            rmweb::upsertPassword(self->m_passwords, host, out.substr(3), self->m_lastCommitText);
-            self->queueSave(&self->m_pwSaveSrc, 4);
-            qInfo("[form] password saved for %s", host.empty() ? "?" : host.c_str());
+            if (!host.empty()) {   // no host (file://, about:) -> upsert no-ops; don't claim a save
+                rmweb::upsertPassword(self->m_passwords, host, out.substr(3), self->m_lastCommitText);
+                self->queueSave(&self->m_pwSaveSrc, 4);
+                qInfo("[form] password saved for %s", host.c_str());
+            }
         }
         self->m_lastCommitText.clear();
     }
@@ -797,19 +800,22 @@ private:
         const size_t p = dbg.find("sy=");
         if (p != std::string::npos) {
             const int pos = atoi(dbg.c_str() + p + 3);
+            // Both the scroll store and the progress bar stay gated on m_curUrl: a stale eval that
+            // completes AFTER a navigation committed (m_curUrl cleared at LOAD_COMMITTED) must not
+            // stamp the old page's position/progress onto the new one.
             if (!self->m_curUrl.empty()) {
                 self->m_curScroll = pos;
                 rmweb::upsertScroll(self->m_scroll, self->m_curUrl, pos);
                 self->queueSave(&self->m_scrollSaveSrc, 2);
-            }
-            // Reading-progress bar: sm = max scroll of the USED scroller (pageBy/restore answer it);
-            // <=40 px of scroll range = the page doesn't really scroll -> hide the bar (-1).
-            const size_t sm = dbg.find(" sm=");
-            if (sm != std::string::npos) {
-                const int maxY = atoi(dbg.c_str() + sm + 4);
-                double frac = -1.0;
-                if (maxY > 40) frac = std::min(1.0, std::max(0.0, double(pos) / maxY));
-                Q_EMIT self->readProgressChanged(frac);
+                // Reading-progress bar: sm = max scroll of the USED scroller (pageBy/restore answer
+                // it); <=40 px of scroll range = the page doesn't really scroll -> hide the bar (-1).
+                const size_t sm = dbg.find(" sm=");
+                if (sm != std::string::npos) {
+                    const int maxY = atoi(dbg.c_str() + sm + 4);
+                    double frac = -1.0;
+                    if (maxY > 40) frac = std::min(1.0, std::max(0.0, double(pos) / maxY));
+                    Q_EMIT self->readProgressChanged(frac);
+                }
             }
         }
     }
@@ -1661,9 +1667,10 @@ public Q_SLOTS:
         m_noticeTimer.start(kNoticeMs);          // re-arms if a second notice lands quickly
         schedule();
     }
-    void setReadProgress(double f) {             // reading position 0..1; -1 hides the bar
-        if (f != m_readProgress) { m_readProgress = f; schedule(); }
-    }
+    void setReadProgress(double f) {             // reading position 0..1; -1 hides the bar.
+        m_readProgress = f;                      // NO schedule(): a content frame always follows
+    }                                            // (scroll/restore force one) — a separate present
+                                                 // here would double the e-ink flash per page turn
 protected:
     void itemChange(ItemChange ch, const ItemChangeData &d) override {
         if (ch == ItemSceneChange && d.window)   // frameSwapped fires after the panel present returns
@@ -2327,6 +2334,7 @@ int main(int argc, char **argv) {
             } else {
                 view->forceNextContent();   // the results page must paint promptly
                 engine.searchAndShow(u);
+                view->setAddr(u);           // keep the typed query visible (not "about:blank")
             }
         });
         // Engine toasts (find results, downloads) -> the chrome overlay.
@@ -2417,8 +2425,12 @@ int main(int argc, char **argv) {
         QObject::connect(&engine, &WpeEngine::linkMissed, win ? win : qobject_cast<QObject*>(&app),
             [view]{ view->setChromeOn(!view->chromeOn()); }, Qt::QueuedConnection);
         // Long-press on a link -> toast its target URL without navigating (peek, read-only probe).
+        // Long-press on the CHROME is not a content peek — hit-test first (same as the tap path).
         QObject::connect(&touchReader, &TouchReader::longPress, win ? win : qobject_cast<QObject*>(&app),
-            [&engine](int x, int y){ engine.peekLink(x, y); }, Qt::QueuedConnection);
+            [&engine, view](int x, int y){
+                if (view->hitChrome(x, y) != WpeView::None) return;
+                engine.peekLink(x, y);
+            }, Qt::QueuedConnection);
         touchThread.start();
 
         // DIAG: GUI event-loop heartbeat. If these "[gui] tick" lines stop, the GUI thread is blocked
