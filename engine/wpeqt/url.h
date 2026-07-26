@@ -16,7 +16,8 @@ inline std::string normalizeUrl(std::string s) {
 }
 
 // Address-bar classifier: does the input look like a navigable URL (vs a search query)? Anything
-// scheme'd qualifies; otherwise a single whitespace-free token containing a dot (host.tld).
+// scheme'd qualifies; otherwise a single whitespace-free token containing a dot (host.tld),
+// localhost[*], or host:port (intranet names).
 inline bool looksLikeUrl(std::string s) {
     auto notSpace = [](unsigned char c) { return !std::isspace(c); };
     s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
@@ -24,7 +25,13 @@ inline bool looksLikeUrl(std::string s) {
     if (s.empty()) return false;
     if (s.find("://") != std::string::npos) return true;
     if (std::any_of(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c); })) return false;
-    return s.find('.') != std::string::npos;
+    if (s.find('.') != std::string::npos) return true;
+    if (s.rfind("localhost", 0) == 0) return true;   // localhost[:port][/path]
+    // host:port (intranet names without a dot — "nas:8080")
+    const size_t c = s.find(':');
+    if (c > 0 && c + 1 < s.size() &&
+        std::all_of(s.begin() + c + 1, s.end(), [](unsigned char d) { return std::isdigit(d); })) return true;
+    return false;
 }
 
 // Percent-encode everything outside the unreserved set (query values for search URLs).

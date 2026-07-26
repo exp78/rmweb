@@ -30,8 +30,11 @@ int main() {
     CHECK(looksLikeUrl("example.com"));                    // bare host
     CHECK(looksLikeUrl("https://x.org/p"));                // scheme'd
     CHECK(looksLikeUrl("  ex.com  "));                     // trims first
+    CHECK(looksLikeUrl("localhost"));                      // local services
+    CHECK(looksLikeUrl("localhost:8080"));                 // localhost + port
+    CHECK(looksLikeUrl("nas:8080"));                       // intranet host:port
     CHECK(!looksLikeUrl("wiki e ink"));                    // spaces -> query
-    CHECK(!looksLikeUrl("localhost"));                     // no dot, no scheme -> query
+    CHECK(!looksLikeUrl("e-ink"));                         // no dot/port -> query
     CHECK(!looksLikeUrl(""));                              // empty
     CHECK(!looksLikeUrl("   "));                           // all-space
 

@@ -10,7 +10,7 @@ struct GestureParams {
     int swipeMinDy    = 240;  // vertical travel (panel px) to count as a page turn (~11% of height)
     int swipeMaxDx    = 200;  // keep a swipe roughly vertical (reject diagonals)
     int tapMaxMove    = 40;   // max travel (panel px) for a contact to still be a tap
-    int tapMaxDwellMs = 700;  // max contact duration (ms) for a tap — longer is a long-press, ignored
+    int tapMaxDwellMs = 700;  // max contact duration (ms) for a tap — longer is a long-press (link peek)
 };
 
 // dx,dy = lift - down position (panel px); dwellMs = contact duration. A near-stationary, short contact
