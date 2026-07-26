@@ -95,8 +95,15 @@ facts, all verified on-device and written up in `docs/research/` (4 sourced docs
   heavy pages via content-blocking instead. Toggles: `RMWEB_JIT=1`, `RMWEB_JSC_OPTS="JSC_x=y ..."`.
   **Measured 2026-07-26:** rbc.ru on the interpreter — load finished @40s (network FINE, WPENetworkProcess
   idle), then WPEWebProcess pegged 93–98% CPU for 150s straight and the page NEVER hydrates past its SSR
-  skeleton. Heavy SPAs are CPU-bound, not network-bound; 150s is not "slow", it's "effectively never".
-  Wikipedia-class (server-rendered, light JS) works great. This is the platform ceiling, not a shell bug.
+  skeleton. Wikipedia-class (server-rendered, light JS) works great. Refined with `RMWEB_NOJS=1` (diag
+  lever, disables JavaScript entirely — ours too): with JS OFF the load STILL wasn't done at 80s
+  ("Loading 65%" — the page drags megabytes of assets through the USB link) and CPU stayed ~86% —
+  so the cost is three-way: network volume, CSS/layout/paint pipeline, JS execution. **The working
+  lever is `RMWEB_UA=mobile`:** rbc.ru with the iPhone UA serves SSR HEADLINES (readable news at ~80s,
+  no hydration needed) instead of the desktop JS-app skeleton. Surfaced as a start-page Settings row
+  "Sites: mobile (lighter)/desktop" (`rmweb:toggle-ua` — flips `settings.ua`, applies live via
+  `webkit_settings_set_user_agent(..., nullptr|kMobileUA)`, persists). ua=mobile is ON in this device's
+  profile. Desktop-mode heavy SPAs remain the platform ceiling, not a shell bug.
 - **Device:** a process **segfault reboots the device** (watchdog/memfault, ~100 s) — logs go to `/home/root` to
   survive; a SIGSEGV backtrace handler is compiled in (`-rdynamic`).
 **Phase 4 "~6 s per page-turn" SOLVED (2026-06-26):** the culprit was **Mesa softpipe** — the single-threaded,

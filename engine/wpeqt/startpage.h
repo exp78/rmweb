@@ -53,7 +53,8 @@ inline std::string utf8First(const std::string& s) {
 inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
                                   const std::vector<HistoryEntry>& recent,
                                   const std::vector<Tab>& tabs = {},
-                                  bool readerDark = false) {
+                                  bool readerDark = false,
+                                  bool mobileUa = false) {
     std::string h =
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'><title>rmweb</title>"
@@ -125,6 +126,9 @@ inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
     }
     h += "<h2>Settings</h2><div class='row'><a class='rowlink' href='rmweb:toggle-dark'><span class='t'>Reader theme: ";
     h += readerDark ? "dark" : "light";
+    h += "</span></a></div>"
+         "<div class='row'><a class='rowlink' href='rmweb:toggle-ua'><span class='t'>Sites: ";
+    h += mobileUa ? "mobile (lighter)" : "desktop";
     h += "</span></a></div></body></html>";
     return h;
 }

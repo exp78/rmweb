@@ -371,6 +371,15 @@ public Q_SLOTS:
                         rmweb::saveSettings(self->m_profileDir, self->m_settings);
                         qInfo("[reader] dark theme %s", self->m_settings.readerDark ? "on" : "off");
                         self->goHome();
+                    } else if (cmd == "toggle-ua") {
+                        // Mobile UA = lighter server-rendered pages (rbc.ru becomes READABLE — SSR
+                        // headlines instead of a JS-app skeleton). Applied live; persists in settings.
+                        self->m_settings.ua = (self->m_settings.ua == "mobile") ? "" : "mobile";
+                        rmweb::saveSettings(self->m_profileDir, self->m_settings);
+                        webkit_settings_set_user_agent(webkit_web_view_get_settings(self->m_view),
+                            self->m_settings.ua.empty() ? nullptr : kMobileUA);   // nullptr = WPE default
+                        qInfo("[ua] %s", self->m_settings.ua.empty() ? "desktop (default)" : kMobileUA);
+                        self->goHome();
                     }
                 } else {
                     qWarning("[nav] rmweb: command from non-start page ignored (current: %s)", cur ? cur : "(none)");
@@ -399,6 +408,12 @@ public Q_SLOTS:
             // Persist the "off" clear immediately: a direct write is fine here (startup, before the loop
             // runs) — the debounced queueSave() exists for the runtime hot paths.
             if (uaEnv && std::string(uaEnv) == "off") rmweb::saveSettings(m_profileDir, m_settings);
+        }
+        // DIAG (RMWEB_NOJS=1): disable JavaScript entirely — splits "slow site" into JS-engine vs
+        // CSS/layout cost (our own scroll/probe/reader JS goes down too; diagnostic only).
+        if (qEnvironmentVariableIntValue("RMWEB_NOJS") == 1) {
+            webkit_settings_set_enable_javascript(webkit_web_view_get_settings(m_view), FALSE);
+            qInfo("[diag] JavaScript DISABLED (RMWEB_NOJS=1)");
         }
         // In-page find feedback ("found N" / "no matches" toast) and downloads live on the view's
         // session/context; all signals fire on this worker thread, like every other handler above.
@@ -485,7 +500,7 @@ public Q_SLOTS:
         // Marshalled: reads/writes m_bookmarks and m_history, which the worker-thread LOAD_FINISHED also touches.
         marshalToCtx([this] {
             const std::string html = rmweb::buildStartPage(m_bookmarks, firstN(m_history, 15),
-                                                           m_tabs, m_settings.readerDark);
+                                                           m_tabs, m_settings.readerDark, m_settings.ua == "mobile");
             const std::string path = m_profileDir + "/home.html";
             rmweb::detail::atomicWrite(path, html);
             loadUrl(QString::fromStdString("file://" + path));
@@ -1051,7 +1066,7 @@ private:
             // (we ARE on the worker context, so the inner marshalToCtx re-posts to the same context —
             // harmless, and keeps the identical dispatch path as a tap-router-initiated goHome()).
             const std::string html = rmweb::buildStartPage(m_bookmarks, firstN(m_history, 15),
-                                                           m_tabs, m_settings.readerDark);
+                                                           m_tabs, m_settings.readerDark, m_settings.ua == "mobile");
             const std::string path = m_profileDir + "/home.html";
             rmweb::detail::atomicWrite(path, html);
             webkit_web_view_load_uri(m_view, ("file://" + path).c_str());
