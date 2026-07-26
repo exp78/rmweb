@@ -1473,24 +1473,32 @@ public:
     }
     // Hit-test a tap against the chrome bar (panel px); returns the control, or None (off / below the bar).
     enum Hit { None, Back, Fwd, Reload, Home, Address, AddressClear, ZoomOut, ZoomIn, Bookmark, Reader, Power };
+    // Right-cluster geometry (panel px) — ONE source for hit-test, pressed overlay and painting.
+    struct ChromeX { int powerX, readerX, starX, zInX, zOutX; };
+    ChromeX chromeLayout() const {
+        ChromeX c;
+        c.powerX  = int(width()) - kPowerW;         // right: A- | A+ | ★ | Reader | Power
+        c.readerX = c.powerX - kReaderW;
+        c.starX   = c.readerX - kStarW;
+        c.zInX    = c.starX - kZoomW;
+        c.zOutX   = c.zInX - kZoomW;
+        return c;
+    }
     Hit hitChrome(int x, int y) const {
         if (!m_chromeOn || y >= kBarH) return None;
-        const int powerX  = int(width()) - kPowerW;         // right: A- | A+ | ★ | Reader | Power
-        const int readerX = powerX - kReaderW;
-        const int starX   = readerX - kStarW;
-        const int zInX = starX - kZoomW, zOutX = zInX - kZoomW;
+        const ChromeX c = chromeLayout();
         if (x < kBackX)         return Back;
         if (x < kFwdX)          return Fwd;
         if (x < kRelX)          return Reload;
         if (x < kRelX + kHomeW) return Home;                // Home sits just after Reload
-        if (x >= powerX)        return Power;
-        if (x >= readerX)       return Reader;
-        if (x >= starX)         return Bookmark;
-        if (x >= zInX)          return ZoomIn;
-        if (x >= zOutX)         return ZoomOut;
+        if (x >= c.powerX)      return Power;
+        if (x >= c.readerX)     return Reader;
+        if (x >= c.starX)       return Bookmark;
+        if (x >= c.zInX)        return ZoomIn;
+        if (x >= c.zOutX)       return ZoomOut;
         // Inside the address box: × on the right while editing clears the typed buffer.
         if (m_editing) {
-            const int clearLeft = zOutX - 8 - kClearW;
+            const int clearLeft = c.zOutX - 8 - kClearW;
             if (x >= clearLeft) return AddressClear;
         }
         return Address;
@@ -1506,22 +1514,42 @@ public:
         schedule(/*guardTouch=*/false);
         QTimer::singleShot(180, this, [this]{ m_pressed = None; schedule(/*guardTouch=*/false); });
     }
-    // Panel-px rect of a chrome control (same layout math as hitChrome), for the pressed overlay.
+    // Panel-px rect of a chrome control (same layout as hitChrome via chromeLayout), for painting.
     QRectF chromeHitRect(Hit h) const {
-        const qreal w = width();
-        const qreal powerX = w - kPowerW, readerX = powerX - kReaderW, starX = readerX - kStarW;
-        const qreal zInX = starX - kZoomW, zOutX = zInX - kZoomW;
+        const ChromeX c = chromeLayout();
         switch (h) {
             case Back:     return QRectF(0, 0, kBackX, kBarH);
             case Fwd:      return QRectF(kBackX, 0, kFwdX - kBackX, kBarH);
             case Reload:   return QRectF(kFwdX, 0, kRelX - kFwdX, kBarH);
             case Home:     return QRectF(kRelX, 0, kHomeW, kBarH);
-            case ZoomOut:  return QRectF(zOutX, 0, kZoomW, kBarH);
-            case ZoomIn:   return QRectF(zInX, 0, kZoomW, kBarH);
-            case Bookmark: return QRectF(starX, 0, kStarW, kBarH);
-            case Reader:   return QRectF(readerX, 0, kReaderW, kBarH);
-            case Power:    return QRectF(powerX, 0, kPowerW, kBarH);
+            case ZoomOut:  return QRectF(c.zOutX, 0, kZoomW, kBarH);
+            case ZoomIn:   return QRectF(c.zInX, 0, kZoomW, kBarH);
+            case Bookmark: return QRectF(c.starX, 0, kStarW, kBarH);
+            case Reader:   return QRectF(c.readerX, 0, kReaderW, kBarH);
+            case Power:    return QRectF(c.powerX, 0, kPowerW, kBarH);
             default:       return QRectF();
+        }
+    }
+    // One glyph per chrome control, centered on its rect (chromeHitRect). Callers set pen/brush for
+    // state (enabled grey / pressed white); the Reader mode chip background stays with the caller.
+    void drawChromeIcon(QPainter *p, Hit h) const {
+        const QRectF r = chromeHitRect(h);
+        const qreal cx = r.center().x(), cy = r.center().y();
+        switch (h) {
+            case Back:     iconBack(p, cx, cy); break;
+            case Fwd:      iconFwd(p, cx, cy); break;
+            case Reload:   m_loading ? iconStop(p, cx, cy) : iconReload(p, cx, cy); break;
+            case Home:     iconHome(p, cx, cy); break;
+            case Bookmark: iconStar(p, cx, cy, m_bookmarked); break;
+            case Reader:   iconReader(p, cx, cy); break;
+            case Power:    iconPower(p, cx, cy); break;
+            case ZoomOut:
+            case ZoomIn: {
+                QFont zf = p->font(); zf.setPixelSize(40); zf.setBold(true); p->setFont(zf);
+                p->drawText(r, Qt::AlignCenter, h == ZoomOut ? "A-" : "A+");
+                break;
+            }
+            default: break;
         }
     }
     // URL entry: tap address -> empty field + keyboard. Cancel / empty Go keep the previous URL.
@@ -1771,19 +1799,17 @@ private:
     void drawChromeBar(QPainter *p, qreal w) const {
         p->fillRect(QRectF(0, 0, w, kBarH), Qt::white);
         p->fillRect(QRectF(0, kBarH - 3, w, 3), Qt::black);
-        const qreal cy = kBarH / 2.0;
         auto pen = [&](bool on) { p->setPen(on ? Qt::black : QColor(170, 170, 170)); p->setBrush(Qt::NoBrush); };
-        pen(m_canBack); iconBack(p, kBackX / 2.0, cy);
-        pen(m_canFwd);  iconFwd (p, (kBackX + kFwdX) / 2.0, cy);
-        pen(true);      m_loading ? iconStop(p, (kFwdX + kRelX) / 2.0, cy) : iconReload(p, (kFwdX + kRelX) / 2.0, cy);
-        pen(true);      iconHome(p, kRelX + kHomeW / 2.0, cy);
+        pen(m_canBack); drawChromeIcon(p, Back);
+        pen(m_canFwd);  drawChromeIcon(p, Fwd);
+        pen(true);      drawChromeIcon(p, Reload);
+        pen(true);      drawChromeIcon(p, Home);
 
-        const qreal powerX = w - kPowerW, readerX = powerX - kReaderW, starX = readerX - kStarW;
-        const qreal zInX = starX - kZoomW, zOutX = zInX - kZoomW;
+        const ChromeX c = chromeLayout();
         const int addrX = kRelX + kHomeW;
         const int clearW = m_editing ? kClearW : 0;
         // Address field: rounded box; while editing, a × on the right clears the typed buffer.
-        const QRectF addrBox(addrX + 8, 14, zOutX - addrX - 16, kBarH - 28);
+        const QRectF addrBox(addrX + 8, 14, c.zOutX - addrX - 16, kBarH - 28);
         p->setPen(QPen(Qt::black, m_editing ? 4 : 3));
         p->setBrush(m_editing ? QColor(245, 245, 245) : Qt::white);
         p->drawRoundedRect(addrBox, 14, 14);
@@ -1831,17 +1857,16 @@ private:
             p->drawLine(QPointF(cx + d, cy - d), QPointF(cx - d, cy + d));
         }
 
-        QFont zf = p->font(); zf.setPixelSize(40); zf.setBold(true); p->setFont(zf); p->setPen(Qt::black);
-        p->drawText(QRectF(zOutX, 0, kZoomW, kBarH), Qt::AlignCenter, "A-");
-        p->drawText(QRectF(zInX,  0, kZoomW, kBarH), Qt::AlignCenter, "A+");
-        const qreal rcx = readerX + kReaderW / 2.0;
+        p->setPen(Qt::black);
+        drawChromeIcon(p, ZoomOut);
+        drawChromeIcon(p, ZoomIn);
         if (m_readerMode) {
             p->setBrush(Qt::black); p->setPen(Qt::NoPen);
-            p->drawRoundedRect(QRectF(readerX + 20, 12, kReaderW - 40, kBarH - 24), 12, 12);
-            p->setPen(Qt::white); p->setBrush(Qt::NoBrush); iconReader(p, rcx, cy);
-        } else { pen(m_readerable); iconReader(p, rcx, cy); }
-        pen(true); iconStar(p, starX + kStarW / 2.0, cy, m_bookmarked);
-        pen(true); iconPower(p, powerX + kPowerW / 2.0, cy);
+            p->drawRoundedRect(QRectF(c.readerX + 20, 12, kReaderW - 40, kBarH - 24), 12, 12);
+            p->setPen(Qt::white); p->setBrush(Qt::NoBrush); drawChromeIcon(p, Reader);
+        } else { pen(m_readerable); drawChromeIcon(p, Reader); }
+        pen(true); drawChromeIcon(p, Bookmark);
+        pen(true); drawChromeIcon(p, Power);
 
         // Pressed-button flash: black rounded chip + the same icon in white, over the normal bar.
         if (m_pressed != None) {
@@ -1849,23 +1874,7 @@ private:
             p->setPen(Qt::NoPen); p->setBrush(Qt::black);
             p->drawRoundedRect(r, 12, 12);
             p->setPen(Qt::white); p->setBrush(Qt::NoBrush);
-            const qreal pcx = r.center().x(), pcy = r.center().y();
-            switch (m_pressed) {
-                case Back:     iconBack(p, pcx, pcy); break;
-                case Fwd:      iconFwd(p, pcx, pcy); break;
-                case Reload:   m_loading ? iconStop(p, pcx, pcy) : iconReload(p, pcx, pcy); break;
-                case Home:     iconHome(p, pcx, pcy); break;
-                case Bookmark: iconStar(p, pcx, pcy, m_bookmarked); break;
-                case Reader:   iconReader(p, pcx, pcy); break;
-                case Power:    iconPower(p, pcx, pcy); break;
-                case ZoomOut:
-                case ZoomIn: {
-                    QFont pf = p->font(); pf.setPixelSize(40); pf.setBold(true); p->setFont(pf);
-                    p->drawText(r, Qt::AlignCenter, m_pressed == ZoomOut ? "A-" : "A+");
-                    break;
-                }
-                default: break;
-            }
+            drawChromeIcon(p, m_pressed);   // the symmetric adjust keeps the rect center
             p->setPen(Qt::black); p->setBrush(Qt::NoBrush);
         }
     }
