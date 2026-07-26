@@ -109,7 +109,10 @@ facts, all verified on-device and written up in `docs/research/` (4 sourced docs
 `engine.stopLoading()` as the toolbar Stop (verified end-to-end via the new `RMWEB_DEBUG_UITAP="x,y"`
 diag, which emits a synthetic ROUTER tap — `[uitap][dbg]` → `[nav] stop via badge` → LOAD_FINISHED
 @4.7s, badge gone, Reload icon back). Stop cancels a stuck load cleanly: WebKit still emits
-LOAD_FINISHED after the cancelled load, so the badge never sticks.
+LOAD_FINISHED after the cancelled load, so the badge never sticks. Related UX: while the URL keyboard
+is open (`m_editing && !m_editField`) the render-failed NOTICE is suppressed in paint() — the user came
+to go elsewhere; the white-out still hides the stale page, so typing happens over a clean white
+backdrop (verified: blank.html verdict → RMWEB_DEBUG_KB → grab shows chrome + white + keyboard).
 - **Device:** a process **segfault reboots the device** (watchdog/memfault, ~100 s) — logs go to `/home/root` to
   survive; a SIGSEGV backtrace handler is compiled in (`-rdynamic`).
 **Phase 4 "~6 s per page-turn" SOLVED (2026-06-26):** the culprit was **Mesa softpipe** — the single-threaded,
