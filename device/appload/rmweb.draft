@@ -1,5 +1,0 @@
-name=rmweb
-desc=Web browser (WPE WebKit)
-call=/home/root/rmweb/rmweb
-term=:
-imgFile=icon

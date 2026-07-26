@@ -20,21 +20,24 @@ chmod +x "$R/rmweb" "$R/install.sh" 2>/dev/null || true
 # 3. Stamp the version.
 echo "$VER" > "$R/VERSION"
 
-# 4. Layer B: register with rm-appload if it's installed (its apps dir lives under /home, so it survives
-#    reboot). Format/path verified on-device — degrade gracefully (Strategy A is unaffected) if absent.
-APPLOAD_DIR=
-for d in /home/root/.config/rm-appload/apps /opt/etc/draft /home/root/.entware/etc/draft; do
-  [ -d "$d" ] && { APPLOAD_DIR="$d"; break; }
-done
-if [ -n "$APPLOAD_DIR" ] && [ -f "$R/appload/rmweb.draft" ]; then
+# 4. Layer B: register with AppLoad (the Paper Pro XOVI extension) if XOVI is installed. New-format
+#    layout: /home/root/xovi/exthome/appload/rmweb/{external.manifest.json,icon.png} — lives under
+#    /home, so it survives reboots (but NOT an OTA — then XOVI itself is gone anyway). The entry point
+#    is appload-entry.sh (systemd-run scope wrapper — see its header). Degrade gracefully if XOVI is
+#    absent: Strategy A (the standalone launcher) is unaffected.
+if [ -d /home/root/xovi ] && [ -f "$R/appload/rmweb/external.manifest.json" ]; then
   # Optional integration: a failed copy must not abort the install (set -e) — degrade gracefully.
-  if cp "$R/appload/rmweb.draft" "$APPLOAD_DIR/rmweb.draft" 2>/dev/null; then
-    echo "[install] registered rmweb icon in $APPLOAD_DIR"
+  APP_DIR=/home/root/xovi/exthome/appload/rmweb
+  if mkdir -p "$APP_DIR" 2>/dev/null \
+     && cp "$R/appload/rmweb/external.manifest.json" "$APP_DIR/external.manifest.json" 2>/dev/null \
+     && cp "$R/appload/rmweb/icon.png" "$APP_DIR/icon.png" 2>/dev/null \
+     && chmod +x "$R/appload-entry.sh" 2>/dev/null; then
+    echo "[install] registered rmweb icon in $APP_DIR (start XOVI with: /home/root/xovi/start)"
   else
-    echo "[install] WARN: could not write $APPLOAD_DIR/rmweb.draft — icon not registered"
+    echo "[install] WARN: could not write $APP_DIR — icon not registered"
   fi
 else
-  echo "[install] rm-appload not found — skipping icon (launch with: $R/rmweb)"
+  echo "[install] XOVI/AppLoad not found — skipping icon (launch with: $R/rmweb)"
 fi
 
 echo "[install] rmweb $VER installed under $R"

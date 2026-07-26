@@ -36,26 +36,59 @@ ssh root@10.11.99.1 '/home/root/rmweb/install.sh'
 ## Running
 
 - From the device shell:  `/home/root/rmweb/rmweb [URL]`
-- From the home screen:    tap the **rmweb** icon (requires XOVI + rm-appload; see below).
+- From the home screen:    tap the **rmweb** icon in the AppLoad launcher (requires XOVI + AppLoad; see below).
 
 The browser takes over the screen (xochitl is stopped). Tap the **⏻** button at the right of the toolbar
-to quit — xochitl (your normal reMarkable UI) comes back automatically. xochitl is always restored on
-exit, crash, or kill; a reboot always restores it too.
+to quit — xochitl (your normal reMarkable UI) comes back automatically, WITH XOVI/AppLoad if they were
+running. xochitl is always restored on exit, crash, or kill; a reboot always restores it too.
 
-## Home-screen icon (optional, layer B)
+## Home-screen icon (optional, layer B: XOVI + AppLoad)
 
-The icon needs the community launcher **XOVI + rm-appload** installed on the device. With it present,
-`install.sh` registers rmweb automatically. Without it, rmweb still runs from the shell (above).
+The icon needs the community extension stack on the device: **XOVI** (LD_PRELOAD hook framework) +
+**AppLoad** (the rm-appload XOVI extension that adds a third-party-app launcher to the shell).
+With XOVI present, `install.sh` registers rmweb automatically (manifest + icon land in
+`/home/root/xovi/exthome/appload/rmweb/`). Without it, rmweb still runs from the shell (above).
+
+Verified working on Paper Pro OS 3.28 (beta) on 2026-07-26:
+
+```sh
+# 1. XOVI bundle (aarch64, ships qt-resource-rebuilder + start/stock scripts):
+#    https://github.com/asivery/rm-xovi-extensions/releases (xovi-aarch64.tar.gz)
+scp xovi-aarch64.tar.gz root@10.11.99.1:/tmp/
+ssh root@10.11.99.1 'tar -xzf /tmp/xovi-aarch64.tar.gz -C /home/root'
+
+# 2. AppLoad: unzip the release, put appload.so into extensions.d.
+#    https://github.com/asivery/rm-appload/releases
+#    !! OS 3.28: the v0.5.3 release only supports <= 3.27 and crash-loops xochitl
+#    ("Couldn't resolve the hashed identifier ... required by AppLoad hooks in main UI").
+#    For 3.28 build appload.so from PR #59 (branch `3.28` of rmitchellscott/rm-appload);
+#    xovi/make.sh builds fine inside this repo's rmweb-sdk docker image (qmake6 + rcc are in
+#    /opt/rmpp-sdk/sysroots/aarch64-codexsdk-linux/usr/{bin,libexec}, XOVI_REPO=<xovi checkout>).
+ssh root@10.11.99.1 'cp appload.so /home/root/xovi/extensions.d/'
+
+# 3. REQUIRED once (and after each OS update): rebuild the QML hashtable, else AppLoad
+#    crash-loops xochitl on 3.27+. Screen is blank for ~1-2 min, then it exits by itself.
+ssh root@10.11.99.1 'echo | /home/root/xovi/rebuild_hashtable'
+
+# 4. Start XOVI (tethered): restarts xochitl with the hooks; the AppLoad entry appears in the
+#    shell sidebar with the rmweb icon inside. Re-run `install.sh` once to register the icon.
+ssh root@10.11.99.1 '/home/root/rmweb/install.sh && /home/root/xovi/start'
+```
+
+XOVI is **tethered by design**: its systemd drop-in lives on a tmpfs, so a reboot always returns the
+device to the stock shell (this is what makes a bad extension un-brickable). To get XOVI back after a
+reboot, run `/home/root/xovi/start` over SSH again; `/home/root/xovi/stock` returns to stock without a
+reboot. Do NOT wire XOVI into real autostart — that is the one path to a bootloop.
 
 ## After a firmware update (OTA)
 
-The bundle under `/home/root/rmweb` survives OTA, but re-run the installer to re-assert the icon hook:
+The bundle under `/home/root/rmweb` survives OTA, but XOVI/AppLoad do not — reinstall them (steps 1-4
+above, including the hashtable rebuild: the new OS build's QML hashes differ), then re-run the installer
+to re-assert the icon hook:
 
 ```sh
 ssh root@10.11.99.1 '/home/root/rmweb/install.sh'
 ```
-
-If the home-screen icon is gone after an OTA, reinstall XOVI/rm-appload, then re-run `install.sh`.
 
 ## Logs
 
