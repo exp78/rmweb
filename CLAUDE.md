@@ -255,12 +255,18 @@ must be eyeballed).
 CSS spinner/blink, six cosmetic ad selectors, 2400 px image, wide table): animations frozen, ALL ad
 containers collapsed, wide media/tables fit — the calm-down kit + css-display-none work as designed.
 Live sites with blocking on: wikipedia, news.ycombinator.com and habr.com render fully (habr
-nonWhite=1057 @12 s). **rbc.ru is out of reach for now**: with desktop UA it still paints nothing
-within the 13 s verdict window (the "Couldn't display" notice fires correctly — not a
-css-display-none casualty; SITECSS=0 blanks too), and SUSTAINED rbc loads hard-REBOOT the device
-(twice; almost certainly OOM — 2 GB RAM, llvmpipe + interpreter JSC + an SPA that keeps growing).
-Treat rbc-class SPAs as "notice shown, move on"; the fix direction is memory discipline / earlier
-load abort, not CSS. Post-reboot checklist: /tmp is tmpfs (test profiles gone), the /usr/libexec
+nonWhite=1057 @12 s). **rbc.ru** with desktop UA still paints nothing within the 13 s verdict window
+(the "Couldn't display" notice fires correctly — not a css-display-none casualty; SITECSS=0 blanks
+too). ~~Sustained rbc loads hard-reboot the device (OOM)~~ — **RETRACTED**: the three reboots during
+this survey were my own test harness. Journal evidence: each ends with `/usr/sbin/rm-emergency.sh
+invoked` right after `xochitl.service: Failed with result 'start-limit-hit'` — the
+xochitl.service.d override maps OnFailure=emergency.target → rm-emergency.service → clean reboot
+(xochitl stock OnFailure=remarkable-fail.service doesn't even exist here). Two triggers I caused:
+stop/starting xochitl too fast across grab sessions (StartLimitBurst), and once letting xochitl
+restart into a framebuffer still locked by a dying rmweb → "Failed to lock epframebuffer" core-dump
+loop. Test hygiene: after killing rmweb wait for the fb lock to release before `systemctl start
+xochitl`, space xochitl restarts beyond StartLimitInterval, and `systemctl is-failed xochitl` after
+a session — a failed xochitl left alone reboots the device. Post-reboot checklist: /tmp is tmpfs (test profiles gone), the /usr/libexec
 overlay is gone (re-mount before direct launches — run-wpeqt-on-device.sh does it), XOVI is tethered
 (/home/root/xovi/start). Test-hygiene: `pgrep -f pattern` self-matches an ssh command line containing
 the pattern — kill by recorded pid, and never nohup a test script that stops xochitl without the
