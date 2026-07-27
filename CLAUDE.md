@@ -272,6 +272,22 @@ overlay is gone (re-mount before direct launches — run-wpeqt-on-device.sh does
 the pattern — kill by recorded pid, and never nohup a test script that stops xochitl without the
 `trap "systemctl start xochitl" EXIT HUP INT TERM` guard.
 
+**Companion software (2026-07-27).** The device now also has: **Vellum** (package manager for
+3.28-era reMarkable; Toltec caps at OS 3.3 — do NOT use it) at /home/root/.vellum, bootstrapped from
+the sha256-pinned vellum-dev/vellum-cli script; **tripletap** (`xovi-tripletap.service`,
+enabled+active) — triple power-press runs /home/root/xovi/start, i.e. XOVI + icons back WITHOUT ssh
+after a reboot; **KOReader 2026.07** (official aarch64 zip — vellum's koreader package was skipped:
+it hard-depends on appload 0.5.3, which crash-loops 3.28) at /home/root/xovi/exthome/appload/koreader
+with its shipped external.manifest.json + icon.png. KOReader launches as an AppLoad **QTFB-native
+client** ("QTFB native?: true" in the log — xochitl's [QTFB] socket server does the presenting;
+xochitl keeps running). Verified end-to-end: detects "reMarkable Ferrari", opens the quickstart, no
+Lua errors, clean shutdown. KOReader operational gotchas: koreader.sh relocalizes itself to /tmp and
+redirects reader.lua output to crash.log (in the app dir) — a silent-looking run is NOT dead, check
+crash.log; the wrapper has a RESTART loop, so killing luajit alone respawns it — kill /tmp/koreader.sh
+first. **XOVI drop-in gotcha:** a bare `systemctl restart xochitl` makes systemd deactivate the
+etc-...-xochitl.service.d.mount unit (tmpfs drop-in unmounts → next start is STOCK). Only restart
+xochitl via /home/root/xovi/start, and tripletap does exactly that.
+
 **Settings window + ad-gap/e-ink CSS (2026-07-26).** Settings are their own page now: the start page
 keeps one "Open settings" row (`rmweb:settings`); `buildSettingsPage(m_settings)` (startpage.h:134)
 renders one tap-row per lever — Reader theme, Site version, Ad & tracker blocking, Fit pages to screen,
