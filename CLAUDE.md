@@ -251,6 +251,21 @@ qCDebug(lcEngine) lines ([t] pageBy / page JS done sy=) are compiled OUT of the 
 proof is the grab, not the log. Start-page CSS sharing stayed deferred (touch geometry + visuals,
 must be eyeballed).
 
+**Site survey (2026-07-27).** Deterministic e-ink lab page (local http.server on 10.11.99.5:8765 —
+CSS spinner/blink, six cosmetic ad selectors, 2400 px image, wide table): animations frozen, ALL ad
+containers collapsed, wide media/tables fit — the calm-down kit + css-display-none work as designed.
+Live sites with blocking on: wikipedia, news.ycombinator.com and a heavy news portal render fully (portal
+nonWhite=1057 @12 s). **a heavy news portal is out of reach for now**: with desktop UA it still paints nothing
+within the 13 s verdict window (the "Couldn't display" notice fires correctly — not a
+css-display-none casualty; SITECSS=0 blanks too), and SUSTAINED news-portal loads hard-REBOOT the device
+(twice; almost certainly OOM — 2 GB RAM, llvmpipe + interpreter JSC + an SPA that keeps growing).
+Treat portal-class SPAs as "notice shown, move on"; the fix direction is memory discipline / earlier
+load abort, not CSS. Post-reboot checklist: /tmp is tmpfs (test profiles gone), the /usr/libexec
+overlay is gone (re-mount before direct launches — run-wpeqt-on-device.sh does it), XOVI is tethered
+(/home/root/xovi/start). Test-hygiene: `pgrep -f pattern` self-matches an ssh command line containing
+the pattern — kill by recorded pid, and never nohup a test script that stops xochitl without the
+`trap "systemctl start xochitl" EXIT HUP INT TERM` guard.
+
 **Settings window + ad-gap/e-ink CSS (2026-07-26).** Settings are their own page now: the start page
 keeps one "Open settings" row (`rmweb:settings`); `buildSettingsPage(m_settings)` (startpage.h:134)
 renders one tap-row per lever — Reader theme, Site version, Ad & tracker blocking, Fit pages to screen,
