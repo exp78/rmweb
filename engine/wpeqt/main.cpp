@@ -21,6 +21,7 @@
 #include <QQuickPaintedItem>
 #include <QQuickWindow>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPolygonF>
 #include <QElapsedTimer>
 #include <cmath>
@@ -1925,13 +1926,20 @@ private:
         const QString lbl = QStringLiteral("Loading %1%").arg(int(m_loadProgress * 100));
         const qreal iconW = 34, gap = 18, stopW = 34, stopGap = 18;
         QRectF pill = drawTextPill(p, w, lbl, iconW + gap, stopGap + stopW);
-        // Hourglass icon inside the left padding area of the pill.
-        const qreal ix = pill.x() + 30, iy = pill.y() + (pill.height() - 48) / 2;
-        QPolygonF top, bot;
-        top << QPointF(ix, iy) << QPointF(ix + iconW, iy) << QPointF(ix + iconW / 2, iy + 24);
-        bot << QPointF(ix + iconW / 2, iy + 24) << QPointF(ix, iy + 48) << QPointF(ix + iconW, iy + 48);
-        p->setBrush(Qt::black); p->drawPolygon(top); p->drawPolygon(bot);
+        // Hourglass icon (lucide/hourglass, same family as the chrome icons) in the pill's left padding.
+        const qreal hx = pill.x() + 30 + iconW / 2, hy = pill.center().y();
+        const auto hg = [&](qreal x, qreal y){ return QPointF(hx + (x - 12) * 42.0 / 24.0, hy + (y - 12) * 42.0 / 24.0); };
+        QPainterPath hp;
+        hp.moveTo(hg(5, 2));   hp.lineTo(hg(19, 2));
+        hp.moveTo(hg(5, 22));  hp.lineTo(hg(19, 22));
+        hp.moveTo(hg(7, 2));   hp.lineTo(hg(7, 6.2));   hp.lineTo(hg(12, 12));
+        hp.lineTo(hg(17, 17.8)); hp.lineTo(hg(17, 22));
+        hp.moveTo(hg(17, 2));  hp.lineTo(hg(17, 6.2));  hp.lineTo(hg(12, 12));
+        hp.lineTo(hg(7, 17.8));  hp.lineTo(hg(7, 22));
+        p->setPen(QPen(Qt::black, 4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
         p->setBrush(Qt::NoBrush);
+        p->drawPath(hp);
+        p->setPen(Qt::black);
         // X (abort) inside the right padding area; the whole right end of the pill is the hit zone.
         const qreal sx = pill.right() - 30 - stopW, sy = pill.y() + (pill.height() - stopW) / 2;
         QPen xp(Qt::black); xp.setWidth(6); xp.setCapStyle(Qt::RoundCap); p->setPen(xp);
@@ -2079,12 +2087,55 @@ private:
             p->setPen(Qt::black); p->setBrush(Qt::NoBrush);
         }
     }
-    void iconHome(QPainter *p, qreal cx, qreal cy) const {                 // a simple house
-        QPen pn = p->pen(); pn.setWidthF(4); pn.setJoinStyle(Qt::RoundJoin); p->setPen(pn); p->setBrush(Qt::NoBrush);
-        const qreal w = 20, r = 16;
-        QPolygonF roof; roof << QPointF(cx - w, cy) << QPointF(cx, cy - r) << QPointF(cx + w, cy);
-        p->drawPolyline(roof);
-        p->drawRect(QRectF(cx - w + 4, cy, 2 * (w - 4), r));
+    // --- Vector chrome icons: Lucide geometry (lucide.dev, ISC) on a shared 24x24 grid, drawn (not
+    // font glyphs -> crisp + font-independent on e-ink). One grid box + one stroke width = a coherent
+    // family. Caller sets pen colour (enabled grey / pressed white); filled shapes take the pen colour.
+    static constexpr qreal kIconBox = 44;                    // grid box, panel px (Lucide stroke 2/24 ~= 4)
+    QPointF ig(qreal cx, qreal cy, qreal x, qreal y) const { // grid point (0..24) -> panel px around (cx,cy)
+        return QPointF(cx + (x - 12) * kIconBox / 24.0, cy + (y - 12) * kIconBox / 24.0);
+    }
+    void strokeIcon(QPainter *p, const QPainterPath &pp) const {
+        QPen pn = p->pen(); pn.setWidthF(4); pn.setCapStyle(Qt::RoundCap); pn.setJoinStyle(Qt::RoundJoin);
+        p->setPen(pn); p->setBrush(Qt::NoBrush); p->drawPath(pp);
+    }
+    QRectF iconArc(qreal cx, qreal cy, qreal r) const {        // square rect for a radius-r arc on the grid
+        const qreal pr = r * kIconBox / 24.0;
+        return QRectF(cx - pr, cy - pr, 2 * pr, 2 * pr);
+    }
+    void iconBack(QPainter *p, qreal cx, qreal cy) const {     // lucide/arrow-left
+        QPainterPath pp;
+        pp.moveTo(ig(cx, cy, 12, 19)); pp.lineTo(ig(cx, cy, 5, 12)); pp.lineTo(ig(cx, cy, 12, 5));
+        pp.moveTo(ig(cx, cy, 19, 12)); pp.lineTo(ig(cx, cy, 5, 12));
+        strokeIcon(p, pp);
+    }
+    void iconFwd(QPainter *p, qreal cx, qreal cy) const {      // lucide/arrow-right
+        QPainterPath pp;
+        pp.moveTo(ig(cx, cy, 12, 19)); pp.lineTo(ig(cx, cy, 19, 12)); pp.lineTo(ig(cx, cy, 12, 5));
+        pp.moveTo(ig(cx, cy, 5, 12)); pp.lineTo(ig(cx, cy, 19, 12));
+        strokeIcon(p, pp);
+    }
+    void iconReload(QPainter *p, qreal cx, qreal cy) const {   // lucide/rotate-cw
+        QPainterPath pp(ig(cx, cy, 21, 12));
+        pp.arcTo(iconArc(cx, cy, 9), 0, -270);                 // 3 o'clock, clockwise round to the top
+        pp.cubicTo(ig(cx, cy, 14.52, 3), ig(cx, cy, 16.93, 4), ig(cx, cy, 18.74, 5.74));
+        pp.lineTo(ig(cx, cy, 21, 8));
+        pp.moveTo(ig(cx, cy, 21, 3)); pp.lineTo(ig(cx, cy, 21, 8)); pp.lineTo(ig(cx, cy, 16, 8));
+        strokeIcon(p, pp);
+    }
+    void iconStop(QPainter *p, qreal cx, qreal cy) const {     // lucide/square, filled (stop reads solid)
+        p->setBrush(p->pen().color()); p->setPen(Qt::NoPen);
+        const qreal s = 18 * kIconBox / 24.0, r = 2 * kIconBox / 24.0;
+        p->drawRoundedRect(QRectF(cx - s / 2, cy - s / 2, s, s), r, r);
+        p->setBrush(Qt::NoBrush);
+    }
+    void iconHome(QPainter *p, qreal cx, qreal cy) const {     // lucide/house: walls to the ground + door
+        QPainterPath pp(ig(cx, cy, 3, 10));
+        pp.lineTo(ig(cx, cy, 12, 2.6)); pp.lineTo(ig(cx, cy, 21, 10));
+        pp.lineTo(ig(cx, cy, 21, 21)); pp.lineTo(ig(cx, cy, 3, 21));
+        pp.closeSubpath();
+        pp.moveTo(ig(cx, cy, 9, 21)); pp.lineTo(ig(cx, cy, 9, 13));
+        pp.lineTo(ig(cx, cy, 15, 13)); pp.lineTo(ig(cx, cy, 15, 21));
+        strokeIcon(p, pp);
     }
     void iconStar(QPainter *p, qreal cx, qreal cy, bool filled) const {    // 5-point star, filled if bookmarked
         QPen pn = p->pen(); pn.setWidthF(4); pn.setJoinStyle(Qt::RoundJoin); p->setPen(pn);
@@ -2097,11 +2148,12 @@ private:
         if (filled) { p->setBrush(p->pen().color()); p->drawPolygon(star); p->setBrush(Qt::NoBrush); }
         else          p->drawPolygon(star);
     }
-    void iconPower(QPainter *p, qreal cx, qreal cy) const {                // power symbol: ring (gap at top) + bar
-        QPen pn = p->pen(); pn.setWidthF(5); pn.setCapStyle(Qt::RoundCap); p->setPen(pn); p->setBrush(Qt::NoBrush);
-        const qreal r = 17;
-        p->drawArc(QRectF(cx - r, cy - r, 2 * r, 2 * r), 120 * 16, 300 * 16);   // open at the top
-        p->drawLine(QPointF(cx, cy - r - 5), QPointF(cx, cy - 1));              // the "I" through the gap
+    void iconPower(QPainter *p, qreal cx, qreal cy) const {    // lucide/power: bar + ring (gap at top)
+        QPainterPath pp;
+        pp.moveTo(ig(cx, cy, 12, 2)); pp.lineTo(ig(cx, cy, 12, 12));
+        pp.moveTo(ig(cx, cy, 18.4, 6.6));
+        pp.arcTo(iconArc(cx, cy, 9), 40, -260);
+        strokeIcon(p, pp);
     }
     void iconLock(QPainter *p, qreal cx, qreal cy, bool closed) const {    // TLS padlock; open shackle = cert errors
         QPen pn = p->pen(); pn.setWidthF(3.5); p->setPen(pn);
@@ -2111,36 +2163,16 @@ private:
         p->setBrush(Qt::NoBrush);                                           // shackle arc above the body
         p->drawArc(QRectF(cx - 8, by - 15, 16, 17), closed ? 0 : 35 * 16, (closed ? 180 : 145) * 16);
     }
-    // --- Vector chrome icons (drawn, not font glyphs -> crisp + font-independent on e-ink). Caller sets pen colour.
-    void iconBack(QPainter *p, qreal cx, qreal cy) const { drawArrow(p, cx, cy, -1); }
-    void iconFwd (QPainter *p, qreal cx, qreal cy) const { drawArrow(p, cx, cy, +1); }
-    void drawArrow(QPainter *p, qreal cx, qreal cy, int dir) const {       // dir: -1 left (Back), +1 right (Fwd)
-        QPen pn = p->pen(); pn.setWidthF(5); pn.setCapStyle(Qt::RoundCap); pn.setJoinStyle(Qt::RoundJoin); p->setPen(pn);
-        const qreal hw = 21, hd = 12, tip = cx + dir * hw;
-        p->drawLine(QPointF(cx - dir * hw, cy), QPointF(tip, cy));
-        p->drawLine(QPointF(tip, cy), QPointF(tip - dir * hd, cy - hd));
-        p->drawLine(QPointF(tip, cy), QPointF(tip - dir * hd, cy + hd));
-    }
-    void iconStop(QPainter *p, qreal cx, qreal cy) const {                 // filled rounded square
-        p->setBrush(p->pen().color()); p->setPen(Qt::NoPen);
-        p->drawRoundedRect(QRectF(cx - 15, cy - 15, 30, 30), 5, 5);
-        p->setBrush(Qt::NoBrush);
-    }
-    void iconReload(QPainter *p, qreal cx, qreal cy) const {               // ~circular arrow with an arrowhead
-        QPen pn = p->pen(); pn.setWidthF(5); pn.setCapStyle(Qt::RoundCap); p->setPen(pn); p->setBrush(Qt::NoBrush);
-        const qreal r = 16, deg = 55, pi = 3.14159265358979;
-        p->drawArc(QRectF(cx - r, cy - r, 2 * r, 2 * r), int(deg * 16), 280 * 16);   // gap at the lower-right
-        const qreal a = deg * pi / 180.0;                                 // arrowhead at the upper-right arc end
-        const QPointF t(cx + r * std::cos(a), cy - r * std::sin(a));
-        QPolygonF head; head << t << QPointF(t.x() - 15, t.y() - 4) << QPointF(t.x() - 2, t.y() - 17);
-        p->setBrush(p->pen().color()); p->setPen(Qt::NoPen); p->drawPolygon(head); p->setBrush(Qt::NoBrush);
-    }
-    void iconReader(QPainter *p, qreal cx, qreal cy) const {               // a document with text lines
-        QPen pn = p->pen(); pn.setWidthF(4); pn.setJoinStyle(Qt::RoundJoin); p->setPen(pn); p->setBrush(Qt::NoBrush);
-        const qreal hw = 15, ht = 20;
-        p->drawRoundedRect(QRectF(cx - hw, cy - ht, 2 * hw, 2 * ht), 4, 4);
-        QPen lp = p->pen(); lp.setWidthF(3); p->setPen(lp);
-        for (int i = -1; i <= 1; ++i) p->drawLine(QPointF(cx - hw + 7, cy + i * 9), QPointF(cx + hw - 7, cy + i * 9));
+    void iconReader(QPainter *p, qreal cx, qreal cy) const {   // lucide/file-text: page, folded corner, lines
+        QPainterPath pp(ig(cx, cy, 6, 2));
+        pp.lineTo(ig(cx, cy, 14, 2)); pp.lineTo(ig(cx, cy, 20, 8));
+        pp.lineTo(ig(cx, cy, 20, 22)); pp.lineTo(ig(cx, cy, 6, 22));
+        pp.closeSubpath();
+        pp.moveTo(ig(cx, cy, 14, 2)); pp.lineTo(ig(cx, cy, 14, 8)); pp.lineTo(ig(cx, cy, 20, 8));
+        pp.moveTo(ig(cx, cy, 8, 9));   pp.lineTo(ig(cx, cy, 10, 9));
+        pp.moveTo(ig(cx, cy, 8, 13));  pp.lineTo(ig(cx, cy, 16, 13));
+        pp.moveTo(ig(cx, cy, 8, 17));  pp.lineTo(ig(cx, cy, 16, 17));
+        strokeIcon(p, pp);
     }
     // Rebuild the keyboard layout for the current page (letters/symbols) and Shift state.
     void rebuildKeys() { m_keys = rmweb::buildKeyboard(kPanelW, kPanelH, kKbTopY, m_kbShift, m_kbSym); }

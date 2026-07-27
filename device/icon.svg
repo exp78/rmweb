@@ -1,6 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
-  <rect width="128" height="128" rx="20" fill="#ffffff" stroke="#000000" stroke-width="4"/>
-  <circle cx="64" cy="58" r="34" fill="none" stroke="#000000" stroke-width="5"/>
-  <path d="M30 58 H98 M64 24 V92 M40 38 Q64 52 88 38 M40 78 Q64 64 88 78" fill="none" stroke="#000000" stroke-width="4"/>
-  <rect x="34" y="98" width="60" height="10" rx="3" fill="#000000"/>
+  <!-- rmweb home icon: Lucide globe (lucide.dev, ISC) over an address-bar dash, framed like the panel. -->
+  <rect x="5" y="5" width="118" height="118" rx="24" fill="#ffffff" stroke="#000000" stroke-width="5"/>
+  <g fill="none" stroke="#000000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" transform="translate(23.2 13.2) scale(3.4)">
+    <circle cx="12" cy="12" r="10"/>
+    <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/>
+    <path d="M2 12h20"/>
+  </g>
+  <rect x="44" y="100" width="40" height="10" rx="5" fill="#000000"/>
 </svg>

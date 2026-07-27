@@ -269,6 +269,20 @@ div[id^=adfox_], .js-ad-slot, .advertising) — the generic EasyList-style set, 
 selector costs match time. kSiteCss gains the e-ink calm-down kit: `animation/transition-duration:0s`
 and `scroll-behavior:auto` on `*` — animations only smear the panel and burn render cycles.
 
+**Iconography pass (2026-07-26).** All chrome icons are now Lucide geometry (lucide.dev, ISC) on a
+shared 24×24 grid: `ig()` maps a grid point into the 44 px icon box, `strokeIcon()` strokes one
+QPainterPath at width 4 with round caps/joins — one box + one stroke = a coherent family. Redrawn:
+arrow-left/right, rotate-cw (the old filled-blob arrowhead is gone), house (walls to the ground +
+door, was a floating roof), stop (filled rounded square, Lucide proportions), file-text (folded
+corner + lines, was a plain document), power (proper 260° ring + centre bar), hourglass in the
+loading badge (stroked outline, was filled triangles). Star and padlock kept (already Lucide-like).
+The generated pages use the same set as INLINE SVG (`svgIcon()` + `icon::` path constants in
+startpage.h, stroke=currentColor): start-page hero gets the globe mark, the settings row a gear;
+every settings-page row carries its own icon (sun-moon / smartphone / shield / maximize / refresh-cw
+/ eraser / trash). Home-screen icon redrawn on the same idea: Lucide globe + address-bar dash inside
+a rounded bezel (`device/icon.svg` → regenerate with `rsvg-convert -w 256 -h 256 -o
+device/appload/rmweb/icon.png device/icon.svg`).
+
 The production env is DRY
 in `device/rmweb-env.sh` (sourced by both the launcher and the dev runner `scripts/run-wpeqt-on-device.sh`);
 `scripts/bundle.sh` ships launcher/env/installer/VERSION/icon; user docs in `docs/install.md`. Layer B
