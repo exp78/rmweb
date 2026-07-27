@@ -281,7 +281,10 @@ startpage.h, stroke=currentColor): start-page hero gets the globe mark, the sett
 every settings-page row carries its own icon (sun-moon / smartphone / shield / maximize / refresh-cw
 / eraser / trash). Home-screen icon redrawn on the same idea: Lucide globe + address-bar dash inside
 a rounded bezel (`device/icon.svg` → regenerate with `rsvg-convert -w 256 -h 256 -o
-device/appload/rmweb/icon.png device/icon.svg`).
+device/appload/rmweb/icon.png device/icon.svg`). Verified on device 2026-07-27: start/settings grabs,
+toolbar crop, loading badge (hourglass + X) mid-load. Device-test gotcha: run grab scripts in ONE
+foreground ssh with `trap "systemctl start xochitl" EXIT HUP INT TERM` — a nohup'ed script that dies
+mid-test leaves xochitl down and the panel shows our frozen frame ("device doesn't react").
 
 The production env is DRY
 in `device/rmweb-env.sh` (sourced by both the launcher and the dev runner `scripts/run-wpeqt-on-device.sh`);
