@@ -290,10 +290,12 @@ xochitl via /home/root/xovi/start, and tripletap does exactly that.
 
 **Sleep screen (2026-07-27).** Custom suspend image: `/usr/share/remarkable/suspended.png` (remount /
 rw; original backed up as .orig; custom copy at /home/root/suspended-custom.png — OS updates revert
-rootfs). FORMAT MATTERS: stock is 1620×2160 **GrayscaleAlpha** 8-bit — a truecolor RGB PNG renders
-with garbage artifacts; re-encode with `magick in.png -resize 1620x2160! -colorspace Gray -alpha on
--type GrayscaleAlpha out.png`. OS 3.28 also has a **sleep-screen carousel**: three rotating
-illustrations from /usr/share/remarkable/carousel/ drawn over the suspend image; disable with
+rootfs). Stock format is 1620×2160 GrayscaleAlpha, but **truecolor RGB renders fine on Paper Pro**
+(its Gallery 3 is a colour panel) — an early "RGB renders garbage" scare was actually the carousel
+(below), not the format. For ACeP colour e-ink boost punch after upscaling: `magick in.png -filter
+Lanczos -resize 1620x2160! -sigmoidal-contrast 4,50% -modulate 101,125,100 -unsharp 0x1+0.6+0.02
+-alpha on out.png`. OS 3.28 also has a **sleep-screen carousel**: three rotating illustrations from
+/usr/share/remarkable/carousel/ drawn over the suspend image; disable with
 `ShowSleepScreenCarousel=false` under `[General]` in xochitl.conf (edit with xochitl stopped, then
 xovi/start). Verified on device.
 
