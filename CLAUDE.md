@@ -288,6 +288,15 @@ first. **XOVI drop-in gotcha:** a bare `systemctl restart xochitl` makes systemd
 etc-...-xochitl.service.d.mount unit (tmpfs drop-in unmounts → next start is STOCK). Only restart
 xochitl via /home/root/xovi/start, and tripletap does exactly that.
 
+**Sleep screen (2026-07-27).** Custom suspend image: `/usr/share/remarkable/suspended.png` (remount /
+rw; original backed up as .orig; custom copy at /home/root/suspended-custom.png — OS updates revert
+rootfs). FORMAT MATTERS: stock is 1620×2160 **GrayscaleAlpha** 8-bit — a truecolor RGB PNG renders
+with garbage artifacts; re-encode with `magick in.png -resize 1620x2160! -colorspace Gray -alpha on
+-type GrayscaleAlpha out.png`. OS 3.28 also has a **sleep-screen carousel**: three rotating
+illustrations from /usr/share/remarkable/carousel/ drawn over the suspend image; disable with
+`ShowSleepScreenCarousel=false` under `[General]` in xochitl.conf (edit with xochitl stopped, then
+xovi/start). Verified on device.
+
 **Settings window + ad-gap/e-ink CSS (2026-07-26).** Settings are their own page now: the start page
 keeps one "Open settings" row (`rmweb:settings`); `buildSettingsPage(m_settings)` (startpage.h:134)
 renders one tap-row per lever — Reader theme, Site version, Ad & tracker blocking, Fit pages to screen,
