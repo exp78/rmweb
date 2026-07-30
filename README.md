@@ -2,27 +2,41 @@
 
 A native **WPE WebKit** web browser for the **reMarkable Paper Pro** e-ink tablet.
 
-> **Status: v0.8.0 — beta.** The primary use case is **reading**; general browsing is basic.
+![start page](docs/screenshots/start-page.png)
+
+> **Status: v0.9.0 — beta.** The primary use case is **reading**; general browsing is basic.
 > Implemented and verified on-device: reader mode (Mozilla Readability, light/dark theme), B2 chrome
 > painted into the frame (with C++ hit-test and inverted press feedback on every button and key),
 > touch/pen input via evdev with a phantom-touch guard, on-screen URL keyboard, bookmarks/history/
 > settings persisted in the profile dir, a redesigned HTML start page (`rmweb:` scheme) with letter
-> avatars and a tabs-lite open-pages switcher, page/reader zoom, content blocking (WebKit
-> UserContentManager filter), persistent cookies (sqlite — logins survive relaunch), per-URL scroll
-> restore, in-page find (`/text` in the address bar), downloads to `~/Downloads`, form filling (tap a
-> text field → on-screen keyboard with its current value, password masked; tap toggles
-> checkbox/radio and cycles selects), learn-as-you-type autofill for email/username/name fields
-> (a committed value is remembered and pre-filled into the next empty field of the same kind —
-> passwords are never learned), a per-host password store (a committed password is remembered
-> obfuscated — NOT encrypted — and pre-filled on the next visit, login included), styled error
-> pages for failed loads (with Retry), a TLS
-> padlock in the address bar, address-bar search over local bookmarks+history (with a web-search
-> link), long-press link peek (toast with the target URL), a KOReader-style reading-progress bar
-> along the bottom edge, and a no-brick
-> launcher that stops/restores xochitl. E-ink-safe: CPU-only llvmpipe + Skia, ~120–250 ms page
-> turns, low RAM.
+> avatars and a tabs-lite open-pages switcher, a **separate settings page** (tap-to-toggle rows,
+> applies immediately), page/reader zoom, content blocking (WebKit UserContentManager filter) with
+> **cosmetic rules that collapse blocked-ad containers** (no white holes), an e-ink **calm-down
+> stylesheet** (kills CSS animations/transitions/smooth scrolling), an **auto-refresh guard** that
+> throttles pages reloading themselves while you read, a loading pill with progress and a **stop
+> button**, persistent cookies (sqlite — logins survive relaunch), per-URL scroll restore, in-page
+> find (`/text` in the address bar), downloads to `~/Downloads`, form filling (tap a text field →
+> on-screen keyboard with its current value, password masked; tap toggles checkbox/radio and cycles
+> selects), learn-as-you-type autofill for email/username/name fields (passwords are never
+> learned), a per-host password store (obfuscated — NOT encrypted), styled error pages with Retry,
+> a TLS padlock, address-bar search over local bookmarks+history (with a web-search link),
+> long-press link peek, a KOReader-style reading-progress bar, a coherent **Lucide icon set** drawn
+> as vectors (crisp on e-ink, font-independent), a home-screen icon in the stock launcher (XOVI +
+> AppLoad), and a no-brick launcher that stops/restores xochitl. E-ink-safe: CPU-only llvmpipe +
+> Skia, ~120–250 ms page turns, low RAM.
 > A 2026-07-18 code review ([docs/review-2026-07-18.md](docs/review-2026-07-18.md)) found open
-> security/robustness issues — not release-ready yet.
+> security/robustness issues; the HIGH/CRITICAL items were fixed after it (see git log), but treat
+> this as enthusiast-grade beta software, not a hardened product.
+
+## Screenshots
+
+| | | |
+|---|---|---|
+| ![Wikipedia](docs/screenshots/wikipedia.jpg) | ![e-ink lab](docs/screenshots/eink-lab.png) | ![settings](docs/screenshots/settings.png) |
+| Wikipedia | e-ink lab | Settings page |
+
+More: [loading pill with stop button](docs/screenshots/loading-badge.png) ·
+[e-ink lab: animations frozen, ad slots collapsed, wide media fit](docs/screenshots/eink-lab.png)
 
 ## Why it's interesting
 
@@ -63,6 +77,8 @@ Full instructions: [`docs/install.md`](docs/install.md)
 Not implemented yet (earlier docs claimed some of these by mistake — see the review above):
 on-device JS console, user/content scripts, performance dashboard.
 
-## License
+## Credits & License
 
-[MIT](LICENSE) — see the file for details. Co-developed with AI assistance.
+[MIT](LICENSE) — see the file for details. Third-party components (WPE WebKit, Qt6, Mesa,
+Mozilla Readability, Lucide icons, XOVI/AppLoad) and their licenses are listed in
+[NOTICE](NOTICE). Co-developed with AI assistance.
