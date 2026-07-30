@@ -13,10 +13,10 @@ it carries the app plus every runtime library, so no build tools are needed to i
 # 1. Produce the archive (on a machine with the build toolchain):
 ./scripts/build-wpeqt.sh && ./scripts/package.sh
 # 2. Copy it to the tablet over USB:
-scp dist/rmweb-0.5.0.tar.gz root@10.11.99.1:/home/root/
+scp dist/rmweb-0.9.0.tar.gz root@10.11.99.1:/home/root/
 # 3. Extract + wire up on the device (no toolchain here):
 ssh root@10.11.99.1 'mkdir -p /home/root/rmweb \
-  && gunzip -c /home/root/rmweb-0.5.0.tar.gz | tar -C /home/root/rmweb -xf - \
+  && gunzip -c /home/root/rmweb-0.9.0.tar.gz | tar -C /home/root/rmweb -xf - \
   && /home/root/rmweb/install.sh'
 ```
 

@@ -1,0 +1,39 @@
+rmweb — third-party notices
+===========================
+
+rmweb is MIT-licensed (see LICENSE). It builds on, links against, or ships
+fragments of the following third-party software. Their licenses apply to
+those components.
+
+Runtime libraries (linked, not modified)
+----------------------------------------
+* WPE WebKit (https://wpewebkit.org) — LGPL-2.1+ / BSD-2-Clause (WebCore).
+  Dynamic linking; no modifications. Source: https://webkit.org/build-options/
+* Qt 6 (https://www.qt.io) — LGPL-3.0. Dynamic linking; no modifications.
+  reMarkable ships Qt on the device; Qt Virtual Keyboard module (GPL-3.0) is
+  used unmodified as a runtime plugin.
+* Mesa (https://mesa3d.org) — MIT. llvmpipe software rasterizer.
+* glib-networking / OpenSSL — LGPL-2.1+ / Apache-2.0 (TLS backend).
+
+Vendored components (source shipped in this repo)
+-------------------------------------------------
+* Mozilla Readability.js (engine/wpeqt/reader/) — Apache-2.0,
+  Copyright (c) 2010 Arc90 Inc. See engine/wpeqt/reader/LICENSE.
+
+Iconography
+-----------
+* Lucide icons (https://lucide.dev) — ISC License. Chrome icons are drawn
+  from Lucide path geometry (engine/wpeqt/main.cpp, engine/wpeqt/startpage.h)
+  and the app icon is a Lucide globe derivative (device/icon.svg).
+
+  ISC License: Permission to use, copy, modify, and/or distribute this
+  software for any purpose with or without fee is hereby granted, provided
+  that the above copyright notice and this permission notice appear in all
+  copies.
+
+Device-side integration (not shipped, documented only)
+------------------------------------------------------
+* XOVI + AppLoad by asivery (https://github.com/asivery) — used on-device to
+  place rmweb in the stock launcher. See docs/install.md for versions.
+
+Fonts and media bundled with the OS or device are property of their owners.
