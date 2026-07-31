@@ -81,4 +81,7 @@ on-device JS console, user/content scripts, performance dashboard.
 
 [MIT](LICENSE) — see the file for details. Third-party components (WPE WebKit, Qt6, Mesa,
 Mozilla Readability, Lucide icons, XOVI/AppLoad) and their licenses are listed in
-[NOTICE](NOTICE). Co-developed with AI assistance.
+[NOTICE](NOTICE).
+
+Co-developed with AI pair-programming — many thanks to **Claude Code** (Anthropic), **Grok** (xAI)
+and **Kimi** (Moonshot AI), who wrote and reviewed large parts of this project.

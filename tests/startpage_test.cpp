@@ -64,10 +64,19 @@ int main() {
     CHECK(!has(tp, "href='javascript:"));                 // poisoned tab: no working link...
     CHECK(has(tp, "href='rmweb:close-tab:javascript:alert(1)'")); // ...but close still offered (inert
                                                                   //  until tapped; decide-policy guards it)
-    // settings line: theme toggle label reflects the flag
-    CHECK(has(buildStartPage({}, {}, {}, false), "Reader theme: light"));
-    CHECK(has(buildStartPage({}, {}, {}, true),  "Reader theme: dark"));
-    CHECK(has(html, "rmweb:toggle-dark"));                // toggle present on every start page
+    // settings: the start page only LINKS to the settings page; the levers live on settings.html
+    CHECK(has(html, "rmweb:settings"));                   // "Open settings" row on every start page
+    Settings sl; sl.readerDark = false;
+    std::string sp = buildSettingsPage(sl);
+    CHECK(has(sp, "Reader theme") && has(sp, "light"));   // theme row reflects the flag...
+    Settings sd; sd.readerDark = true;
+    CHECK(has(buildSettingsPage(sd), "dark"));
+    CHECK(has(sp, "rmweb:toggle-dark"));                  // ...and its toggle command
+    Settings sblk; sblk.block = false;
+    CHECK(has(buildSettingsPage(sblk), "rmweb:toggle-block")); // blocking row present
+    Settings sar; sar.autoRefreshSec = -1;
+    CHECK(has(buildSettingsPage(sar), "blocked (never)")); // auto-refresh cycle label
+    CHECK(has(sp, "rmweb:home"));                         // back link to the start page
 
     // address-bar search: case-insensitive substring on title/url, results page renders matches
     CHECK(containsCI("E-Reader Wiki", "reader"));
