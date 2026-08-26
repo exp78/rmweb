@@ -317,6 +317,19 @@ div[id^=adfox_], .js-ad-slot, .advertising) — the generic EasyList-style set, 
 selector costs match time. kSiteCss gains the e-ink calm-down kit: `animation/transition-duration:0s`
 and `scroll-behavior:auto` on `*` — animations only smear the panel and burn render cycles.
 
+**B&W fast mode (2026-08-26).** New persisted setting `bwFast` (settings-page row, lucide
+"contrast" icon; command `rmweb:toggle-bwfast`, signal `WpeEngine::bwFastChanged` →
+`WpeView::setBwFast`, queued worker→GUI). When on, WpeView paints a lazily-built
+`Format_Grayscale8` copy of each new frame (cache rebuilt per frame and per toggle; ~ms per
+present at the 150 ms cadence). Rationale (epfb-re/rmBifrost + our refresh research): Gallery 3
+needs the slow FULL multi-pass waveform to develop colour, while fast/partial waveforms leave
+colour washed out — but develop MONO fully and fast, so grayscale content lands clean at fast
+cadence. **Gotcha caught on device:** settings load in `WpeEngine::start()` (worker), NOT in the
+constructor — reading `m_settings` from main() before start() returns defaults; initial state
+must reach the view via the signal emitted in start(), not a direct call. Verified on device:
+settings row renders, tap toggles + persists (`bwFast=1`), colour test page grabs at
+saturation=0 with correct luma separation.
+
 **Iconography pass (2026-07-26).** All chrome icons are now Lucide geometry (lucide.dev, ISC) on a
 shared 24×24 grid: `ig()` maps a grid point into the 44 px icon box, `strokeIcon()` strokes one
 QPainterPath at width 4 with round caps/joins — one box + one stroke = a coherent family. Redrawn:

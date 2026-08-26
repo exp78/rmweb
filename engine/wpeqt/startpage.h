@@ -43,6 +43,8 @@ namespace icon {
         "<path d='M12 2v2'/><path d='M14.837 16.385a6 6 0 1 1-7.223-7.222c.624-.147.97.66.715 1.248a4 4 0 "
         "0 0 5.26 5.259c.589-.255 1.396.09 1.248.715'/><path d='M16 12a4 4 0 0 0-4-4'/>"
         "<path d='m19 5-1.256 1.256'/><path d='M20 12h2'/>";
+    inline const char* contrast =   // half-filled disc; the path carries its own fill
+        "<circle cx='12' cy='12' r='10'/><path fill='currentColor' stroke='none' d='M12 18a6 6 0 0 0 0-12v12z'/>";
     inline const char* smartphone =
         "<rect width='14' height='20' x='5' y='2' rx='2' ry='2'/><path d='M12 18h.01'/>";
     inline const char* shield =
@@ -208,6 +210,9 @@ inline std::string buildSettingsPage(const Settings& s) {
     h += "<h2>Reading</h2>";
     row(icon::sunMoon, "rmweb:toggle-dark", "Reader theme", s.readerDark ? "dark" : "light");
     h += "<div class='hint'>Font size: the A- / A+ buttons while reading.</div>";
+    row(icon::contrast, "rmweb:toggle-bwfast", "B&amp;W fast mode", onoff[s.bwFast ? 1 : 0]);
+    h += "<div class='hint'>Grayscale pages: the panel's fast monochrome update develops them fully "
+         "(colour needs the slow full flash). Best for heavy reading sessions.</div>";
     h += "<h2>Sites</h2>";
     row(icon::smartphone, "rmweb:toggle-ua", "Site version", s.ua == "mobile" ? "mobile (lighter)" : "desktop");
     row(icon::shield, "rmweb:toggle-block", "Ad &amp; tracker blocking", onoff[s.block ? 1 : 0]);

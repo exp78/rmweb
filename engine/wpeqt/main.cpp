@@ -263,6 +263,7 @@ Q_SIGNALS:
     void readerableChanged(bool can);              // current page looks like an article -> enable Reader
     void renderFailed(bool failed);                // load finished but the page rendered ~blank (heavy SPA)
     void renderingChanged(bool on);                // true at LOAD_FINISHED for http/https (compositing); false at first-content or fail
+    void bwFastChanged(bool on);                   // settings-page B&W fast mode toggle -> view render path
     void linkMissed();                             // a content tap hit no link -> GUI falls back to chrome toggle
     void bookmarkedChanged(bool on);               // current page bookmark state changed
     void notice(const QString &text);              // transient toast in the chrome (find results, downloads)
@@ -289,6 +290,9 @@ public Q_SLOTS:
         m_tabs      = rmweb::loadTabs(m_profileDir);
         m_zoom = m_settings.zoom;
         m_readerFont = m_settings.readerFont;
+        Q_EMIT bwFastChanged(m_settings.bwFast);   // settings load HERE (start), so the initial state
+                                                   // reaches the view via the signal — never read
+                                                   // m_settings from main() (that runs before start).
         // RMWEB_READER_FONT env wins over persisted value (same guard as ctor, re-applied after settings load).
         if (const char *e = getenv("RMWEB_READER_FONT")) { const int v = atoi(e); if (v >= 16 && v <= 96) m_readerFont = v; }
 
@@ -405,6 +409,9 @@ public Q_SLOTS:
                         self->openSettings();
                     } else if (cmd == "home") {
                         self->goHome();
+                    } else if (cmd == "toggle-bwfast") {
+                        self->toggleBwFastSetting();
+                        done();
                     } else if (cmd == "toggle-block") {
                         self->toggleBlockSetting();
                         done();
@@ -598,6 +605,13 @@ public Q_SLOTS:
         });
     }
     // Settings-page toggles — run on the worker thread (decide-policy), mutate + persist + apply live.
+    bool bwFastSetting() const { return m_settings.bwFast; }
+    void toggleBwFastSetting() {
+        m_settings.bwFast = !m_settings.bwFast;
+        rmweb::saveSettings(m_profileDir, m_settings);
+        qInfo("[bwfast] %s (settings)", m_settings.bwFast ? "on" : "off");
+        Q_EMIT bwFastChanged(m_settings.bwFast);
+    }
     void toggleBlockSetting() {
         m_settings.block = !m_settings.block;
         rmweb::saveSettings(m_profileDir, m_settings);
@@ -1641,7 +1655,17 @@ public:
     }
     void paint(QPainter *p) override {
         const qreal w = width(), h = height();
-        if (!m_img.isNull()) p->drawImage(QRectF(0, 0, w, h), m_img);
+        if (!m_img.isNull()) {
+            if (m_bwFast) {
+                if (m_grayDirty) {                          // convert once per new frame / toggle
+                    m_imgGray = m_img.convertedTo(QImage::Format_Grayscale8);
+                    m_grayDirty = false;
+                }
+                p->drawImage(QRectF(0, 0, w, h), m_imgGray);
+            } else {
+                p->drawImage(QRectF(0, 0, w, h), m_img);
+            }
+        }
         else                 p->fillRect(QRectF(0, 0, w, h), Qt::white);
         // A failed (blank) render is a PAGE state, not an overlay: white out the stale page or the
         // previous site bleeds through around the notice box and reads as a half-rendered mess.
@@ -1864,6 +1888,9 @@ public Q_SLOTS:
     // Chrome state (fed by engine signals on the GUI thread). Each re-presents the current frame with the
     // new chrome via the SAME serializer — never a bare update() (that would risk an overlapping present).
     void setChromeOn(bool v)       { if (v != m_chromeOn) { m_chromeOn = v; schedule(); } }
+    // B&W fast mode (settings page): present grayscale frames — the panel's fast mono waveform develops
+    // them fully, while colour content under a fast waveform stays washed out until a slow full pass.
+    void setBwFast(bool v)         { if (v != m_bwFast) { m_bwFast = v; m_grayDirty = true; schedule(); } }
     void setCanBack(bool v)        { if (v != m_canBack)  { m_canBack  = v; schedule(); } }
     void setCanFwd(bool v)         { if (v != m_canFwd)   { m_canFwd   = v; schedule(); } }
     void setLoading(bool v)        { if (v != m_loading)  { m_loading  = v; if (v) m_loadProgress = 0.0; schedule(); } }
@@ -2206,7 +2233,7 @@ private:
         // Apply newest WPE frame if any; always present so chrome-only updates (URL bar, keyboard,
         // badges) still refresh when m_img is still null (before the first buffer).
         const bool hadContent = m_hasPending;
-        if (m_hasPending) { m_img = m_pending; m_hasPending = false; }
+        if (m_hasPending) { m_img = m_pending; m_hasPending = false; m_grayDirty = true; }
         m_dirty = false; m_inFlight = true;
         m_clock.restart();
         if (hadContent) m_lastContentPresentUs = g_get_monotonic_time();
@@ -2228,6 +2255,9 @@ private:
     bool m_nextGuardTouch = true;                // whether the next present arms the phantom-touch guard
     bool m_lastPresentGuarded = true;            // last present used the guard (for frameSwapped re-arm)
     bool m_forceContentPresent = false;          // next setImage bypasses content throttle (user action)
+    bool m_bwFast = false;                       // settings-page B&W fast mode (grayscale present path)
+    bool m_grayDirty = true;                     // grayscale cache needs (re)build (new frame / toggle)
+    QImage m_imgGray;                            // grayscale copy of m_img (built lazily in paint)
     gint64 m_lastContentPresentUs = 0;            // last e-ink present that carried a new WPE frame
     QImage m_img, m_pending;
     QElapsedTimer m_clock;
@@ -2555,6 +2585,9 @@ int main(int argc, char **argv) {
         QObject::connect(&engine, &WpeEngine::renderFailed,      view, &WpeView::setRenderFailed);
         QObject::connect(&engine, &WpeEngine::tlsStateChanged,   view, &WpeView::setTlsState);
         QObject::connect(&engine, &WpeEngine::readProgressChanged, view, &WpeView::setReadProgress);
+        QObject::connect(&engine, &WpeEngine::bwFastChanged, view, &WpeView::setBwFast,
+                         Qt::QueuedConnection);            // worker (decide-policy/start) -> GUI;
+                                                           // start() emits the initial state once loaded
         QObject::connect(&engine, &WpeEngine::urlChanged, view,   // a new page resets the bar until
                          [view]{ view->setReadProgress(-1); });   // the first scroll/restore answers
         QObject::connect(&engine, &WpeEngine::renderingChanged, view,
