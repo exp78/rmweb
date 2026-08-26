@@ -1,6 +1,7 @@
 #!/bin/bash
-# Runs INSIDE rmweb-sdk. Cross-build Qt Virtual Keyboard 6.8.2 against the device's Qt 6.8.2 (target
-# sysroot) using the SDK's qt-cmake — the wrapper handles host tools (moc/qmltyperegistrar/qmlcachegen
+# Runs INSIDE rmweb-sdk. Cross-build Qt Virtual Keyboard 6.8.2 against the SDK-sysroot Qt 6.8.2
+# (rmweb itself links the device's system Qt, which is newer; same-major plugins built with an
+# older minor load fine) using the SDK's qt-cmake — the wrapper handles host tools (moc/qmltyperegistrar/qmlcachegen
 # from the NATIVE sysroot, which run natively in this aarch64 container) vs the cross-compiled target libs.
 # Builds on the fast case-sensitive /build volume (resumable). Staged to build/stage-vkb/usr:
 #   * the QML module      .../qml/QtQuick/VirtualKeyboard/**

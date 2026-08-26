@@ -22,12 +22,13 @@ always let it start, then `systemctl stop xochitl`.
 - **Size the Window to `Screen.width`/`Screen.height` in QML** (official recipe). Forcing geometry from C++
   after creation gives a 0×0 first frame → only a partial update → white screen with a content fragment
   (exactly our bug).
-- The scenegraph **auto-calls `EPFrameBuffer::sendUpdate(...)`** per dirty region — apps normally don't call
+- The scenegraph **auto-calls `EPFramebuffer::swapBuffers(...)`** per dirty region — apps normally don't call
   it. The official `hello_remarkable` has zero refresh code.
 - **Color content needs a FULL refresh.** Gallery 3/ACeP2 develops color only on the full multi-pass
   waveform; partial/fast (DU/Mono) updates can be invisible → white. Lever: `EPFrameBuffer::setForceFull(true)`
-  + dirty the scene once after show. (We resolve `setForceFull` by symbol via `dlsym`, since libqsgepaper is
-  already loaded; mangled name `_ZN12EPFrameBuffer12setForceFullEb`.)
+  + dirty the scene once after show — **rM1/rM2 only**: that symbol (`_ZN12EPFrameBuffer12setForceFullEb`)
+  belongs to the capital-B class and is NOT exported by the rMPP lib. The rMPP equivalent is
+  `swapBuffers(..., QualityFull, CompleteRefresh)` (§2a).
 
 ### EPFrameBuffer API (header: Eeems-Org `remarkable-template-qt-app/src/vendor/epaper/epframebuffer.h`)
 ```cpp
@@ -53,8 +54,10 @@ note the lowercase 'b': `EPFramebuffer`** — and a different refresh API. These
 ```
 EPFramebuffer* EPFramebuffer::instance();                       // _ZN13EPFramebuffer8instanceEv
 void EPFramebuffer::forceInstance(EPFramebuffer*);
-void EPFramebuffer::swapBuffers(QRect, EPContentType, EPScreenMode, QFlags<UpdateFlag>);   // the present/refresh call
-void EPFramebuffer::swapBuffers(QRegion, EPContentMap, EPScreenModeMap, QFlags<UpdateFlag>); // multi-region
+void EPFramebuffer::swapBuffers(QRect, EPScreenMode, QFlags<UpdateFlag>);   // the present/refresh call —
+                                  // re-checked 2026-08-26 on 3.28.0.164: NO EPContentType arg anymore
+                                  // (earlier 3.28 builds: swapBuffers(QRect, EPContentType, EPScreenMode, QFlags))
+void EPFramebuffer::swapBuffers(QRegion, EPScreenModeMap, QFlags<UpdateFlag>); // multi-region (older builds also had EPContentMap)
 void EPFramebuffer::ghostControl(GhostControlMode);             // ghosting control — for Phase 4 anti-ghost
 void EPFramebuffer::setBuffers(std::tuple<QImage,QImage>);
 // impls: EPFramebufferAcep2 (color) :: swapBuffers_impl(...), ghostControl(...);
@@ -71,12 +74,14 @@ class EPFramebuffer { enum UpdateFlag { NoRefresh=0, CompleteRefresh=1 };       
   QImage* getAuxFramebuffer();   // the back buffer you paint INTO
   QImage* getMainFramebuffer(); };
 ```
+⚠️ On current builds (3.28.0.164) the exported `swapBuffers` takes **no `EPContentType` arg** (see the
+`nm -D` list above) — this epfb-re header predates that change; the enum names/values still apply.
 Cross-check vs the older rmBifrost `(color, variant, full)` triple (sec. 2): they line up —
 `color`=`EPContentType`, `variant`=`EPScreenMode`, `full`=`CompleteRefresh`. So rmBifrost `COLOR_CONTENT→(1,4,0)`
 = `swapBuffers(r, Color, QualityFull, NoRefresh)` and `FULL→(1,4,1)` = `swapBuffers(r, Color, QualityFull, CompleteRefresh)`.
 `GhostControlMode`/`PixelMode` (from the `nm -D` map above) are NOT in epfb-re yet — still need on-device reversing if used.
 **For Phase 4 refresh tuning:** `dlopen("…/libqsgepaper.so") → EPFramebuffer::instance()` (or `createControlledInstance()`)
-then `swapBuffers(rect, contentType, screenMode, flags)`. (For the Phase-1 spike none of this is needed — correct Window
+then `swapBuffers(rect, screenMode, flags)` (older builds take a `contentType` arg after the rect). (For the Phase-1 spike none of this is needed — correct Window
 sizing alone presents content; the scenegraph auto-refreshes.) **HOW it integrates with our Qt path → see §2a below.**
 
 ### Official references (copy these)
@@ -181,9 +186,13 @@ per-update waveform, dither, marker waits).
 
 - **Boot order:** let xochitl start (unlocks LUKS `/home`) → `systemctl stop xochitl` → run app →
   `systemctl start xochitl`. `rm-sync.service` follows xochitl. Never disable xochitl pre-unlock.
-- **Persistence:** `/` is read-only ext4 A/B (`swupdate`); `/etc`,`/var/*` are tmpfs overlays (reset on
-  reboot); **only `/home` (LUKS ~48 GB) survives reboot AND OTA** → install under `/home/root/rmweb`.
-  Block OTA at the network layer (the Settings toggle re-enables itself).
+- **Persistence:** `/` is read-only ext4 A/B (`swupdate`); `/etc`,`/var/*`,`/srv` carry overlays whose
+  upperdir is `/var/volatile/*` (tmpfs) — writes through the overlay VANISH on reboot. To persist a
+  change (e.g. a systemd unit), `mount -o remount,rw / && umount -R /etc` and write the real rootfs
+  beneath (xovi-tripletap's enable.sh does exactly this); even that is rewritten by an OTA (A/B rootfs
+  swap), so restore units/assets after an update. **Only `/home` (LUKS ~48 GB) survives reboot AND
+  OTA** → install under `/home/root/rmweb`. Block OTA at the network layer (the Settings toggle
+  re-enables itself).
 - **PIN/lock** lives inside xochitl; with xochitl stopped + our app foreground the PIN doesn't appear.
   Resume-from-sleep lock with a custom app = **fragile/undocumented** — test on device.
 - **Suspend:** foreground app owns the idle timer (with xochitl stopped the device won't auto-sleep). To
@@ -303,7 +312,7 @@ Render → `build/wpe-render.png`: a real page (blue bar + red/green/yellow boxe
   `wpe_buffer_import_to_pixels()` (BGRA bytes, no DRM/GBM map needed) → libpng. **This is the seam Phase 3 plugs into the epaper QPA.**
 
 ### Device runtime bundle — WPE PROVEN on real hardware (Phase 3a, verified on device 2026-06-25)
-The full WPE stack renders the same page **on the actual Paper Pro** (native glibc 2.39, no GPU, software GL) via
+The full WPE stack renders the same page **on the actual Paper Pro** (native glibc 2.39, no GPU driver, software GL) via
 `scripts/bundle.sh` (deploy) + `scripts/render-on-device.sh`. Bundle = `/home/root/rmweb` (~171 MB): our built `.so` +
 Mesa + the `WPE{Web,GPU,Network}Process` helpers + WebKit resources/injected-bundle + `bin/wpe_render`.
 - **Dependency closure must be TRANSITIVE:** depth-1 `NEEDED` misses dlopen'd + nested deps. Walk it with

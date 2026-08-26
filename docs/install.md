@@ -82,9 +82,10 @@ reboot. Do NOT wire XOVI into real autostart — that is the one path to a bootl
 
 ## After a firmware update (OTA)
 
-The bundle under `/home/root/rmweb` survives OTA, but XOVI/AppLoad do not — reinstall them (steps 1-4
-above, including the hashtable rebuild: the new OS build's QML hashes differ), then re-run the installer
-to re-assert the icon hook:
+The bundle under `/home/root/rmweb` survives OTA — and so do XOVI/AppLoad themselves (they live under
+`/home/root`; an OTA only rewrites `/etc` + `/usr`). XOVI just has to be re-hooked against the new
+xochitl: rebuild the QML hashtable and start XOVI again (steps 3-4 above — the new OS build's QML hashes
+differ), then re-run the installer to re-assert the icon hook:
 
 ```sh
 ssh root@10.11.99.1 '/home/root/rmweb/install.sh'

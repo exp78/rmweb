@@ -38,7 +38,7 @@ lost to an OTA, Strategy A still gives a complete app.
   rmweb                  # NEW: production launcher — runs ON the device
   rmweb-env.sh           # NEW: single source of truth for the production env list
   install.sh             # NEW: idempotent installer / OTA re-hook
-  icon.png               # NEW: app icon (layer B)
+  icon.svg               # NEW: app icon source (layer B; the PNG lives in appload/rmweb/)
   appload/               # NEW: rm-appload descriptor (layer B)
   VERSION                # NEW: bundle version stamp
   rmweb.log              # runtime log (under /home — survives a watchdog reboot)
@@ -55,7 +55,8 @@ Responsibilities, in order:
 3. Overlay-mount `/usr/libexec` (WPE's baked helper prefix; `/` is read-only):
    `mount -t overlay overlay -o lowerdir=/usr/libexec,upperdir=$R/ovl/upper,workdir=$R/ovl/work /usr/libexec`; record `MOUNTED=1`.
 4. `. /home/root/rmweb/rmweb-env.sh` (the shared env list).
-5. `exec rmweb-wpeqt "$@"` with stdout/stderr → `/home/root/rmweb/rmweb.log`.
+5. Run `rmweb-wpeqt "$@"` in the background and `wait` on it (an `exec` would replace the shell, so the
+   `trap` below would never run), stdout/stderr → `/home/root/rmweb/rmweb.log`.
 
 **No-brick teardown** — `trap` on `EXIT INT TERM` runs the cleanup on *every* exit path (clean quit, app
 crash, launcher TERM). Cleanup order makes xochitl restore independent of the umount:
@@ -65,7 +66,8 @@ crash, launcher TERM). Cleanup order makes xochitl restore independent of the um
 
 `set -u`. SIGKILL (`kill -9`) cannot be trapped — covered by the boot-enabled-xochitl backstop (see below).
 
-**Consumes:** `rmweb-env.sh`, `bin/rmweb-wpeqt`. **Produces:** `rmweb.log`; exit code = app exit code.
+**Consumes:** `rmweb-env.sh`, `bin/rmweb-wpeqt`. **Produces:** `rmweb.log` (incl. the app's exit code);
+the launcher itself exits 0 after cleanup.
 
 ### 2. `device/rmweb-env.sh` — shared production env
 A sourced fragment exporting the proven production env (LD_LIBRARY_PATH, `GALLIUM_DRIVER=llvmpipe`,
@@ -97,8 +99,10 @@ watchdog/memfault reboot. The launcher's `trap` then restores xochitl.
 
 **Consumes:** the existing chrome hit-test + tap router. **Produces:** process exit 0 → launcher restores the home UI.
 
-### 5. `device/appload/` descriptor + `device/icon.png` — rm-appload entry (layer B)
-A minimal rm-appload app descriptor: name `rmweb`, icon `icon.png`, `exec = /home/root/rmweb/rmweb`.
+### 5. `device/appload/` descriptor + `device/icon.svg` — rm-appload entry (layer B)
+A minimal rm-appload app descriptor: name `rmweb`, icon `icon.png` beside it, entry point
+`application = /home/root/rmweb/appload-entry.sh` (a systemd-run scope wrapper that then execs the `rmweb`
+launcher, so `systemctl stop xochitl` can't kill the launcher out of xochitl's cgroup).
 This is the only piece that depends on third-party tooling and **requires on-device verification** (the
 exact apps-directory path and descriptor format are confirmed when the device is online). Degrades
 gracefully: without rm-appload, Strategy A is unaffected.
@@ -108,7 +112,7 @@ gracefully: without rm-appload, Strategy A is unaffected.
 ```
 tap icon (rm-appload)  ─┐
 SSH: /home/root/rmweb/rmweb ─┤─►  launcher: lock → stop xochitl → overlay-mount /usr/libexec
-                          → source rmweb-env.sh → exec rmweb-wpeqt   (logs → rmweb.log)
+                          → source rmweb-env.sh → run rmweb-wpeqt + `wait`   (logs → rmweb.log)
 app runs ─► user reads/browses ─► tap "⏻" ─► _exit(0)
 trap (fires on ANY exit: clean / crash / TERM):
                           → restart xochitl (if we stopped it) → umount overlay → release lock
@@ -122,15 +126,17 @@ home UI back. MVP relies on trap-restore + this boot backstop; no extra watchdog
 
 - Everything under `/home/root/rmweb` → `/home` is LUKS-persistent → survives reboot **and** OTA. ✓
 - Strategy A writes nothing to `/etc` or rootfs → nothing to lose on OTA. ✓
-- rm-appload (layer B) is community tooling and may be wiped by an OTA. Recovery: re-run `install.sh` to
-  re-assert our descriptor; reinstall XOVI/rm-appload if the icon is gone. Documented in the user docs.
+- rm-appload (layer B) is community tooling under `/home`, so it survives an OTA too — but XOVI must be
+  re-hooked against the new xochitl (`/home/root/xovi/rebuild_hashtable` + `/home/root/xovi/start`) before
+  the icon works; an OTA rewrites only `/etc` + `/usr`. Recovery: re-run `install.sh` to re-assert our
+  descriptor. Documented in the user docs.
 
 ## Error handling
 
 - **Launcher:** `set -u`; `trap` restores state on `EXIT/INT/TERM`; atomic `mkdir` lock prevents a second
   instance double-stopping xochitl; all output to `rmweb.log`.
-- **App:** existing crash handler (SIGSEGV/SIGABRT backtrace) + WebProcess auto-reload (2×) retained;
-  exit path uses `_exit(0)` to dodge the WebKit teardown abort.
+- **App:** existing crash handler (SIGSEGV/SIGABRT backtrace) + WebProcess auto-reload (3×, exponential
+  backoff) retained; exit path uses `_exit(0)` to dodge the WebKit teardown abort.
 - **Installer:** idempotent; verifies key files; clear next-steps; non-zero exit on missing pieces.
 
 ## Testing
@@ -152,8 +158,8 @@ home UI back. MVP relies on trap-restore + this boot backstop; no extra watchdog
   While the app is foreground with xochitl stopped, the device does not auto-sleep.
 - **GitHub publish:** outward-facing; requires an explicit go-ahead and a careful `.env` guard (it holds
   the device password). Tracked separately, not bundled into this packaging work.
-- Dev script `scripts/run-wpeqt-on-device.sh` keeps its `save`/`bench`/debug modes; its `show` path is
-  re-pointed to delegate to the on-device `device/rmweb` (DRY, no env drift).
+- Dev script `scripts/run-wpeqt-on-device.sh` keeps its `save`/`bench`/debug modes; its `show` path shares
+  `rmweb-env.sh` and the launcher's stop/mount/restore discipline (DRY, no env drift).
 
 ## Items requiring on-device confirmation (carry into the plan)
 

@@ -1,6 +1,7 @@
 # Driving PROMPT, fully-developed e-ink refreshes for a Qt6 QtQuick app on the reMarkable Paper Pro
 
-**Scope:** rMPP ("ferrari", aarch64, color E Ink **Gallery 3 / ACeP2**, 1620×2160, **no GPU**) running a custom
+**Scope:** rMPP ("ferrari", aarch64, color E Ink **Gallery 3 / ACeP2**, 1620×2160, **GPU on die but no driver in
+the stock OS** → CPU-only in practice) running a custom
 Qt6 **QtQuick** app under the reMarkable **`epaper` QPA** + the QtQuick **`epaper` scenegraph backend**
 (`/usr/lib/plugins/scenegraph/libqsgepaper.so`), with **xochitl stopped**.
 
@@ -29,8 +30,10 @@ the "Deltas to fold back" section at the end for corrections to that doc.
    even when a partial fires, you may see nothing until the periodic full. Net: scene fast, panel ~6 s.
    *No published source contains the literal "6 s" constant — the number itself is unattributed* [INF, strong].
 2. **The per-frame fix (recommended recipe):** take **explicit control of the refresh** via the lowercase-'b'
-   `EPFramebuffer::swapBuffers(QRect, EPContentType, EPScreenMode, QFlags<UpdateFlag>)` exported by
-   `libqsgepaper.so`. After your item repaints, drive a **debounced** `swapBuffers` with a **per-update-class
+   `EPFramebuffer::swapBuffers(QRect, EPScreenMode, QFlags<UpdateFlag>)` exported by
+   `libqsgepaper.so` (re-checked 2026-08-26 on OS 3.28.0.164: **no `EPContentType` arg anymore** — earlier 3.28
+   builds exported `swapBuffers(QRect, EPContentType, EPScreenMode, QFlags)`; both are referenced below). After
+   your item repaints, drive a **debounced** `swapBuffers` with a **per-update-class
    waveform** (fast mono partial per page-turn; full color flash on navigation + every Nth turn).
 3. **Which signal / thread:** call from **`QQuickWindow::afterRendering`** (or `frameSwapped` for
    "previous frame is on the panel"), **Direct-connected**. Force `QSG_RENDER_LOOP=basic` so these fire on the
@@ -100,7 +103,8 @@ The `.cpp` bodies are not published anywhere, so the *exact* logic is inference,
 This is the second, independent half of the problem (the "panel looks unchanged" half, distinct from the cadence
 half), and it is well-supported:
 - The modern rMPP refresh call is `EPFramebuffer::swapBuffers(QRect changed, EPContentType, EPScreenMode,
-  QFlags<UpdateFlag>)`; **`UpdateFlag::CompleteRefresh` (=1) is the bit that forces a full-screen waveform** —
+  QFlags<UpdateFlag>)` (older builds; current 3.28 builds export the same call **without** the `EPContentType`
+  arg — §2.1); **`UpdateFlag::CompleteRefresh` (=1) is the bit that forces a full-screen waveform** —
   without it you get a partial that may under-develop. [VS]
   https://raw.githubusercontent.com/asivery/epfb-re/master/epframebuffer.h ,
   https://raw.githubusercontent.com/asivery/epfb-re/master/test.cpp
@@ -168,7 +172,7 @@ Generic Qt knobs that bear on the symptom (software, non-vsync backend) — wort
 |---|---|---|
 | Device | **reMarkable Paper Pro (rMPP / ACeP2)** | reMarkable 1 / 2 |
 | In | `libqsgepaper.so` (shared) | `libqsgepaper.a` (static, into xochitl) |
-| Refresh call | `swapBuffers(QRect, EPContentType, EPScreenMode, QFlags<UpdateFlag>)` | `sendUpdate(QRect, WaveformMode, UpdateMode, bool)` |
+| Refresh call | `swapBuffers(QRect, EPScreenMode, QFlags<UpdateFlag>)` — current 3.28 builds; older builds add `EPContentType` after the rect | `sendUpdate(QRect, WaveformMode, UpdateMode, bool)` |
 | Force-full lever | **`UpdateFlag::CompleteRefresh`** arg (no `setForceFull`) | **`setForceFull(bool)`** + `FullUpdate` |
 | RE source | **asivery/epfb-re** | Eeems template-qt-app, canselcik, pl-semiotics |
 
@@ -184,6 +188,8 @@ enum EPScreenMode  { QualityFastest = 0, QualityFast = 1, Quality3 = 3,      // 
 class EPFramebuffer {
   enum UpdateFlag { NoRefresh = 0, CompleteRefresh = 1 };                    // CompleteRefresh = forced FULL flash
   unsigned long swapBuffers(QRect changed, EPContentType, EPScreenMode, QFlags<UpdateFlag>);  // present + refresh
+  // ^ older-build signature. Current 3.28 builds (verified 2026-08-26 on 3.28.0.164) export
+  //   swapBuffers(QRect, EPScreenMode, QFlags<UpdateFlag>) — NO EPContentType arg. The enum values are unchanged.
   static EPFramebuffer* instance();                                          // the genuine library export
   QImage* getAuxFramebuffer();    // the back buffer you paint INTO
   QImage* getMainFramebuffer();   // the displayed buffer
@@ -345,14 +351,17 @@ research-reuse.md §2a (verified on device).
 ### 4.1 The exact mangled symbols (compiler-verified, not hand-derived)
 
 ```
-EPFramebuffer::swapBuffers(QRect, EPContentType, EPScreenMode, QFlags<EPFramebuffer::UpdateFlag>)
+EPFramebuffer::swapBuffers(QRect, EPScreenMode, QFlags<EPFramebuffer::UpdateFlag>)          ← current 3.28 builds (verified on-device 2026-08-26, 3.28.0.164)
+  →  _ZN13EPFramebuffer11swapBuffersE5QRect12EPScreenMode6QFlagsINS_10UpdateFlagEE
+
+EPFramebuffer::swapBuffers(QRect, EPContentType, EPScreenMode, QFlags<EPFramebuffer::UpdateFlag>)   ← older builds (epfb-re declaration)
   →  _ZN13EPFramebuffer11swapBuffersE5QRect13EPContentType12EPScreenMode6QFlagsINS_10UpdateFlagEE
 
 EPFramebuffer::instance()
   →  _ZN13EPFramebuffer8instanceEv
 ```
 
-Verified by compiling the exact epfb-re declaration with `g++ -std=c++17` (Itanium C++ ABI — the same ABI the
+The 4-arg form was verified by compiling the exact epfb-re declaration with `g++ -std=c++17` (Itanium C++ ABI — the same ABI the
 aarch64 reMarkable toolchain uses) and reading the symbol back with `nm` + `c++filt` round-trip. [VS]
 local g++/nm/c++filt; input declaration from
 https://raw.githubusercontent.com/asivery/epfb-re/master/epframebuffer.h
@@ -410,9 +419,14 @@ public:
 
         instance_  = reinterpret_cast<InstanceFn>(dlsym(h, "_ZN13EPFramebuffer8instanceEv"));
         // swapBuffers takes QFlags<UpdateFlag> by value; on the ABI that is an int-sized value → pass `int`.
+        // Current 3.28 builds export the no-content-type symbol (verified 3.28.0.164); older builds carry
+        // EPContentType — dlsym the current one first, fall back to the legacy one (rmweb's engine does both).
         swap_      = reinterpret_cast<SwapFn>(
-            dlsym(h, "_ZN13EPFramebuffer11swapBuffersE5QRect13EPContentType12EPScreenMode6QFlagsINS_10UpdateFlagEE"));
-        if (!instance_ || !swap_) {
+            dlsym(h, "_ZN13EPFramebuffer11swapBuffersE5QRect12EPScreenMode6QFlagsINS_10UpdateFlagEE"));
+        if (!swap_)
+            swapLegacy_ = reinterpret_cast<SwapLegacyFn>(
+                dlsym(h, "_ZN13EPFramebuffer11swapBuffersE5QRect13EPContentType12EPScreenMode6QFlagsINS_10UpdateFlagEE"));
+        if (!instance_ || (!swap_ && !swapLegacy_)) {
             std::fprintf(stderr, "dlsym EPFramebuffer: %s\n", dlerror());
             return false;   // → fall back to nm -D on device to confirm the exact symbol / subclass
         }
@@ -421,23 +435,26 @@ public:
     }
 
     // Call from QQuickWindow::afterRendering (DirectConnection, GUI thread under QSG_RENDER_LOOP=basic).
-    unsigned long present(const QRect& changed, EPContentType c, EPScreenMode m, EPUpdateFlag f) {
+    unsigned long present(const QRect& changed, EPScreenMode m, EPUpdateFlag f) {
         // QFlags<UpdateFlag> is layout-compatible with its underlying int → pass `int(f)`.
-        return swap_(fb_, changed, c, m, static_cast<int>(f));
+        if (swap_) return swap_(fb_, changed, m, static_cast<int>(f));
+        return swapLegacy_(fb_, changed, EPC_Mono, m, static_cast<int>(f));  // legacy ABI also wants a content type
     }
 
-    // Convenience: full color anti-ghost / develop flash over the whole 1620x2160 panel.
-    void fullFlash() { present(QRect(0, 0, 1620, 2160), EPC_Color, EPS_QualityFull, EP_CompleteRefresh); }
+    // Convenience: full anti-ghost / color-develop flash over the whole 1620x2160 panel.
+    void fullFlash() { present(QRect(0, 0, 1620, 2160), EPS_QualityFull, EP_CompleteRefresh); }
     // Convenience: fast grayscale page-turn partial.
-    void fastMono(const QRect& r) { present(r, EPC_Mono, EPS_QualityFast, EP_NoRefresh); }
+    void fastMono(const QRect& r) { present(r, EPS_QualityFast, EP_NoRefresh); }
 
 private:
-    using InstanceFn = void* (*)();
+    using InstanceFn   = void* (*)();
     // First arg = the EPFramebuffer* `this`; QFlags passed as int (see note above).
-    using SwapFn     = unsigned long (*)(void* self, QRect, EPContentType, EPScreenMode, int);
-    InstanceFn instance_ = nullptr;
-    SwapFn     swap_     = nullptr;
-    void*      fb_       = nullptr;
+    using SwapFn       = unsigned long (*)(void* self, QRect, EPScreenMode, int);                 // current ABI
+    using SwapLegacyFn = unsigned long (*)(void* self, QRect, EPContentType, EPScreenMode, int);  // older builds
+    InstanceFn   instance_   = nullptr;
+    SwapFn       swap_       = nullptr;
+    SwapLegacyFn swapLegacy_ = nullptr;
+    void*        fb_         = nullptr;
 };
 ```
 
@@ -595,8 +612,9 @@ are confirmed to resolve standalone on-device. **Either way: exactly one owner p
    hand-roll `/dev/dri/card0`.
 8. **`createControlledInstance` is an LD_PRELOAD interposer for the INJECT case** — for standalone use plain
    `instance()` + `getAuxFramebuffer()` and verify resolution on-device.
-9. **Compiler-verified mangled symbol** for the present call:
-   `_ZN13EPFramebuffer11swapBuffersE5QRect13EPContentType12EPScreenMode6QFlagsINS_10UpdateFlagEE` (and
+9. **Compiler-verified mangled symbol** for the present call: current 3.28 builds (verified 2026-08-26 on
+   3.28.0.164) export `_ZN13EPFramebuffer11swapBuffersE5QRect12EPScreenMode6QFlagsINS_10UpdateFlagEE` (**no
+   EPContentType**); older builds export `...E5QRect13EPContentType12EPScreenMode...` (and both have
    `_ZN13EPFramebuffer8instanceEv`). Pass `QFlags<UpdateFlag>` as the bare enumerator (implicit ctor) / int.
 10. **Call from `QQuickWindow::afterRendering` (Direct), GUI thread under `QSG_RENDER_LOOP=basic`.** There is **no
     `setForceFull` on the lowercase-'b' class** — "force full" = `QualityFull` + `CompleteRefresh`.

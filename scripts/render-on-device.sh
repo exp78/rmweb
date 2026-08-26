@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Run the WPE headless render PROOF on the device (native glibc 2.39, software GL, no GPU),
+# Run the WPE headless render PROOF on the device (native glibc 2.39, software GL — the
+# on-die GPU has no driver in the stock OS),
 # write /home/root/rmweb/out.png, and copy it back to build/wpe-render-device.png.
 # Requires scripts/bundle.sh to have deployed /home/root/rmweb first.
 cd "$(dirname "$0")/.."
@@ -12,8 +13,7 @@ ssh "$DUSER@$HOST" 'bash -s' <<'EOS'
 set -e
 R=/home/root/rmweb
 # WPE spawns helpers from the BAKED /usr/libexec/wpe-webkit-2.0 (WEBKIT_EXEC_PATH is ignored in
-# 2.48). Provide it via a symlink, restored on exit (rootfs is full but a symlink costs nothing).
-# / is mounted READ-ONLY, so we can't symlink into /usr/libexec. Overlay-mount it instead:
+# 2.48). / is mounted READ-ONLY, so we can't symlink into /usr/libexec. Overlay-mount it instead:
 # lower = the real /usr/libexec (keeps dbus/sftp/fc-cache/...), upper = our wpe-webkit-2.0
 # helpers. Fully reversible (umount), no rootfs write. WPE bakes this absolute path
 # (WEBKIT_EXEC_PATH is ignored in 2.48); a clean -DCMAKE_INSTALL_PREFIX=/home/root/rmweb

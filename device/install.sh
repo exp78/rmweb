@@ -6,7 +6,7 @@ R="${RMWEB_ROOT:-/home/root/rmweb}"
 # Version single source of truth: the bundle's VERSION file (bundle.sh copies the repo-root
 # VERSION there). Fall back to the built-in default so the script still works outside a bundle.
 VER="$(cat "$R/VERSION" 2>/dev/null || true)"
-[ -n "$VER" ] || VER="0.8.0"
+[ -n "$VER" ] || VER="0.9.0"
 fail(){ echo "[install] ERROR: $*" >&2; exit 1; }
 
 # 1. Integrity: the launcher's hard dependencies must be present.

@@ -13,7 +13,7 @@ Read `docs/superpowers/specs/2026-06-24-rmweb-browser-design.md` (design) and
 - **Always verify on the real device** after a change (it's usually connected over USB).
 
 ## Non-negotiable constraints
-- **No GPU/EGL/GLES** → WPE needs software GL (**Mesa llvmpipe, surfaceless EGL**). Page paint = Skia CPU.
+- **GPU present on the SoC, but the stock OS ships no driver for it (no EGL/GLES)** → WPE needs software GL (**Mesa llvmpipe, surfaceless EGL**). Page paint = Skia CPU.
 - **rootfs `/` is full** → install ONLY under **`/home/root/rmweb`**; bundle missing libs, set rpath.
 - **Cross-compile only** (no on-device compiler) via the official **ferrari Yocto SDK** (scarthgap, glibc 2.39, aarch64, `-mcpu=cortex-a53`).
 - Display path (MVP) = **Qt6 + official `epaper` QPA** (`/usr/lib/plugins/platforms/libepaper.so`)
@@ -21,14 +21,17 @@ Read `docs/superpowers/specs/2026-06-24-rmweb-browser-design.md` (design) and
   waveforms for us. Direct `/dev/dri/card0` DRM is a *later* upgrade (panel packing is undocumented).
 
 ## Architecture (5 isolated modules)
-`engine` (WPE→ARGB frames) · `display` (Qt6+epaper QPA) · `input` (evdev touch=event2/pen=event3) ·
+`engine` (WPE→ARGB frames) · `display` (Qt6+epaper QPA) · `input` (evdev touch=event3/pen=event2) ·
 `shell` (QML chrome) · `platform` (lifecycle: stop/restore xochitl, install, OTA hook).
 Data flow: input → shell → engine renders → ARGB SHM → display (QImage→QtQuick sw scene→epaper)→e-ink.
 
 ## Reuse vs bundle
-Reuse on-device (link dynamically): Qt 6.8.2, cairo, icu74, glib2.78, freetype, harfbuzz, openssl3,
+Reuse on-device (link dynamically): Qt 6 (system build — 6.8.2 pre-OTA, 6.10.3 since 3.28.0.164;
+same-major BC keeps rmweb running), cairo, icu74, glib2.78, freetype, harfbuzz, openssl3,
 libcurl, libxml2, libpng/jpeg, libdrm, libudev/systemd. Bundle (build): WPE WebKit, libwpe/WPEBackend,
-Mesa(llvmpipe), libsoup3 (+sqlite3/libpsl/nghttp2), libwebp, libxkbcommon, libepoxy, gnutls/glib-networking.
+Mesa(llvmpipe), libsoup3 (+sqlite3/libpsl/nghttp2), libwebp, libxkbcommon, libepoxy,
+gnutls/glib-networking, qtvirtualkeyboard (built against the SDK's Qt 6.8.2 — same-major plugins
+built with an older minor load fine under the newer system Qt).
 
 ## Working agreement
 - Respond to the user in **Russian**.
@@ -57,7 +60,7 @@ test pattern on the Paper Pro e-ink via the epaper QPA (cure = Window sized to `
 only; `QT_QPA_PLATFORM=epaper QT_QUICK_BACKEND=epaper`; xochitl stopped/restored). The real rMPP refresh API
 is recorded for Phase 4 (`EPFramebuffer::swapBuffers/ghostControl`, exported by libqsgepaper — see research-reuse.md).
 Phase 2 ✅ DONE (2026-06-25): **WPE WebKit 2.48.5 (Skia CPU, software) cross-built** for aarch64 + **Mesa softpipe**
-(software EGL, surfaceless, no GPU); a headless `engine/wpe_render.c` **rendered a real web page to PNG**
+(software EGL, surfaceless, no GPU driver in the stock OS); a headless `engine/wpe_render.c` **rendered a real web page to PNG**
 (`build/wpe-render.png` — bar + colored boxes + anti-aliased text). Recipe: `scripts/build-wpe.sh {deps|build|render}`
 → `engine/*.incontainer.sh` (builds on a persistent, case-sensitive docker volume → resumable); all gotchas in
 research-reuse.md §8 (sysroot pkg-config, glibc-2.39 loader repoint, `/usr` symlinks, `load_html`, fonts).

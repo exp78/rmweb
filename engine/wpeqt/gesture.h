@@ -1,6 +1,6 @@
 // Pure finger-gesture classifier for the reading shell — no Qt, no device deps, so it is unit-tested
 // off-device (tests/gesture_test.cpp). TouchReader feeds it the contact's travel + dwell and turns the
-// result into a page-turn (swipe) or a synthetic mouse click (tap, via the touch->mouse bridge).
+// result into a page-turn (swipe) or a tap / long-press (link peek) for the C++ tap router in main().
 #pragma once
 namespace rmweb {
 

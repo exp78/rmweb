@@ -2,8 +2,8 @@
  * wpe_render.c -- Render a web page to PNG using WPE WebKit on software GL.
  *
  * Proof that the cross-built WPE WebKit (Skia CPU, software Mesa EGL/GLES,
- * surfaceless, no GPU) actually lays out + paints a page on the reMarkable
- * Paper Pro target (aarch64).
+ * surfaceless; the on-die GPU has no driver in the stock OS) actually lays
+ * out + paints a page on the reMarkable Paper Pro target (aarch64).
  *
  * Pipeline:
  *   WPEDisplayHeadless  --(EGL_PLATFORM_SURFACELESS_MESA, softpipe)-->
@@ -47,7 +47,7 @@ static const char *PAGE =
     "</style></head><body>"
     "<div class='bar'>WPE WebKit &mdash; reMarkable Paper Pro</div>"
     "<h1>Software GL render OK</h1>"
-    "<p>Skia CPU + Mesa softpipe (surfaceless EGL), no GPU. aarch64.</p>"
+    "<p>Skia CPU + Mesa softpipe (surfaceless EGL); GPU present, no stock driver. aarch64.</p>"
     "<div class='box r'>RED<br>box</div>"
     "<div class='box g'>GREEN<br>box</div>"
     "<div class='box y'>YELLOW<br>box</div>"
@@ -82,7 +82,7 @@ static gboolean write_png_bgra(const char *path, const guint8 *data,
     for (int y = 0; y < height; ++y) {
         const guint8 *src = data + (size_t)y * stride;
         for (int x = 0; x < width; ++x) {
-            /* memory order from GBM map of ARGB8888 little-endian == B,G,R,A */
+            /* memory order of ARGB8888 little-endian == B,G,R,A (SHM import, no GBM map) */
             guint8 b = src[x*4 + 0];
             guint8 g = src[x*4 + 1];
             guint8 r = src[x*4 + 2];
@@ -132,7 +132,7 @@ static void on_buffer_rendered(WPEView *view, WPEBuffer *buffer, gpointer user_d
     const guint8 *pix = g_bytes_get_data(bytes, &size);
     int stride = (int)(size / (gsize)h);
     /* A short GBytes (truncated SHM, driver quirk) would make the libpng loop below read past the
-     * buffer — and a segfault on the device is a watchdog reboot. Refuse to touch such a buffer:
+     * buffer and crash the process. Refuse to touch such a buffer:
      * require the full w*h*4 bytes (which also implies stride >= w*4 for 4 bpp). */
     if (size < (gsize)w * (gsize)h * 4 || stride < w * 4) {
         g_printerr("[render] bad pixel buffer: %zu bytes for %dx%d (need %zu) -- aborting capture\n",

@@ -1,6 +1,6 @@
 // Pure tap-location classifier for the reading shell — no Qt, no device deps, so it is unit-tested
 // off-device (tests/tapzone_test.cpp). The shell maps the result: Next/Prev -> page turn,
-// SummonChrome -> toggle bars, Content -> inject a mouse click (follow a link) via the touch bridge.
+// SummonChrome -> show the bars, Content -> the content probe (tapLink: follow a link/control at the point).
 #pragma once
 namespace rmweb {
 

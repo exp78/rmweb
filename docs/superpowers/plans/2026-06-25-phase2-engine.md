@@ -3,7 +3,7 @@
 > Implement task-by-task; each task ends with a concrete verification gate. Long builds run in the background.
 
 **Goal:** Cross-build the missing WebKit dependencies + **WPE WebKit (software / Skia CPU)** for the Paper Pro,
-and **headless-render a real web page to a PNG** — proving the engine + software-GL stack on aarch64 with no GPU.
+and **headless-render a real web page to a PNG** — proving the engine + software-GL stack on aarch64 with no GPU driver (the SoC has a GPU on die, but the stock OS ships no driver, so CPU-only in practice).
 
 **Architecture:** Build in the `rmweb-sdk` container (meson auto-applies the OE aarch64 cross-file). Missing deps
 + WPE install into a **persistent staging prefix** `build/stage/usr` (host-mounted, gitignored). Each build step
@@ -14,7 +14,7 @@ becomes the device bundle (`/home/root/rmweb/lib`) later.
 EGL/GLES (NO LLVM — llvmpipe needs LLVM which isn't in the SDK; WPE uses GL only for compositing, page raster is Skia CPU).
 
 ## Global Constraints
-- No GPU on device → Mesa **swrast** (gallium `swrast`, `egl`, `gbm`, `platforms=surfaceless`; no vulkan/glx/llvm).
+- No GPU driver on device (GPU on die, unused in the stock OS) → Mesa **swrast** (gallium `swrast`, `egl`, `gbm`, `platforms=surfaceless`; no vulkan/glx/llvm).
 - WPE built software: Skia CPU is the WPE default; disable media (`USE_GSTREAMER=OFF`), WebGL, etc.
 - Install everything to `build/stage/usr`; bundle the runtime `.so`s under `/home/root/rmweb/lib` (rpath/$ORIGIN).
 - Reuse SDK-provided deps (glib, icu, cairo, freetype, harfbuzz, fontconfig, libxml2, png, jpeg, openssl, zlib,

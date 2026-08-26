@@ -24,7 +24,8 @@ Verified device facts this builds on: `CLAUDE.md`, `docs/research/remarkable-tou
 
 ## Global Constraints (inherited by every task)
 
-- **No GPU/EGL/GLES.** Software GL only (Mesa llvmpipe, surfaceless EGL); page paint = Skia CPU.
+- **No usable GPU: the SoC has one (Vivante), but the stock OS ships no driver for it** → no
+  EGL/GLES. Software GL only (Mesa llvmpipe, surfaceless EGL); page paint = Skia CPU.
 - **Install ONLY under `/home/root/rmweb`** (rootfs `/` is full); bundle missing libs, set rpath.
 - **Cross-compile only** via the ferrari SDK (scarthgap, glibc 2.39, aarch64, `-mcpu=cortex-a53`).
 - **Display = Qt6 epaper QPA**, QtQuick **only**, `QT_QPA_PLATFORM=epaper QT_QUICK_BACKEND=epaper`,
@@ -206,7 +207,8 @@ Native C on the WebKitWebView + injected JS; runs in the JSC interpreter (no JIT
 ## 9. Error handling & resilience
 
 - **WebProcess crash:** `web-process-terminated` → `processCrashed` → shell shows a simple error
-  page + auto-reload **once** (guard a reload-loop with a per-URL attempt counter + backoff).
+  page + auto-reload with a **bounded retry budget** (guard a reload-loop with an attempt counter +
+  backoff).
 - **TLS errors:** `load-failed-with-tls-errors` + `get_tls_info()` → `tlsStateChanged`; top bar shows
   a broken-lock indicator. MVP indicates only; "proceed anyway" is v1.
 - **Segfault safety:** keep `-rdynamic` + the SIGSEGV backtrace handler; logs to `/home/root`

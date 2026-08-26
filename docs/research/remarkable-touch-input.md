@@ -1,7 +1,8 @@
 # reMarkable Paper Pro — finger-touch input for a custom native app
 
 **Scope.** How to get **finger-touch** (not pen) input into our native app on the **reMarkable Paper Pro**
-(codename **"ferrari"**, color E Ink Gallery 3, i.MX8M Mini aarch64, Linux 6.12, glibc 2.39, **no GPU**),
+(codename **"ferrari"**, color E Ink Gallery 3, i.MX8M Mini aarch64, Linux 6.12, glibc 2.39, **GPU on die but no
+driver in the stock OS** → CPU-only in practice),
 running under **Qt6 + the reMarkable "epaper" QPA** with **xochitl stopped**.
 
 Researched 2026-06-26 from primary sources (reMarkable's own QPA source, Qt source, the Linux kernel evdev

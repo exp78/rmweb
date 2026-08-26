@@ -32,7 +32,9 @@ else
   echo "[bundle] WARN: no llvmpipe build (build/stage-mesa-llvm) — shipping softpipe (slow). Run engine/mesa-llvmpipe.incontainer.sh"
 fi
 # Qt Virtual Keyboard (on-screen URL entry): module libs + QML module + input-context plugin. Its Qt deps
-# (Gui/Qml/Quick/Svg/Layouts/Window) are already on the device. Run with QT_IM_MODULE=qtvirtualkeyboard and
+# (Gui/Qml/Quick/Svg/Layouts/Window) come from the device's system Qt at runtime (6.10.3 on current
+# 3.28 builds; the plugin is built against the SDK's 6.8.2 — same-major older-minor plugins load fine).
+# Run with QT_IM_MODULE=qtvirtualkeyboard and
 # QML_IMPORT_PATH/QT_PLUGIN_PATH pointed at the bundle (they EXTEND, not replace, the device defaults).
 if [ -d build/stage-vkb/usr/lib/qml/QtQuick/VirtualKeyboard ]; then
   cp -a build/stage-vkb/usr/lib/libQt6VirtualKeyboard*.so* "$B/lib/"

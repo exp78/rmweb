@@ -105,7 +105,7 @@ extern "C" void crashHandler(int sig) {
     raise(sig);
 }
 
-// SIGTERM (the dev runner's timed kill; `systemctl stop rmweb`): exit IMMEDIATELY via _Exit.
+// SIGTERM (the dev runner's timed kill; `systemctl stop rmweb-appload.scope` under AppLoad): exit IMMEDIATELY via _Exit.
 // The orderly Qt/WebKit teardown path intermittently SIGABRTs/SEGVs on this stack, and any
 // fatal signal here costs a DEVICE REBOOT via the watchdog — the ⏻ button and save mode already
 // use the same _Exit escape. Async-signal-safe: _Exit only (no flush — stderr is line-buffered,
@@ -574,7 +574,8 @@ public Q_SLOTS:
             g_main_loop_quit(static_cast<GMainLoop*>(l)); return G_SOURCE_REMOVE; }, m_loop);
     }
 
-    // Scroll by dy device px (called from the GUI thread on a swipe). Marshalled onto the worker thread;
+    // Scroll one page in dy's direction (the page-turn JS picks the step; called from the GUI thread
+    // on a swipe). Marshalled onto the worker thread;
     // WebKit repaints at the new offset (mapped view + single-threaded Skia) and clamps the scroll for us.
     // m_ctx is valid from the ctor, so this is safe to call cross-thread.
     void pageBy(double dy) {
@@ -584,7 +585,7 @@ public Q_SLOTS:
     }
 
     // Navigation — WebKit's own history/loading API, marshalled onto the worker GMainContext.
-    // Safe to call from the GUI thread (g_main_context_invoke_full is MT-safe); QML calls these directly.
+    // Safe to call from the GUI thread (g_main_context_invoke_full is MT-safe); main()'s tap router and signal wires call these.
     void loadUrl(const QString &u) { const std::string s = rmweb::normalizeUrl(u.toStdString());
         marshalToCtx([this, s] { m_expectUserNav = true; if (m_view) webkit_web_view_load_uri(m_view, s.c_str()); }); }
     void goHome() {
@@ -865,8 +866,7 @@ public Q_SLOTS:
             qInfo("[form] autofill learned kind=%d len=%zu", static_cast<int>(kind), t.size());
         });
     }
-    // DIAG: log the stashed field's tag/type/value LENGTH (password-safe — never the value itself),
-    // and force a FULL-document repaint first (decides "renderer out of sync" vs "stale damage").
+    // DIAG: log the stashed field's tag/type/value LENGTH (password-safe — never the value itself).
     void logFieldState() {
         marshalToCtx([this] {
             if (!m_view) return;
@@ -2337,7 +2337,7 @@ public:
     void requestStop() { m_stop.store(true); }
 Q_SIGNALS:
     void swipe(int dir);     // page turn (+1 next / -1 prev)
-    void tap(int x, int y);  // tap at panel px -> touch->mouse bridge -> QtQuick Controls
+    void tap(int x, int y);  // tap at panel px -> the C++ tap router in main() (chrome / zones / content probe)
     void longPress(int x, int y);  // stationary hold (> tapMaxDwellMs) -> link peek
 public Q_SLOTS:
     void run() {
@@ -2399,8 +2399,8 @@ private:
         closedir(dir);
         return found;
     }
-    // Classify the finished contact (gesture.h) and dispatch: a tap becomes a synthetic mouse click
-    // (the touch->mouse bridge), a swipe turns the page. Each path is independently debounced.
+    // Classify the finished contact (gesture.h) and dispatch: a tap/long-press goes to the tap router
+    // in main(), a swipe turns the page. Each path is independently debounced.
     void emitGesture(int dx, int dy, int x, int y, gint64 downUs) {
         const gint64 now = g_get_monotonic_time();
         const int dwellMs = static_cast<int>((now - downUs) / 1000);
@@ -2449,7 +2449,7 @@ private:
 
 // ---------------------------------------------------------------------------
 // EpaperRefresh — manual e-ink panel present via EPFramebuffer::swapBuffers (dlopen'd from the epaper
-// QPA). Two uses: the RMWEB_MANUAL_PRESENT diagnostic (afterRendering hook — note that path
+// scenegraph plugin libqsgepaper.so). Two uses: the RMWEB_MANUAL_PRESENT diagnostic (afterRendering hook — note that path
 // self-deadlocks the render loop's fb mutex, kept only for cadence experiments), and WpeView's
 // B&W fast mode (presentFast, called from frameSwapped +0 ms, where the mutex is already free).
 //   * fast grayscale  (Mono, QualityFast, NoRefresh)      — every frame, so a page turn shows immediately;

@@ -71,7 +71,9 @@ button enabled-state in sync. These calls are marshalled onto the engine's worke
 ### 3.4 URL entry: **Qt Virtual Keyboard** (bundled), with a fallback
 
 The user chose the standard Qt on-screen keyboard (no physical Type Folio). It is not on the
-device, so we cross-build the `qtvirtualkeyboard` module against the device's Qt 6.8.2 and bundle
+device, so we cross-build the `qtvirtualkeyboard` module against the SDK's Qt 6.8.2 (rmweb itself
+links the device's system Qt, which is newer; same-major plugins built with an older minor load
+fine) and bundle
 its QML module + the `qtvirtualkeyboardplugin` input-context plugin; the launcher sets
 `QT_IM_MODULE=qtvirtualkeyboard` and the QML import path. Tapping the address field focuses it and
 the keyboard auto-appears (Qt VKB integrates with `TextField` via the input-method framework); its
@@ -149,7 +151,7 @@ panel through the existing `EpaperRefresh` present path — no second display pa
 2. **Qt VKB on the epaper QPA + IM framework** is the least-trodden path. *Mitigation:* Step 3 spike
    + QML-keypad fallback that needs no input-method integration.
 3. **Cross-building `qtvirtualkeyboard` against the SDK Qt 6.8.2** (module may want Qt build
-   artifacts). *Mitigation:* build the version matching the device; if the SDK lacks pieces, the
+   artifacts). *Mitigation:* build the version matching the SDK Qt; if the SDK lacks pieces, the
    keypad fallback unblocks Step 3.
 4. **Chrome present cadence / flicker.** *Mitigation:* reuse the existing present path; verify on
    device; defer fine-tuning to the planned refresh-polish pass.

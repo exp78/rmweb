@@ -2,7 +2,8 @@
 
 **Scope.** How to *correctly* drive rendering when you embed a high‑level `WebKitWebView` on a
 custom/headless `WPEDisplay` using the **new WPEPlatform API** (`wpe-platform-2.0`, WPE WebKit 2.48),
-on a CPU‑only device (Mesa softpipe/llvmpipe, surfaceless EGL, no GPU). Written for the rmweb engine
+on a CPU‑only device (Mesa softpipe/llvmpipe, surfaceless EGL; GPU on die but no driver in the stock OS).
+Written for the rmweb engine
 (`engine/wpeqt/main.cpp`).
 
 **Authority.** Every claim below is checked against the **actual 2.48.5 source tree** unpacked locally at
@@ -25,7 +26,7 @@ WPE 2.48** — see §5.
 
 ## 1. The cast: who owns and drives what
 
-When you do this (your `main.cpp:88‑104`):
+When you do this (your `main.cpp:301‑339`):
 
 ```c
 WPEDisplay *display = wpe_display_headless_new();          // WPEDisplayHeadless
@@ -241,12 +242,13 @@ And the WebProcess **suspends painting when not visible**:
        g_object_notify_by_pspec(...PROP_MAPPED);            // <-- this is what fires IsVisible
    }
    ```
-   Your `wpe_view_set_visible(TRUE)` (`main.cpp:104`) takes `FALSE→TRUE`, so it *does* reach `wpe_view_map`,
+   Your `wpe_view_set_visible(FALSE)`→`set_visible(TRUE)` pair (`main.cpp:340‑341`) forces `FALSE→TRUE`, so it
+   *does* reach `wpe_view_map`,
    which now passes (visible TRUE, not yet mapped, no `can_be_mapped`) → `mapped = TRUE` → `notify::mapped`
-   → `IsVisible` delivered. **So in principle your single call maps it.** The remaining failure modes are
+   → `IsVisible` delivered. **So the map transition fires.** The remaining failure modes are
    therefore **ordering / zero viewport**, not "can't map":
    - If `set_visible(TRUE)` is reached while the toplevel is still **0×0** (you only resize `if (top)`, and
-     the order in `main.cpp:98‑104` resizes first — good — but verify `top` was non‑NULL), the page lays out
+     the order in `main.cpp:331‑341` resizes first — good — but verify `top` was non‑NULL), the page lays out
      at 0×0 and most paints are empty/no‑ops → looks like "no frames."
    - If anything elsewhere calls `set_visible(TRUE)` a second time or the view was already visible, guard (A)
      makes it a silent no‑op and no `notify::mapped` fires.
@@ -280,8 +282,8 @@ g_assert(wpe_view_get_width(wpeView) == m_w && wpe_view_get_height(wpeView) == m
 Secondary suspect (rule it out): the headless frame timer is attached to
 `g_main_context_get_thread_default()` **at the time the `WPEView` is constructed**
 (`WPEViewHeadless.cpp:99`). You construct the `WebKitWebView` *after*
-`g_main_context_push_thread_default(m_ctx)` (`main.cpp:84,96`), so the timer lives on your worker context —
-correct. Just make sure that context's `GMainLoop` keeps running (it does, `main.cpp:114`) and that nothing
+`g_main_context_push_thread_default(m_ctx)` (`main.cpp:277`), so the timer lives on your worker context —
+correct. Just make sure that context's `GMainLoop` keeps running (it does, `main.cpp:557`) and that nothing
 on it blocks for long inside `buffer-rendered` (your deep‑copy is fine).
 
 ---
@@ -317,8 +319,9 @@ for a no‑GPU e‑ink reader, at the cost of paint throughput (acceptable for p
 > issues"* and *"Fall back to using libdrm to detect device nodes … in the WPEPlatform headless and Wayland
 > backends"* — both relevant to a headless/no‑GPU setup. You are on 2.48.5 (good); just don't downgrade.
 
-If, with `CPU_PAINTING_THREADS=0`, scrolled rendering is stable, you can **delete the content‑shift hack**
-(`main.cpp:143‑147`) and scroll the page normally — that hack was compensating for this crash.
+If, with `CPU_PAINTING_THREADS=0`, scrolled rendering is stable, the old **content‑shift hack** stays deleted
+(it was dropped from `main.cpp` once this mitigation landed) and the page scrolls normally — that hack was
+compensating for this crash.
 
 ---
 
@@ -376,8 +379,8 @@ made and `numberOfGPUPaintingThreads()` early‑returns 0 (`SkiaPaintingEngine.c
 | `WEBKIT_DISABLE_ASYNC_SCROLLING` | `WebProcess/.../DrawingAreaCoordinatedGraphics.cpp:218` | set | turn off async (threaded) scrolling | **optional**: may further calm scroll |
 
 **Mesa‑level (not read by WebKit, act at the EGL/Gallium layer):** `GALLIUM_DRIVER=softpipe|llvmpipe`,
-`MESA_LOADER_DRIVER_OVERRIDE`, `EGL_PLATFORM=surfaceless`. You already set these in
-`scripts/run-wpeqt-on-device.sh:29‑31`.
+`MESA_LOADER_DRIVER_OVERRIDE`, `EGL_PLATFORM=surfaceless`. You set these in
+`device/rmweb-env.sh:6` (sourced by both launchers).
 
 ### Why you get the SharedMemory transport (no DMABuf to crash)
 The "Hardware"/DMABuf transport is only added when `usingWPEPlatformAPI && !renderDeviceFile.isEmpty()`
@@ -387,7 +390,7 @@ The "Hardware"/DMABuf transport is only added when `usingWPEPlatformAPI && !rend
 your `buffer-rendered` buffer is an SHM buffer whose `wpe_buffer_import_to_pixels()` returns CPU‑readable
 BGRA — see §6.
 
-### Recommended env for rmweb (no GPU, e‑ink)
+### Recommended env for rmweb (no GPU driver, e‑ink)
 ```sh
 export WEBKIT_SKIA_ENABLE_CPU_RENDERING=1     # explicit CPU Skia (WebProcessGLib.cpp:182)
 export WEBKIT_SKIA_CPU_PAINTING_THREADS=0     # main-thread paint -> avoids Problem 3 (SkiaPaintingEngine.cpp:67)
@@ -398,8 +401,9 @@ export EGL_PLATFORM=surfaceless
 export WEBKIT_FORCE_VBLANK_TIMER=1            # no real display vblank (DisplayVBlankMonitor.cpp:46)
 # DO NOT set (absent in 2.48): WEBKIT_DISABLE_COMPOSITING_MODE / WEBKIT_FORCE_COMPOSITING_MODE
 ```
-Your run script currently sets `GALLIUM_DRIVER`, `LIBGL_ALWAYS_SOFTWARE`, `EGL_PLATFORM` but **not**
-`WEBKIT_SKIA_ENABLE_CPU_RENDERING` or `WEBKIT_SKIA_CPU_PAINTING_THREADS` — add those two.
+Your runtime env now lives in `device/rmweb-env.sh` (sourced by `device/rmweb` and the dev runner) and sets all
+of the above: `GALLIUM_DRIVER`, `LIBGL_ALWAYS_SOFTWARE`, `EGL_PLATFORM`, plus `WEBKIT_SKIA_ENABLE_CPU_RENDERING=1`
+and `WEBKIT_SKIA_CPU_PAINTING_THREADS=0` (`rmweb-env.sh:6,10‑11`).
 
 ---
 
@@ -409,13 +413,15 @@ Your run script currently sets `GALLIUM_DRIVER`, `LIBGL_ALWAYS_SOFTWARE`, `EGL_P
 (`Source/WebKit/WPEPlatform/wpe/WPEBuffer.cpp:266‑285`; SHM impl
 `WPEBufferSHM.cpp:94‑106`). "transfer none" = **the buffer owns it; do not keep it past the handler**.
 The pixels stay valid only until the presenter releases the buffer — which the headless timer can do on its
-*next* tick. Rules for your `onBuffer` (`main.cpp:184‑214`), which are already correct and should stay:
+*next* tick. Rules for your `onBuffer` (`main.cpp:1486‑1560`), which are already correct and should stay.
+(The handler now reads the **SHM getters** — `wpe_buffer_shm_get_stride`/`wpe_buffer_shm_get_data` — because
+`import_to_pixels()` returns a garbage size on incrementally-rendered/scrolled frames; same transfer-none rule.)
 
-- **Deep‑copy before returning** (`QImage(...).copy()`) — you do this (`:202‑203`). Keep it.
-- `g_bytes_unref(bytes)` the returned `GBytes` (it *is* refcounted even though the data is borrowed) — you do
-  (`:204`). Fine.
+- **Deep‑copy before returning** (`QImage(...).copy()`) — you do this (`:1559`). Keep it.
+- The `GBytes` from `wpe_buffer_shm_get_data()` is likewise borrowed — **do NOT `g_bytes_unref` it** (the comment
+  at `:1494‑1497` says exactly this). Copy the pixels, keep nothing.
 - **Do NOT call `wpe_view_buffer_released()` / `wpe_view_buffer_rendered()`** — you correctly avoid this
-  (`:200‑201`). Confirmed: the headless view (`WPEViewHeadless.cpp:91,93`) **and** WebKit
+  (`:1497`). Confirmed: the headless view (`WPEViewHeadless.cpp:91,93`) **and** WebKit
   (`AcceleratedBackingStoreDMABuf.cpp:177‑193`) both already do it; a third call is the SEGFAULT (Problem 2).
 - Memory order is **BGRA == `QImage::Format_ARGB32`** on little‑endian aarch64 — your comment/code are right.
 
@@ -506,6 +512,6 @@ out and `g_bytes_unref` the borrowed `GBytes`. Your current handler is already c
 **threaded Skia WorkerPool** path (made thread‑safe only across 2.48.2/2.48.3; the compositor also uses EGL on
 softpipe). Fix: set **`WEBKIT_SKIA_CPU_PAINTING_THREADS=0`** (main‑thread paint, no WorkerPool —
 `SkiaPaintingEngine.cpp:67`) plus **`WEBKIT_SKIA_ENABLE_CPU_RENDERING=1`**, and stay on the newest 2.48.x.
-Then test real `scrollY>0`; if stable, drop the content‑shift hack. Do **not** try
+Then test real `scrollY>0`; if stable, the content‑shift hack stays dropped (it is already gone from `main.cpp`). Do **not** try
 `WEBKIT_DISABLE_COMPOSITING_MODE` — it does not exist in 2.48 and compositing can't be disabled
 (`WebPage.cpp:4744‑4746`). (§4, §5)

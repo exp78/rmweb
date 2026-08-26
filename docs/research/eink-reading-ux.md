@@ -3,7 +3,7 @@
 Scope: how mature e-ink readers (KOReader, Plato, Kindle/Kobo/Pocketbook, netsurf-reMarkable) handle
 **paging vs scrolling, touch gestures, and refresh**, distilled into concrete, opinionated recommendations
 for *our* WPE-WebKit reading browser. Hardware: 1620×2160 colour e-ink (~228 DPI), Qt6 QtQuick + reMarkable
-`epaper` QPA, Elan capacitive multitouch + Wacom/Elan pen, **no GPU**.
+`epaper` QPA, Elan capacitive multitouch + Wacom/Elan pen, **GPU on die but no driver in the stock OS** (CPU-only in practice).
 
 Companion docs: `docs/research-reuse.md` §2/§2a (refresh API & control loop — the *how* on rMPP), §"Input"
 (verified event-node map + coordinate transforms), `docs/device-profile.md` (hardware facts).
@@ -148,7 +148,8 @@ and scale to our 228):
 
 ## 3. Refresh strategy tied to UX
 
-Full hardware details (rMPP `EPFramebuffer::swapBuffers(rect, contentType, screenMode, flags)`, waveform enums,
+Full hardware details (rMPP `EPFramebuffer::swapBuffers(rect, screenMode, flags)` — older builds add a
+`contentType` arg after the rect — waveform enums,
 the debounce + anti-ghost control loop) are in **research-reuse.md §2 / §2a — do not duplicate.** This section is the
 *UX mapping*: which refresh class each interaction uses.
 
@@ -195,10 +196,10 @@ reMarkable's official Qt Quick guide says **"Touch event handling works out of t
 plain **`MouseArea` with `onPressed`** — i.e. the stack happily delivers *mouse-synthesized* events for simple taps.
 ([reMarkable Qt epaper docs](https://developer.remarkable.com/documentation/qt_epaper)) Touch arrives via Qt's
 **evdevtouch** handler, configured by `QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS` (can pin the device node, e.g.
-`/dev/input/event2`, plus `rotate=…:invertx`); evdevtouch generates **true multi-touch `QTouchEvent`s** (unlike the
+`/dev/input/event3`, plus `rotate=…:invertx`); evdevtouch generates **true multi-touch `QTouchEvent`s** (unlike the
 old tslib path which only made mouse events).
 ([Qt embedded inputs](https://doc.qt.io/qt-6/inputs-linux-device.html)) Our own recon (research-reuse.md §"Input")
-confirms the epaper QPA feeds touch through evdev and the touch device is on event2/event3.
+confirms the epaper QPA feeds touch through evdev and the touch device is event3 ("Elan touch input"; event2 is the pen).
 
 > ⚠️ **The crux:** depending on whether evdevtouch registers and whether anything consumes the `QTouchEvent` first,
 > your custom item may receive **`QTouchEvent` OR only synthesized `QMouseEvent`**. Design for **both.**
@@ -247,8 +248,9 @@ confirms the epaper QPA feeds touch through evdev and the touch device is on eve
 4. **Disable Qt's mouse-event compression for moves** if you sample positions yourself
    (`QCoreApplication::setAttribute(Qt::AA_CompressHighFrequencyEvents, false)` / `AA_CompressTabletEvents`) — but
    honestly we *want* throttling on e-ink, so leave compression on and additionally throttle scroll updates to ~1/refresh.
-5. **Pin the touch device node** via `QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS=/dev/input/event2` (verify node on device,
-   research-reuse.md §"Input") so evdevtouch binds the right device and emits real `QTouchEvent`s rather than nothing.
+5. **Pin the touch device node** via `QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS=/dev/input/event3` (touch = event3
+   "Elan touch input", pen = event2; verified on device — research-reuse.md §"Input") so evdevtouch binds the right
+   device and emits real `QTouchEvent`s rather than nothing.
 6. **Verify on device with `evtest`** which node is touch vs pen before wiring (research-reuse.md warns the exact
    event→device map must be confirmed on the rMPP).
 

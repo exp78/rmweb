@@ -203,7 +203,7 @@ device rarely juggles pages). Cap live pages ≤3 later, suspend the rest.
 
 Visible multi-tab bar · vim modal system as the *primary* UX · any animation / smooth-scroll /
 spinner / hover / theme transition · extensions / WebExtensions / DevTools UI · sync / accounts
-/ password manager · media player chrome / autoplay / WebRTC / PiP / WebGL (no GPU) ·
+/ password manager · media player chrome / autoplay / WebRTC / PiP / WebGL (no GPU driver in the stock OS) ·
 notifications / PWA install · download manager beyond a flat list · live new-tab feed / widgets ·
 sepia or colored reader backgrounds · large solid-black toolbars/headers (worst ghosting) ·
 autocomplete that re-renders every keystroke · favicons-everywhere color UI (monochrome-first;

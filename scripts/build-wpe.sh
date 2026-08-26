@@ -2,7 +2,8 @@
 set -euo pipefail
 # =============================================================================
 # Cross-build WPE WebKit 2.48.5 (software / Skia CPU, no media) for the
-# reMarkable Paper Pro (aarch64, NO GPU), then render a web page to a PNG to
+# reMarkable Paper Pro (aarch64; the on-die GPU has no driver in the stock OS,
+# so all rendering is CPU), then render a web page to a PNG to
 # prove the engine works on software GL (Mesa softpipe, surfaceless EGL).
 #
 # Installs into build/stage/usr. Seeds the SDK sysroot from build/stage (our
@@ -53,7 +54,7 @@ set -euo pipefail
 # path: it renders with GL and glReadPixels(GL_BGRA) into a ShareableBitmap that
 # becomes a WPEBufferSHM. Our proof connects WPEView::buffer-rendered, calls
 # wpe_buffer_import_to_pixels() (BGRA bytes, no GBM/DRM map needed), and writes
-# a PNG. See build/wpe_render.c.
+# a PNG. See engine/wpe_render.c.
 # =============================================================================
 
 cd "$(dirname "$0")/.."

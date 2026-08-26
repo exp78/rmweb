@@ -130,7 +130,7 @@ if (auto* toplevel = wpe_view_get_toplevel(...)) {
         m_viewStateFlags.add(WindowIsActive);     // ← set, because the headless toplevel is ACTIVE
 }
 ```
-Our app maps the view (`wpe_view_get_mapped()==TRUE`, asserted in `main.cpp:135`), so we get
+Our app maps the view (`wpe_view_get_mapped()==TRUE`, logged at startup in `main.cpp:342`), so we get
 **IsVisible + IsInWindow + WindowIsActive** (focus is the only missing bit, which is irrelevant to the
 rendering‑update rate). Therefore `Page::isVisibleAndActive()==true`
 (`Source/WebCore/page/Page.cpp:3206` [VS]) and `m_throttlingReasons` does **not** contain `VisuallyIdle`
@@ -204,7 +204,7 @@ static void wpeDisplayConstructed(GObject* object) {
 }
 ```
 and the doc comment confirms "By default, the first #WPEDisplay that is created is set as primary"
-(`WPEDisplay.cpp:218`). **Our app creates exactly one `WPEDisplay` — the headless one** (`main.cpp:117`,
+(`WPEDisplay.cpp:218`). **Our app creates exactly one `WPEDisplay` — the headless one** (`main.cpp:301`,
 `wpe_display_headless_new()`), before any WebKit internals run. (Both the DRM and Wayland platform
 implementations register at the *same* GIO extension priority as headless (`-100`/`0`) — `WPEDisplayDRM.cpp:70`,
 `WPEDisplayWayland.cpp:97` [VS] — but a platform implementation is only *instantiated* if something asks for a
@@ -228,7 +228,7 @@ clock:
 > (if it changes nothing, world A is nailed and the search moves entirely to the epaper side; the §6 device
 > probe settles it in one run). The real fix for "page turns feel slow" is then **not** in WPE at all but in
 > the panel‑present path (`remarkable-eink-refresh.md`: drive `EPFramebuffer::swapBuffers` per page‑turn) —
-> which the app **already does** via `EpaperRefresh` (`main.cpp:363‑398`). If page turns are *still* slow
+> which the app **already does** via `EpaperRefresh` (`main.cpp:2459‑2526`). If page turns are *still* slow
 > after that, the remaining suspect is A2; instrument per §6.
 
 ### 1.5 The scroll‑flip latency, reconciled with world A
@@ -245,7 +245,7 @@ buffer is produced quickly but the panel doesn't show it until the next epaper p
 > 60 fps** as the source implies, and there is an unidentified gate (A2). The §6 probe (log the actual
 > `buffer-rendered` timestamps with and without `WEBKIT_FORCE_VBLANK_TIMER=1`, independent of the panel)
 > distinguishes "WPE is slow" (A2) from "panel is slow" (A1). The current engine logging
-> (`flip-latency` measured at `onBuffer`, `main.cpp:239‑241`) **does** time the signal, so re‑reading those
+> (`flip-latency` measured at `onBuffer`, `main.cpp:1548‑1550`) **does** time the signal, so re‑reading those
 > logs in isolation answers this directly. [INF]
 
 Note `WEBKIT_DISABLE_ASYNC_SCROLLING` is already set (read at `DrawingAreaCoordinatedGraphics.cpp:218` [VS]);
@@ -337,16 +337,18 @@ Confirmed against upstream tooling (external sweep, URLs below):
 > `wpe_view_buffer_released()`/`_rendered()`; we read **SHM** buffers; we render on **CPU**.
 
 **#0 — First, re‑read the existing `flip-latency` logs in isolation to classify A1 vs A2 (5 minutes, no code).**
-[VS] The engine already times the `buffer-rendered` signal itself (`main.cpp:201,238‑241`: `dt` between
+[VS] The engine already times the `buffer-rendered` signal itself (`main.cpp:1548‑1550`: `dt` between
 buffers, `flip-latency` from swipe→signal). If those *signal* timestamps are ≤~50 ms after a swipe and only
 the **panel** lags → **A1** (WPE is fine; it's the e‑ink present). If the *signal* itself is on the ~6 s grid
 → **A2** (a real WPE gate to hunt). **Do this before changing anything** — it picks which of the fixes below
 even applies.
 
 **#1 (if A1 — the likely case) — The fix is on the panel‑present side, and is already in the app.** [VS]
-`EpaperRefresh` (`main.cpp:363‑398`) already drives `EPFramebuffer::swapBuffers` from
-`QQuickWindow::afterRendering` so a page turn presents immediately (fast mono per turn, full colour flash
-every Nth). The WPE buffer is produced quickly (≤16 ms per the 60 fps timer clock); ensure each new `QImage`
+`EpaperRefresh` (`main.cpp:2459‑2526`) already drives `EPFramebuffer::swapBuffers` from
+`QQuickWindow::frameSwapped` so a page turn presents immediately (fast mono per turn, full colour flash
+every Nth). (The `afterRendering` variant self‑deadlocks the render loop's fb mutex and is diagnostic‑only —
+`RMWEB_MANUAL_PRESENT`.) The WPE buffer is produced quickly (≤16 ms per the 60 fps timer clock); ensure each
+new `QImage`
 triggers a present. Tuning lives in `remarkable-eink-refresh.md`, **not here**. No WPE change needed.
 
 **#2 (control / diagnostic) — Run once with the software vblank forced.** [VS]
@@ -360,7 +362,7 @@ but running it confirms that and rules world B fully out. If — surprisingly �
 `wpe_display_set_primary(display)` right after creating it (`WPEDisplay.cpp:240` [VS]).
 
 **#3 (if A2 — unconfirmed gate) — Keep/strengthen the on‑demand repaint trigger.** [VS] Our
-`scrollBy + 1‑char DOM mutation` (`main.cpp:172‑179`) is the correct public way to force a frame on WPE (no
+`scrollBy + 1‑char DOM mutation` (`main.cpp:930‑953`) is the correct public way to force a frame on WPE (no
 public glib `forceRepaint`, no `get_snapshot`) — and it is **independently validated**: WebKitTestRunner uses
 `WKBundlePageForceRepaint` to "trigger a scrolling tree commit" after scroll events, i.e. a bare scroll does
 not reliably commit, the mutation does [WEB]. If A2 is real, make delivery robust by toggling a trivial
@@ -398,7 +400,7 @@ Expect `primary == ours`, `n_screens == 0`, `view_screen == NULL` → `displayID
 re‑open the world‑B path in §5 #2.
 
 **Probe 2 — classify A1 (panel slow) vs A2 (WPE signal slow): read the existing logs.** The engine already
-logs `dt` (inter‑`buffer-rendered` interval) and `flip-latency` (swipe→signal) at `main.cpp:238‑241`. With NO
+logs `dt` (inter‑`buffer-rendered` interval) and `flip-latency` (swipe→signal) at `main.cpp:1548‑1550`. With NO
 input, look at `dt`: if `buffer-rendered` is *not* firing every ~6 s when idle (few/no frames) → the "~6 s"
 was the panel, **A1**. If `dt ≈ 6000 ms` with zero input → **A2** (a real WPE gate; the signal itself is
 periodic). After a swipe, `flip-latency` ≤ ~50 ms ⇒ A1; ≈ several seconds ⇒ A2.

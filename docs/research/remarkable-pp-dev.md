@@ -2,8 +2,11 @@
 
 Research compiled **2026-06-26** from community + primary sources, for native development on the
 **reMarkable Paper Pro** (codename **"ferrari"** / **"reMarkable Ferrari"**, a.k.a. **rMPP**):
-**i.MX8M Mini, aarch64 (4× Cortex-A53), NO usable GPU, COLOR E Ink Gallery 3 / ACeP2 panel ~1620×2160,
-Codex Linux** (Yocto **scarthgap**, **glibc 2.39**), **BusyBox** userland, **Qt 6.8.2** with a reMarkable
+**i.MX8M Mini, aarch64 (4× Cortex-A53), GPU on die (Vivante GC7000 UltraLite) but NO driver in the stock OS
+(CPU-only in practice), COLOR E Ink Gallery 3 / ACeP2 panel ~1620×2160,
+Codex Linux** (Yocto **scarthgap**, **glibc 2.39**), **BusyBox** userland, system **Qt 6.10.3** (OS 3.28;
+rmweb links it dynamically and bundles only the missing qtvirtualkeyboard module, cross-built against
+the SDK's Qt 6.8.2) with a reMarkable
 **"epaper" QPA** plugin. Root SSH over USB ethernet (`root@10.11.99.1`).
 
 > **How to read this doc.** Every claim cites a source URL. Facts are tagged:
@@ -35,9 +38,10 @@ Codex Linux** (Yocto **scarthgap**, **glibc 2.39**), **BusyBox** userland, **Qt 
 ## 1. Existing browsers / WebKit / Chromium on reMarkable
 
 **Scope note.** rM1/rM2 = 32-bit ARMv7 i.MX6/i.MX7, no GPU, **grayscale** Carta E Ink. **Paper Pro ("ferrari")**
-= aarch64 i.MX8M-class, no GPU, **color Gallery 3 / ACeP2**, with a different system layout (overlay
-filesystems, secure boot, Qt 6.8.2 + "epaper" QPA). Community tooling for rM1/rM2 does **not** transfer
-unchanged. ([Toltec discussion #910](https://github.com/toltec-dev/toltec/discussions/910);
+= aarch64 i.MX8M-class, GPU on die but no stock-OS driver (CPU-only in practice), **color Gallery 3 / ACeP2**,
+with a different system layout (overlay
+filesystems, secure boot, system Qt 6.10.3 on current 3.28 builds + "epaper" QPA). Community tooling for rM1/rM2
+does **not** transfer unchanged. ([Toltec discussion #910](https://github.com/toltec-dev/toltec/discussions/910);
 [remarkable.guide FAQ](https://remarkable.guide/faqs.html))
 
 ### 1.1 The inventory (all generations)
@@ -103,7 +107,7 @@ letting **xochitl drive the waveforms**:
 - **No working Chromium/Electron/CEF port on any reMarkable.** Not in awesome-reMarkable, Toltec, or threads;
   the device is "a writing tablet… not designed to run third-party apps like web browsers," and guides only
   ever load NetSurf. ([Liliputing](https://liliputing.com/lilbits-a-web-browser-for-the-remarkable-2-e-ink-tablet-a-diy-keyboard-phone-made-from-a-program-galaxy-z-flip-and-more/))
-- **Why impractical [general]:** no GPU → Chromium's renderer/compositor must fall back to slow software GL
+- **Why impractical [general]:** no GPU driver in the stock OS → Chromium's renderer/compositor must fall back to slow software GL
   (`--disable-gpu`, `LIBGL_ALWAYS_SOFTWARE=1`); plus heavy V8/Blink memory + JIT cost on a low-power ARM e-ink
   device. (No one published an actual rM Chromium attempt — this is reasoned from general no-GPU behavior, not
   a documented rM trial.) ([Chrome SW-renderer fallback](https://www.lexo.ch/blog/2026/02/websites-not-loading-in-chrome-or-chromium-based-browsers-how-to-fix-gpu-and-webgl-related-rendering-failures/))
@@ -145,7 +149,8 @@ Paper Pro **Developer Mode** gives root SSH; it disables most of secure boot but
 >    archived 2022) — basis of community dev guides.
 >    [github.com/reMarkable/epaper-qpa](https://github.com/reMarkable/epaper-qpa),
 >    [qt5-qpa-epaper](https://github.com/reMarkable/qt5-qpa-epaper).
-> 2. **Closed binary `libepaper.so` + `libqsgepaper.so`** that ships on-device (Qt 6.8.2 on PP). reMarkable's
+> 2. **Closed binary `libepaper.so` + `libqsgepaper.so`** that ships on-device (built against the system Qt —
+   >    6.10.3 on current 3.28 builds). reMarkable's
 >    current guide targets this: [developer.remarkable.com/documentation/qt_epaper](https://developer.remarkable.com/documentation/qt_epaper).
 >
 > Behavior can differ; claims are labeled. Device machine strings (`/sys/devices/soc0/machine`):
@@ -309,9 +314,15 @@ EPFramebuffer *createEPFramebuffer();
 Usage model (per the repo): `createControlledInstance()` → `getAuxFramebuffer()` returns the `QImage*` you draw
 into → `swapBuffers(...)` swaps + updates the screen. Link `libepfb.so` first; resources auto-clean via
 `atexit()`. ([asivery/epfb-re](https://github.com/asivery/epfb-re))
-- **`ghostControl(...)` / `GhostControlMode`, `forceInstance()`, `setBuffers()` are NOT in the rMPP header** —
-  those exist only on the rM1/rM2 class (§3.2). No `GhostControlMode` enum has been publicly reverse-engineered
-  for rMPP; on rMPP de-ghosting is done by the periodic full `CompleteRefresh` flash. **[PP — absence noted]**
+
+> **2026-08-26 re-check on OS 3.28.0.164:** the on-device `/usr/lib/plugins/scenegraph/libqsgepaper.so` now
+> exports `swapBuffers(QRect, EPScreenMode, QFlags<UpdateFlag>)` — **no `EPContentType` arg** (the header above
+> matches older 3.28 builds) — plus a multi-region `swapBuffers(QRegion, EPScreenModeMap, QFlags)` and
+> `ghostControl(GhostControlMode)`; `instance()` unchanged. Enum values are unchanged.
+- **`ghostControl(...)` / `GhostControlMode`, `forceInstance()`, `setBuffers()` are NOT in the epfb-re header** —
+  but `ghostControl(GhostControlMode)` **is** exported by the on-device rMPP lib (see the re-check above;
+  Eeems reversed `GhostControlMode{ BlinkNow, BlinkLater, BleachNow, FactoryReset }`, `BleachNow`/`FactoryReset`
+  ACeP2-only). The proven de-ghost tool remains the periodic full `CompleteRefresh` flash. **[PP]**
 
 ### 3.2 rM1/rM2 `EPFrameBuffer` — for contrast, do NOT use on rMPP
 - Symbols: `EPFrameBuffer::sendUpdate(QRect, WaveformMode, UpdateMode, bool)`, `clearScreen()`,
@@ -329,7 +340,8 @@ into → `swapBuffers(...)` swaps + updates the screen. Link `libepfb.so` first;
 enum EPScreenMode  { QualityFastest=0, QualityFast=1, Quality3=3, QualityFull=4, Quality5=5 };  // (2 skipped)
 enum EPContentType { Mono=0, Color=1 };
 enum UpdateFlag    { NoRefresh=0, CompleteRefresh=1 };  // nested in EPFramebuffer
-// swapBuffers arg order: (QRect, EPContentType, EPScreenMode, QFlags<UpdateFlag>)
+// swapBuffers arg order: (QRect, EPContentType, EPScreenMode, QFlags<UpdateFlag>) on older builds;
+// current 3.28 builds (verified 3.28.0.164): (QRect, EPScreenMode, QFlags<UpdateFlag>) — no EPContentType
 ```
 
 **Independent confirmation via rmBifrost** — [TiagoJMartins/rmBifrost](https://github.com/TiagoJMartins/rmBifrost)
@@ -372,10 +384,11 @@ hardcoded addresses; only the *parameter triples* transfer to a clean epfb/QPA a
   ("white" reads as gray, darker than rM2; backlight shifts black toward blue); publishes an Argyll ICC
   `rmpro-v0.icc` for soft-proof. (Characterizes the *palette*, not waveforms.)
   ([thregr.org/wavexx](https://www.thregr.org/wavexx/rnd/20260201-remarkable_pro_colors/))
-- **Ghosting:** `ghostControl(GhostControlMode)` exists only on rM1/rM2; **no public rMPP `ghostControl`
-  signature / `GhostControlMode` values** exist — on rMPP the de-ghost tool is the periodic full flash.
+- **Ghosting:** `ghostControl(GhostControlMode)` is absent from the public epfb-re header but **is** exported by
+  the on-device rMPP `libqsgepaper.so` (verified 2026-08-26 on 3.28.0.164; `GhostControlMode` values reversed by
+  Eeems as `BlinkNow/BlinkLater/BleachNow/FactoryReset`). The proven de-ghost tool remains the periodic full flash.
   ([epfb-re — absence](https://github.com/asivery/epfb-re/blob/master/epframebuffer.h);
-  [snoop](https://github.com/pl-semiotics/libqsgepaper-snoop)) **[PP — unverified for ghostControl]**
+  [snoop](https://github.com/pl-semiotics/libqsgepaper-snoop)) **[PP]**
 
 ### 3.5 Is direct `/dev/dri/card0` DRM panel packing undocumented? — **YES, confirmed**
 The 405×1084 transport buffer, the `imx-drm` driver, the RGB-only plane formats, and proprietary
@@ -419,7 +432,7 @@ transform is undocumented and not publicly reverse-engineered** as of 2026-06.
 ### 3.7 Actionable Phase-4 recommendation (synthesis)
 Drive the panel through libqsgepaper/epaper-QPA and reuse rmBifrost's validated triples:
 
-| Event class | `swapBuffers(rect, content, mode, flag)` |
+| Event class | `swapBuffers(rect, content, mode, flag)` — older-build arg order; current 3.28 drops `content` (§3.1) |
 |---|---|
 | Mono text / fast scroll tick | `(Mono, QualityFastest 0, NoRefresh 0)` |
 | Fast / animated color | `(Color, QualityFast 1, NoRefresh 0)` |
@@ -537,8 +550,12 @@ shrink it.
   reboot). Developer mode does **not** disable disk encryption.
   ([Developer Mode](https://developer.remarkable.com/documentation/developer-mode);
   [remarkable.guide FAQ](https://remarkable.guide/faqs.html)) **[PP]**
-- **`/etc`, `/var/*`, `/srv` (parts) are overlay/tmpfs → do NOT persist across reboot.** Enumerate on-device:
-  `mount | grep overlay`. **[PP / verify exact list]**
+- **`/etc` and `/usr` live on the A/B rootfs: an OTA (slot swap) rewrites them**, and `/etc` (also
+  `/var/lib`, `/srv`) additionally sits under an overlay whose upperdir is tmpfs (`/var/volatile/*`) —
+  writes through the overlay vanish on a plain REBOOT; to persist, `remount,rw /` + `umount -R /etc`
+  and write the real rootfs beneath (xovi-tripletap's enable.sh pattern). Either way, rootfs customs
+  (e.g. units under `/etc/systemd/system/`, `/usr/share/remarkable/suspended.png`) must be re-applied
+  after each update. `/tmp` is tmpfs, gone on reboot. **[PP — verified on 3.28.0.164]**
 - **Only `/home` survives reboot AND OTA** (on update the whole root partition is replaced with stock OS; only
   `/home` is untouched → root SSH keys / host keys / rootfs customizations must be reapplied after each update).
   `/home` is LUKS-encrypted (`/dev/mapper/home-encrypted-disk`, ~46 GB).
@@ -618,7 +635,7 @@ systemctl start xochitl           # restore on exit
   2160×2880. ([remarkable.guide screens](https://remarkable.guide/guide/config/screens.html);
   [oxide](https://github.com/Eeems-Org/oxide)) **[PP]**
 
-### 5.5 The observed "segfault → device reboots" — it's the **watchdog**, not Memfault
+### 5.5 The observed "segfault → device reboots" — it's **systemd's xochitl start-limit**, not Memfault (and not the hw watchdog)
 **reMarkable ships Memfault on the Paper Pro** (reMarkable's own case study; codexctl stops `memfaultd`).
 ([Memfault case study](https://memfault.com/customers/remarkable-case-study/);
 [codexctl](https://github.com/Jayy001/codexctl)) **[PP]**
@@ -635,7 +652,8 @@ systemctl start xochitl           # restore on exit
   `|/usr/sbin/memfault-core-handler -c /etc/memfaultd.conf %P %e %I %s` — confirm with `cat
   /proc/sys/kernel/core_pattern`. ([coredumps](https://docs.memfault.com/docs/linux/coredumps)) **[general / verify]**
 
-**The real culprit = the watchdog / systemd, and it IS armed on the Paper Pro:**
+**The real culprit = a systemd per-unit failure limit (verified — hypothesis #1 below). The hardware watchdog is
+also armed on the Paper Pro (relevant background):**
 - **The i.MX8M Mini hardware watchdog is enabled in reMarkable's kernel [PP].** `ferrari.dtsi` declares
   `&wdog1 { …, fsl,ext-reset-output; status = "okay"; }` (routes a timeout to the SoC external-reset pin
   `WDOG_B` = a true hardware reboot); defconfig sets `CONFIG_WATCHDOG=y` + `CONFIG_IMX2_WDT=y` (driver
@@ -648,6 +666,13 @@ systemctl start xochitl           # restore on exit
      like xochitl / a reMarkable unit) has `WatchdogSec=` with `Restart=on-watchdog` / `StartLimitAction=
      reboot|reboot-force`, losing `WATCHDOG=1` → restart storm hits the start-limit → **systemd reboots.**
      ([systemd.service](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html))
+     **[PP — verified 2026-08-26, OS 3.28.0.164]: this is the mechanism, and the unit is `xochitl` itself — no
+     watchdog involved.** Stock `/usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf`:
+     `Restart=on-failure`, `RestartMode=direct`, `StartLimitIntervalSec=600`, `StartLimitBurst=4`,
+     `OnFailure=emergency.target` → `rm-emergency.sh` → **reboot**. The burst counter counts **every** start
+     attempt, so a few xochitl restarts within 10 min (xovi toggle + app launch/quit cycles) emergency-reboot
+     with no actual crash. The rmweb launcher (`device/rmweb`) mitigates: waits for rmweb-wpeqt to die, then
+     `systemctl reset-failed xochitl` before `systemctl start xochitl`.
   2. **The crashing process (or PID 1 with non-zero `RuntimeWatchdogSec`) was petting `/dev/watchdog0`** and the
      crash cascaded into a hang → the unfed **hardware watchdog** fires `WDOG_B`. (Also: closing `/dev/watchdog`
      without the magic `V` leaves the timer running.)
@@ -687,16 +712,17 @@ ulimit -c unlimited
   ([coredumps](https://docs.memfault.com/docs/linux/coredumps)); `RuntimeWatchdogSec=0` ⇒ "no watchdog device
   is opened, configured, or pinged"
   ([systemd-system.conf](https://www.freedesktop.org/software/systemd/man/latest/systemd-system.conf.html)).
-- **Persistence caveat [PP]:** `/etc` edits + `mask` symlinks sit on RO-root + non-persistent overlays → may
-  not survive reboot/OTA unless written to a persistent layer.
+- **Persistence caveat [PP]:** `/etc` edits + `mask` symlinks written through the overlay land on tmpfs
+  (`/var/volatile/etc`) and vanish on reboot — write the rootfs beneath the overlay instead
+  (`remount,rw /` + `umount -R /etc`); even then an OTA (slot swap) rewrites `/etc`/`/usr`.
   ([FAQ](https://remarkable.guide/faqs.html))
 
-**Net:** Memfault is present but does not reboot on crash. The segfault→reboot is the **watchdog path** — most
-likely a reMarkable systemd unit with a watchdog/`reboot-force` action firing when your supervised process
-dies, or the **i.MX8MM hardware watchdog** (`/dev/watchdog0`, enabled in `ferrari.dtsi`) expiring after the
-crash cascades into a hang. Run `journalctl -b -1 -n 200` + the watchdog block to pin it; for dev,
-`memfaultctl disable-data-collection` + `systemctl stop swupdate memfaultd`, and disable the systemd watchdog
-only if `RuntimeWatchdogUSec` ≠ 0.
+**Net:** Memfault is present but does not reboot on crash. The segfault→reboot is the **systemd start-limit
+path** — verified 2026-08-26 on 3.28.0.164: stock `xochitl.service` hits `StartLimitBurst=4` within
+`StartLimitIntervalSec=600` (every start attempt counts, crash or not) → `OnFailure=emergency.target` →
+`rm-emergency.sh` → reboot. The **i.MX8MM hardware watchdog** (`/dev/watchdog0`, enabled in `ferrari.dtsi`) is
+armed but is not the culprit. For dev, `memfaultctl disable-data-collection` + `systemctl stop swupdate
+memfaultd`, keep xochitl restarts few, and `systemctl reset-failed xochitl` before any manual start.
 
 ---
 
@@ -713,14 +739,18 @@ Items where this research **contradicts or refines** earlier notes in `docs/devi
 2. **No reMarkable W^X policy → don't pre-emptively disable JIT.** The verified `ferrari_defconfig` has no
    SELinux/LSM/PaX. Build `ENABLE_JIT=ON`; treat `JSC_useJIT=0` as a fallback only (§4). (Earlier framing
    implied W^X might force interpreter-only — evidence says JIT should work.)
-3. **The crash-reboot is the watchdog, not `memfault-core-handler`.** Memfault captures + exits; the reboot
-   comes from a systemd watchdog/`reboot-force` action or the hardware `/dev/watchdog0` (`ferrari.dtsi`
-   `fsl,ext-reset-output`). Disable Memfault data collection *and* check `RuntimeWatchdogUSec` (§5.5).
+3. **The crash-reboot is systemd's xochitl start-limit, not `memfault-core-handler`.** Memfault captures +
+   exits; the reboot is stock `xochitl.service`'s `StartLimitIntervalSec=600`/`StartLimitBurst=4` +
+   `OnFailure=emergency.target` (→ `rm-emergency.sh` → reboot) tripping on repeated restarts — verified
+   2026-08-26 on 3.28.0.164 (§5.5). The hardware `/dev/watchdog0` (`ferrari.dtsi` `fsl,ext-reset-output`) is
+   armed but is not the culprit.
 4. **Pre-suspend hook = logind `PrepareForSleep` D-Bus, not a `target_pid` sysfs + SIGRTMAX signal driver.**
    The signal-driver hypothesis in `research-reuse.md §4` is unsupported by any public source; use a logind
    delay-inhibitor or paint before `systemctl suspend` (§5.4).
-5. **`EPFramebuffer::ghostControl` / `GhostControlMode` is rM1/rM2 only** — not in the rMPP epfb-re header. On
-   rMPP, de-ghost via the periodic full `CompleteRefresh` flash; don't rely on `ghostControl` existing (§3.1/§3.4).
+5. **`EPFramebuffer::ghostControl` / `GhostControlMode` is not in the public epfb-re header but IS exported by
+   the on-device rMPP lib** (verified 2026-08-26 on 3.28.0.164; values reversed by Eeems:
+   `BlinkNow/BlinkLater/BleachNow/FactoryReset`). The proven de-ghost path is still the periodic full
+   `CompleteRefresh` flash (§3.1/§3.4).
 6. **OTA engine is SWUpdate (`swupdate` unit), not `update-engine`** on this Codex firmware — block via
    `systemctl stop swupdate` (or DNS), not the rM2-era `update-engine.service` (§5.2).
 

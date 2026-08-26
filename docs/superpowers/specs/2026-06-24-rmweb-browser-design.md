@@ -11,13 +11,14 @@ wikis, long-form) and grow toward a **general-purpose browser** within the hardw
 
 ## 2. Constraints (from `docs/device-profile.md`)
 
-- aarch64, 4× Cortex-A53, ~2 GB RAM + 2.5 GB swap. **CPU-only — no GPU/EGL/GLES at all.**
+- aarch64, 4× Cortex-A53, ~2 GB RAM + 2.5 GB swap. **CPU-only in practice — the SoC has a GPU
+  (Vivante GC7000 UltraLite), but the stock OS ships no driver for it, so no GPU/EGL/GLES is usable.**
 - Yocto scarthgap, glibc 2.39. Cross-compile only (no on-device toolchain).
 - Display is `imx-drm` e-ink, real 1620×2160 ARGB8888, exposed as a **packed** `405×1084` DRM
   mode whose packing is **undocumented**. Refresh is slow with ghosting (e-ink physics).
 - rootfs is full → **install under `/home/root/rmweb`**, bundle missing libs with rpath.
 - Many WebKit deps already on device (cairo, icu74, glib2.78, freetype, harfbuzz, openssl3,
-  libdrm, full Qt 6.8.2) → reuse; bundle only what's missing.
+  libdrm, full Qt 6.10.3) → reuse; bundle only what's missing.
 
 ## 3. Key technical decisions
 
@@ -56,7 +57,7 @@ Five isolated modules, each independently testable, communicating over narrow in
 |---|---|---|---|
 | `engine`  | Embed WPE; load URLs; produce ARGB frames; expose input sink | WPE, Mesa(sw GL), libsoup | e-ink, Qt, packing |
 | `display` | Own the screen via Qt6 + epaper QPA; blit ARGB `QImage`; pick refresh mode | Qt6, libepaper.so | the web |
-| `input`   | evdev `event2`(touch)/`event3`(pen) → pointer/touch/scroll events | libevdev/raw evdev | rendering |
+| `input`   | evdev `event3`(touch)/`event2`(pen) → pointer/touch/scroll events | libevdev/raw evdev | rendering |
 | `shell`   | QML chrome: URL bar, nav, scroll, reading mode; wires engine+input+display | display, engine, input | low-level GL/DRM |
 | `platform`| Lifecycle: stop/restore xochitl, install layout, OTA re-hook, logging | systemd | UI logic |
 

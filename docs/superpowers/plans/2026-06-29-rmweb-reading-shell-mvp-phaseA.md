@@ -24,7 +24,7 @@ clang++ `-std=c++17`.
 
 ## Global Constraints
 
-- No GPU/EGL/GLES (software GL: Mesa llvmpipe, surfaceless EGL; paint = Skia CPU).
+- No usable GPU (the SoC has a GPU on die, but the stock OS ships no driver — CPU-only in practice): software GL = Mesa llvmpipe, surfaceless EGL; paint = Skia CPU.
 - Install ONLY under `/home/root/rmweb`; bundle missing libs, set rpath.
 - Cross-compile only via the ferrari SDK (scarthgap, glibc 2.39, aarch64, `-mcpu=cortex-a53`).
 - Display = Qt6 epaper QPA, QtQuick only, `QT_QPA_PLATFORM=epaper QT_QUICK_BACKEND=epaper`, Window

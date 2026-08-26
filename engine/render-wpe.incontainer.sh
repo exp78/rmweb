@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs INSIDE rmweb-sdk. Builds build/wpe_render.c against the freshly installed
+# Runs INSIDE rmweb-sdk. Builds engine/wpe_render.c against the freshly installed
 # WPE WebKit (in build/stage) and runs it on the software GL stack to render a
 # page to /work/build/wpe-render.png.
 set -e

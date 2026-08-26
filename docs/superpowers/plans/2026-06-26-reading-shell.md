@@ -26,7 +26,7 @@ host `clang++` for pure-logic unit tests.
   deploy+run via `scripts/run-wpeqt-on-device.sh show <url>` with `xochitl` stopped/restored.
 - **Crash-safety is paramount:** a segfault reboots the device (~100 s). Keep the unbounded-wait
   teardown; never `wpe_view_buffer_released()` on an embedded view; keep `JSC_useJIT=0`.
-- **No GPU:** run with `GALLIUM_DRIVER=llvmpipe` (already in the run script).
+- **No GPU driver** (the SoC has a GPU on die, but the stock OS ships no driver — CPU-only in practice): run with `GALLIUM_DRIVER=llvmpipe` (already in the run script).
 - **Install only under `/home/root/rmweb`**; bundle missing libs; reuse on-device Qt/Controls.
 - **Touch is ours:** `TouchReader` `EVIOCGRAB`s event3 ("Elan touch input"); do not un-grab (the grab
   also silences the epaper QPA's crashing touch dispatch).

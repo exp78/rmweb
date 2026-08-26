@@ -1,6 +1,7 @@
 # reMarkable Paper Pro — Device Profile (verified)
 
-All facts below were verified over SSH on **2026-06-24** against the live device.
+All facts below were verified over SSH on **2026-06-24** against the live device;
+versioned facts re-verified **2026-08-26** after an OTA to reMarkable OS 3.28.0.164.
 This is the ground truth that drives every architecture decision. Re-verify after
 any firmware update (especially storage, glibc, kernel, and xochitl offsets).
 
@@ -20,8 +21,9 @@ any firmware update (especially storage, glibc, kernel, and xochitl offsets).
 
 ## OS / Kernel / ABI
 
-- **Codex Linux 5.7.121** — Yocto/OpenEmbedded **scarthgap** (OE 5.0 LTS).
-- Firmware image version **3.27.1.0**; `/etc/version` = `20260506100933`.
+- **Codex Linux 5.8.199** — Yocto/OpenEmbedded **scarthgap** (OE 5.0 LTS).
+- Firmware image version **3.28.0.164** (re-verified 2026-08-26; was 3.27.1.0 at the 2026-06-24
+  check, `/etc/version` = `20260506100933`).
 - Kernel **Linux 6.12.49** (`#1 SMP PREEMPT`), hostname `imx8mm-ferrari`.
 - **glibc 2.39** (scarthgap). Loader `/lib/ld-linux-aarch64.so.1`, `/lib/libc.so.6`.
 - Userland is **BusyBox** (`v1.36.1`) — note: `head -N` is NOT supported, use `head -n N`.
@@ -45,17 +47,17 @@ any firmware update (especially storage, glibc, kernel, and xochitl offsets).
   is **undocumented / not publicly reverse-engineered** (lives inside closed `libepaper.so` +
   kernel panel/DTS). This is why we avoid direct DRM at first.
 
-## GPU — NONE usable
+## GPU — present on die, but no stock driver
 
-- **No DRM render node** (`/dev/dri/renderD128` absent) — decisive: no GPU exposed.
+- **No DRM render node** (`/dev/dri/renderD128` absent) — the GPU is not exposed to userland.
 - No GPU kernel modules (no `etnaviv`, no `galcore`/Vivante), nothing in dmesg, no `/dev/galcore`.
 - **No EGL / GLES / Vulkan / GBM / Wayland** anywhere on the FS — only `libdrm` is present.
-- The i.MX8M Mini silicon *may* contain a tiny Vivante GCNanoUltra (GLES2), but reMarkable ships
-  it fully disabled. **All rendering is CPU.** (WPE therefore needs a *software* GL — Mesa llvmpipe.)
+- The i.MX8M Mini silicon **does** contain a **Vivante GC7000 UltraLite** GPU, but the stock OS ships
+  **no driver** for it. **All rendering is CPU in practice.** (WPE therefore needs a *software* GL — Mesa llvmpipe.)
 
 ## UI stack (what reMarkable itself does)
 
-- **`/usr/bin/xochitl`** (24 MB) — **Qt 6.8.2 Quick/QML** app, **active** (pid varies).
+- **`/usr/bin/xochitl`** (24 MB) — **Qt 6.10.3 Quick/QML** app, **active** (pid varies).
 - Renders **on CPU** (no GPU among its ~100 loaded libs) and presents via a **custom Qt platform
   plugin `/usr/lib/plugins/platforms/libepaper.so`** ("epaper" QPA) → `imx-drm`.
 - Only stock QPA plugins present besides epaper: `offscreen`, `minimal`, `vnc`.
@@ -74,7 +76,7 @@ any firmware update (especially storage, glibc, kernel, and xochitl offsets).
 
 ## On-device libraries
 
-**Reusable (link dynamically, do NOT bundle):** Qt 6.8.2 (Core/Gui/Qml/Quick/QuickControls2/
+**Reusable (link dynamically, do NOT bundle):** Qt 6.10.3 (Core/Gui/Qml/Quick/QuickControls2/
 Svg/Network/DBus/WebSockets/Xml…), cairo 1.18, pixman, freetype 2.13 (`.6.20.1`), fontconfig,
 harfbuzz (+`-cairo`,`-gobject`), **icu 74**, glib/gio/gobject/gmodule 2.78, libpng16, libjpeg62,
 libxml2, libcurl, **openssl 3** (libssl/libcrypto), libgcrypt, libsystemd, libudev, **libdrm**.
@@ -89,6 +91,6 @@ software EGL/GLESv2 + surfaceless), **libsoup3** (+ sqlite3, libpsl, libnghttp2)
 
 - **Official reMarkable "ferrari" Yocto SDK** matches this device:
   `https://storage.googleapis.com/remarkable-codex-toolchain/3.27.0.97/ferrari/remarkable-production-image-5.7.119-ferrari-public-{x86_64,aarch64}-toolchain.sh`
-  (3.27.0.97 is ABI-compatible with our 3.27.1.0 — same scarthgap/glibc 2.39.)
+  (3.27.0.97 remains ABI-compatible with the device's 3.28.x — same scarthgap/glibc 2.39.)
 - Triple `aarch64-remarkable-linux`, tune `-mcpu=cortex-a53`, sysroot
   `cortexa53-crypto-remarkable-linux`. Toltec/rM2 toolchains are ARMv7 → **unusable**.

@@ -27,7 +27,7 @@ data intact. Files:
 - `bookmarks.txt` — one bookmark per line: `url\ttitle`. Newest-added first.
 - `history.txt` — one entry per line: `ts\turl\ttitle` (ts = unix seconds). Most-recent first, deduped by
   url (re-visiting moves the entry to the front and updates ts+title), capped at **300** lines.
-- `settings.txt` — `key=value` per line: `zoom=1.0`, `readerFont=38`, `ua=` (empty = WPE default; `mobile`
+- `settings.txt` — `key=value` per line: `zoom=1.0`, `readerFont=30`, `ua=` (empty = WPE default; `mobile`
   = mobile UA; any other string = literal UA).
 - `home.html` — the generated start page (rewritten by `goHome()`).
 
@@ -44,7 +44,7 @@ Value types + free functions, all `std::` only, so it compiles into a host unit 
 namespace rmweb {
 struct Bookmark { std::string url, title; };
 struct HistoryEntry { std::string url, title; long ts; };
-struct Settings { double zoom = 1.0; int readerFont = 38; std::string ua; };
+struct Settings { double zoom = 1.0; int readerFont = 30; std::string ua; };
 
 std::vector<Bookmark>     loadBookmarks(const std::string& dir);
 void                      saveBookmarks(const std::string& dir, const std::vector<Bookmark>&);
@@ -85,8 +85,8 @@ std::string htmlEscape(const std::string&);   // & < > " ' -> entities
   `m_readerFont = m_settings.readerFont`, UA from `m_settings.ua` (seeded from `RMWEB_UA` on first run).
   If the initial argv URL is empty → `goHome()`.
 - **`goHome()`:** `buildStartPage(m_bookmarks, firstN(m_history,15))` → atomic-write `m_profileDir/home.html`
-  → `loadUrl("file://" + m_profileDir + "/home.html")`. On write failure, load a hardcoded minimal HTML via
-  a `data:` URL.
+  → `loadUrl("file://" + m_profileDir + "/home.html")`. On write failure the old file is kept
+  (`atomicWrite`) and a missing `home.html` surfaces as a normal load-failed error page.
 - **History recording:** in the existing `LOAD_FINISHED` handler, when the committed URL is a real page
   (starts `http://`/`https://` — NOT the `file://…/home.html` start page, NOT a reader transform),
   `addHistory(m_history, url, webkit_web_view_get_title(view), time(nullptr))` → `saveHistory`.
@@ -126,7 +126,8 @@ A-/A+ (zoom/font)  → mutate m_settings → saveSettings   (persists across rel
 - Malformed/missing store file → parsed as empty/defaults; bad individual lines skipped. Launch never
   breaks on a bad profile.
 - Atomic writes (`.tmp` + `rename`) so a crash mid-save cannot corrupt the store.
-- `home.html` write failure → fall back to a hardcoded minimal start page via a `data:` URL.
+- `home.html` write failure → logged + old file kept (`atomicWrite`); a missing file surfaces as a
+  load-failed error page.
 - Title/URL are HTML-escaped in the start page and tab/newline-sanitized in the store (no injection, no
   format corruption).
 

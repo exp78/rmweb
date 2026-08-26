@@ -23,7 +23,7 @@ inline std::string htmlEscape(const std::string& s) {
 
 // Only http(s) URLs may become links. Any other scheme smuggled into the store (javascript:,
 // data:, file:, ...) renders as plain text — an <a> without href is inert. The only non-http(s)
-// link on the page is the generator's own hardcoded rmweb:clear-history below.
+// links on the page are the generator's own rmweb: commands below (close-tab, clear-history, settings).
 inline bool isSafeLinkUrl(const std::string& url) {
     return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
 }
@@ -84,7 +84,7 @@ inline std::string utf8First(const std::string& s) {
     return f;
 }
 
-// Domain part of an http(s) URL for the grey subtitle / avatar fallback — hostFromUrl (url.h).
+// Domain part of an http(s) URL for the grey subtitle — hostFromUrl (url.h).
 
 // `recent` is the already-trimmed most-recent slice (the caller passes ~15). `tabs` is the
 // tabs-lite session list (MRU first); each row pairs the page link with a "✕" close command.
