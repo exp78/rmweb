@@ -2,7 +2,7 @@
 
 ## What this is
 A native web browser for the **reMarkable Paper Pro** e-ink tablet, engine = **WPE WebKit**,
-rendered **entirely on CPU** (no GPU on the device). MVP = reading browser → later full browser.
+rendered **entirely on CPU** (the SoC has a Vivante GPU, but the stock OS ships no driver for it). MVP = reading browser → later full browser.
 Read `docs/superpowers/specs/2026-06-24-rmweb-browser-design.md` (design) and
 `docs/device-profile.md` (verified hardware facts) before working.
 

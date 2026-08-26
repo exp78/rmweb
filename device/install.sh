@@ -22,9 +22,10 @@ echo "$VER" > "$R/VERSION"
 
 # 4. Layer B: register with AppLoad (the Paper Pro XOVI extension) if XOVI is installed. New-format
 #    layout: /home/root/xovi/exthome/appload/rmweb/{external.manifest.json,icon.png} — lives under
-#    /home, so it survives reboots (but NOT an OTA — then XOVI itself is gone anyway). The entry point
-#    is appload-entry.sh (systemd-run scope wrapper — see its header). Degrade gracefully if XOVI is
-#    absent: Strategy A (the standalone launcher) is unaffected.
+#    /home, which survives reboots AND OTA updates (an OTA only rewrites the rootfs: /etc + /usr;
+#    afterwards /home/root/xovi/rebuild_hashtable + xovi/start re-hook XOVI into the new xochitl).
+#    The entry point is appload-entry.sh (systemd-run scope wrapper — see its header). Degrade
+#    gracefully if XOVI is absent: Strategy A (the standalone launcher) is unaffected.
 if [ -d /home/root/xovi ] && [ -f "$R/appload/rmweb/external.manifest.json" ]; then
   # Optional integration: a failed copy must not abort the install (set -e) — degrade gracefully.
   APP_DIR=/home/root/xovi/exthome/appload/rmweb

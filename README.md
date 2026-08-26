@@ -40,9 +40,10 @@ More: [loading pill with stop button](docs/screenshots/loading-badge.png) ·
 
 ## Why it's interesting
 
-The Paper Pro is a GPU-less, CPU-only aarch64 e-ink device (i.MX8M Mini, Yocto scarthgap).
-rmweb renders the web entirely in software — **Skia CPU raster + Mesa llvmpipe (software EGL)** —
-and presents through reMarkable's e-ink display path.
+The Paper Pro's i.MX8M Mini SoC actually has a GPU on die (Vivante GC7000 UltraLite), but the
+stock OS ships no driver for it (no `/dev/dri` render node) — so in practice everything renders
+on the CPU. rmweb renders the web entirely in software — **Skia CPU raster + Mesa llvmpipe
+(software EGL)** — and presents through reMarkable's e-ink display path.
 
 ## Architecture (short)
 
@@ -57,7 +58,8 @@ Verified hardware facts: [`docs/device-profile.md`](docs/device-profile.md).
 
 ## Target device
 
-reMarkable Paper Pro ("Ferrari"), Codex Linux (scarthgap), aarch64, kernel 6.12.49, **no GPU**.
+reMarkable Paper Pro ("Ferrari"), Codex Linux (scarthgap), aarch64, kernel 6.12.49. GPU exists on
+the SoC but has no driver in the stock OS, so rendering is **CPU-only**.
 Everything installs under `/home/root/rmweb` (the rootfs is full). Cross-compiled with the
 official reMarkable "ferrari" Yocto SDK.
 
