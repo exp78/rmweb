@@ -41,6 +41,7 @@
 #include <algorithm>
 #include <atomic>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <cstdlib>
 #include <cstdio>
@@ -899,7 +900,11 @@ public Q_SLOTS:
     void toggleReader() {
         marshalToCtx([this] {
             if (!m_view || m_readerApplying) return;                        // ignore taps while a parse is in flight
-            if (m_readerMode) { webkit_web_view_reload(m_view); return; }   // off: reload (COMMITTED clears state)
+            if (m_readerMode) {                                             // off: reload (COMMITTED clears state)
+                m_expectUserNav = true;                                     // user tap — exempt from the
+                webkit_web_view_reload(m_view);                             // auto-refresh guard (without this the
+                return;                                                     // guard eats the reload: reader never exits)
+            }
             applyReader();
         });
     }
@@ -1610,6 +1615,9 @@ private:
 // WpeView — a full-screen QtQuick item that just paints the latest WPE frame (input comes from TouchReader,
 // not Qt: the epaper QPA does not deliver finger touch to QtQuick items here).
 // ---------------------------------------------------------------------------
+class EpaperRefresh;   // defined further below — WpeView calls its presentFast in B&W mode
+void epdPresentFastIfOk(EpaperRefresh *e);   // thin call wrapper (complete type only below)
+
 class WpeView : public QQuickPaintedItem {
     Q_OBJECT
 public:
@@ -1659,6 +1667,17 @@ public:
             if (m_bwFast) {
                 if (m_grayDirty) {                          // convert once per new frame / toggle
                     m_imgGray = m_img.convertedTo(QImage::Format_Grayscale8);
+                    // Contrast boost for the fast mono waveform: gamma ~2 pushes mid-gray text toward
+                    // black while pure white stays white (uncorrected gray text reads weak on e-ink).
+                    static uchar lut[256];
+                    static std::once_flag once;
+                    std::call_once(once, []{ for (int i = 0; i < 256; ++i) {
+                        const double n = i / 255.0;
+                        lut[i] = uchar(std::min(255.0, std::pow(n, 2.0) * 255.0 + 0.5)); } });
+                    for (int y = 0; y < m_imgGray.height(); ++y) {
+                        uchar *row = m_imgGray.scanLine(y);
+                        for (int x = 0; x < m_imgGray.bytesPerLine(); ++x) row[x] = lut[row[x]];
+                    }
                     m_grayDirty = false;
                 }
                 p->drawImage(QRectF(0, 0, w, h), m_imgGray);
@@ -1890,7 +1909,9 @@ public Q_SLOTS:
     void setChromeOn(bool v)       { if (v != m_chromeOn) { m_chromeOn = v; schedule(); } }
     // B&W fast mode (settings page): present grayscale frames — the panel's fast mono waveform develops
     // them fully, while colour content under a fast waveform stays washed out until a slow full pass.
+    // And force that fast waveform ourselves per content present (presentFast below).
     void setBwFast(bool v)         { if (v != m_bwFast) { m_bwFast = v; m_grayDirty = true; schedule(); } }
+    void setEpaperRefresh(EpaperRefresh *e) { m_epd = e; }
     void setCanBack(bool v)        { if (v != m_canBack)  { m_canBack  = v; schedule(); } }
     void setCanFwd(bool v)         { if (v != m_canFwd)   { m_canFwd   = v; schedule(); } }
     void setLoading(bool v)        { if (v != m_loading)  { m_loading  = v; if (v) m_loadProgress = 0.0; schedule(); } }
@@ -1932,6 +1953,11 @@ private Q_SLOTS:
         const int wait = m_dwellMs - ms;         // hold the rest of the dwell so the next can't overlap
         if (wait > 0) QTimer::singleShot(wait, this, [this]{ releaseGate(); });
         else releaseGate();
+        // B&W fast mode: the QPA's own present used its auto waveform; re-push the frame with the FAST
+        // MONO waveform so page turns develop immediately. frameSwapped fires after the QPA's present
+        // returned (its fb mutex is free); +0 ms puts us fully outside the render-loop tick regardless.
+        if (m_bwFast && m_lastPresentHadContent && m_epd)
+            QTimer::singleShot(0, this, [this]{ epdPresentFastIfOk(m_epd); });
     }
 private:
     // --- B2 frame painters (called by paint(); kept here so paint() stays a short orchestrator) -------------
@@ -2234,6 +2260,7 @@ private:
         // badges) still refresh when m_img is still null (before the first buffer).
         const bool hadContent = m_hasPending;
         if (m_hasPending) { m_img = m_pending; m_hasPending = false; m_grayDirty = true; }
+        m_lastPresentHadContent = hadContent;
         m_dirty = false; m_inFlight = true;
         m_clock.restart();
         if (hadContent) m_lastContentPresentUs = g_get_monotonic_time();
@@ -2258,6 +2285,8 @@ private:
     bool m_bwFast = false;                       // settings-page B&W fast mode (grayscale present path)
     bool m_grayDirty = true;                     // grayscale cache needs (re)build (new frame / toggle)
     QImage m_imgGray;                            // grayscale copy of m_img (built lazily in paint)
+    EpaperRefresh *m_epd = nullptr;              // manual panel present (B&W fast waveform), if available
+    bool m_lastPresentHadContent = false;        // last present carried a new page frame (vs chrome-only)
     gint64 m_lastContentPresentUs = 0;            // last e-ink present that carried a new WPE frame
     QImage m_img, m_pending;
     QElapsedTimer m_clock;
@@ -2419,10 +2448,10 @@ private:
 #include "main.moc"
 
 // ---------------------------------------------------------------------------
-// EpaperRefresh — manual e-ink panel present, DIAGNOSTIC ONLY (enabled by RMWEB_MANUAL_PRESENT; see
-// main()). Calling EPFramebuffer::swapBuffers ourselves from QQuickWindow::afterRendering re-enters the
-// framebuffer mutex the epaper QPA's EPRenderLoop holds across renderSceneGraph -> self-deadlock, so by
-// default EPRenderLoop drives the panel and this class stays unused. Kept for cadence diagnosis:
+// EpaperRefresh — manual e-ink panel present via EPFramebuffer::swapBuffers (dlopen'd from the epaper
+// QPA). Two uses: the RMWEB_MANUAL_PRESENT diagnostic (afterRendering hook — note that path
+// self-deadlocks the render loop's fb mutex, kept only for cadence experiments), and WpeView's
+// B&W fast mode (presentFast, called from frameSwapped +0 ms, where the mutex is already free).
 //   * fast grayscale  (Mono, QualityFast, NoRefresh)      — every frame, so a page turn shows immediately;
 //   * full colour flash (Color, QualityFull, CompleteRefresh) — every kFullEvery frames, develops colour +
 //     clears ghosting ("grayscale now, colour catches up"). Symbols verified in libqsgepaper.so via readelf.
@@ -2433,10 +2462,16 @@ public:
         void *h = dlopen("/usr/lib/plugins/scenegraph/libqsgepaper.so", RTLD_NOW | RTLD_GLOBAL);
         if (!h) { qWarning("[refresh] dlopen failed: %s", dlerror()); return false; }
         m_instance = reinterpret_cast<InstanceFn>(dlsym(h, "_ZN13EPFramebuffer8instanceEv"));
+        // Current OS builds: swapBuffers(QRect, EPScreenMode, QFlags) — NO content-type arg (verified via
+        // nm -D on the device lib, OS 3.28). Older builds carry EPContentType too — keep as fallback.
         m_swap = reinterpret_cast<SwapFn>(
-            dlsym(h, "_ZN13EPFramebuffer11swapBuffersE5QRect13EPContentType12EPScreenMode6QFlagsINS_10UpdateFlagEE"));
-        if (!m_instance || !m_swap) {
-            qWarning("[refresh] dlsym failed (instance=%p swap=%p)", (void*)m_instance, (void*)m_swap);
+            dlsym(h, "_ZN13EPFramebuffer11swapBuffersE5QRect12EPScreenMode6QFlagsINS_10UpdateFlagEE"));
+        if (!m_swap)
+            m_swapLegacy = reinterpret_cast<SwapLegacyFn>(
+                dlsym(h, "_ZN13EPFramebuffer11swapBuffersE5QRect13EPContentType12EPScreenMode6QFlagsINS_10UpdateFlagEE"));
+        if (!m_instance || (!m_swap && !m_swapLegacy)) {
+            qWarning("[refresh] dlsym failed (instance=%p swap=%p legacy=%p)",
+                     (void*)m_instance, (void*)m_swap, (void*)m_swapLegacy);
             return false;
         }
         m_fb = m_instance();
@@ -2445,11 +2480,19 @@ public:
         // Tunable live via RMWEB_FULL_EVERY (0/unset -> default). 0 disables the colour flash entirely.
         if (qEnvironmentVariableIsSet("RMWEB_FULL_EVERY"))
             m_fullEvery = qEnvironmentVariableIntValue("RMWEB_FULL_EVERY");
-        qInfo("[refresh] EPFramebuffer ready (instance=%p) fullEvery=%d", m_fb, m_fullEvery);
+        qInfo("[refresh] EPFramebuffer ready (instance=%p) fullEvery=%d abi=%s",
+              m_fb, m_fullEvery, m_swap ? "new" : "legacy");
         return m_fb != nullptr;
     }
     bool ok() const { return m_fb != nullptr; }
-    // Present what the scenegraph just rendered. Enum values: EPContentType{Mono=0,Color=1},
+    // B&W fast mode: force the fast MONO waveform for the frame the QPA just presented. Caller context:
+    // WpeView's frameSwapped +0 ms — the render loop's fb mutex is released by then (calling this from
+    // afterRendering instead self-deadlocks; see class comment).
+    void presentFast() {
+        if (!m_fb) return;
+        swap(QRect(0, 0, kPanelW, kPanelH), 1, 0);            // QualityFast, NoRefresh
+    }
+    // Present what the scenegraph just rendered. Enum values: EPContentType{Mono=0,Color=1} (legacy ABI),
     // EPScreenMode{QualityFast=1,QualityFull=4}, UpdateFlag{NoRefresh=0,CompleteRefresh=1}.
     void present() {
         if (!m_fb) return;
@@ -2465,22 +2508,31 @@ public:
         ++m_frames;
         const bool isFull = (m_fullEvery > 0 && (m_frames % m_fullEvery) == 0);
         qCDebug(lcEngine, "[present] #%d swap enter full=%d", m_frames, isFull);
-        if (isFull) m_swap(m_fb, full, 1, 4, 1);  // colour + anti-ghost flash
-        else        m_swap(m_fb, full, 0, 1, 0);  // fast grayscale, no flash
+        if (isFull) swap(full, 4, 1);   // full quality + anti-ghost flash (develops colour)
+        else        swap(full, 1, 0);   // fast, no flash
         qCDebug(lcEngine, "[present] #%d swap done", m_frames);
     }
 private:
+    // swap dispatch: current ABI (QRect, mode, flags) vs legacy (QRect, contentType, mode, flags).
+    void swap(const QRect &r, int mode, int flags) {
+        if (m_swap) m_swap(m_fb, r, mode, flags);
+        else m_swapLegacy(m_fb, r, 0 /*Mono*/, mode, flags);
+    }
     typedef void *(*InstanceFn)();
-    // ABI of EPFramebuffer::swapBuffers(QRect, EPContentType, EPScreenMode, QFlags<UpdateFlag>): the implicit
-    // `this` is the 1st arg; the two enums and the (int-sized) QFlags pass like ints on aarch64.
-    typedef void (*SwapFn)(void *self, QRect, int, int, int);
+    // ABI of EPFramebuffer::swapBuffers(...): the implicit `this` is the 1st arg; the enums and the
+    // (int-sized) QFlags pass like ints on aarch64.
+    typedef void (*SwapFn)(void *self, QRect, int, int);
+    typedef void (*SwapLegacyFn)(void *self, QRect, int, int, int);
     int m_fullEvery = 6;   // full colour flash every N presents (env RMWEB_FULL_EVERY; <=0 = grayscale only)
     InstanceFn m_instance = nullptr;
     SwapFn m_swap = nullptr;
+    SwapLegacyFn m_swapLegacy = nullptr;
     void *m_fb = nullptr;
     int m_frames = 0;
     gint64 m_lastPresentUs = 0;
 };
+
+void epdPresentFastIfOk(EpaperRefresh *e) { if (e && e->ok()) e->presentFast(); }
 
 // Reading-shell host: a bare full-screen Window holding the WpeView. The browser chrome is hand-painted
 // INTO the WpeView frame (the "B2" approach) — a QtQuick toolbar does NOT composite under the epaper QPA, so
@@ -2631,8 +2683,9 @@ int main(int argc, char **argv) {
         // (the whole UI freezes after the first frame; confirmed by a backtrace). So let EPRenderLoop drive
         // the panel by default; opt back into manual present only with RMWEB_MANUAL_PRESENT (diagnostic).
         static EpaperRefresh epaper;
-        if (win && qgetenv("QT_QPA_PLATFORM") == "epaper" && qEnvironmentVariableIsSet("RMWEB_MANUAL_PRESENT")) {
-            if (epaper.init())
+        if (qgetenv("QT_QPA_PLATFORM") == "epaper" && epaper.init()) {
+            view->setEpaperRefresh(&epaper);   // B&W fast mode's fast-mono presents (frameSwapped path)
+            if (win && qEnvironmentVariableIsSet("RMWEB_MANUAL_PRESENT"))
                 QObject::connect(win, &QQuickWindow::afterRendering, win,
                                  [] { epaper.present(); }, Qt::DirectConnection);
         }

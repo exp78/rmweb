@@ -320,15 +320,22 @@ and `scroll-behavior:auto` on `*` — animations only smear the panel and burn r
 **B&W fast mode (2026-08-26).** New persisted setting `bwFast` (settings-page row, lucide
 "contrast" icon; command `rmweb:toggle-bwfast`, signal `WpeEngine::bwFastChanged` →
 `WpeView::setBwFast`, queued worker→GUI). When on, WpeView paints a lazily-built
-`Format_Grayscale8` copy of each new frame (cache rebuilt per frame and per toggle; ~ms per
-present at the 150 ms cadence). Rationale (epfb-re/rmBifrost + our refresh research): Gallery 3
-needs the slow FULL multi-pass waveform to develop colour, while fast/partial waveforms leave
-colour washed out — but develop MONO fully and fast, so grayscale content lands clean at fast
-cadence. **Gotcha caught on device:** settings load in `WpeEngine::start()` (worker), NOT in the
+`Format_Grayscale8` copy of each new frame plus a gamma~2 contrast LUT over the 8-bit gray
+buffer (mid-gray text → near-black, white stays white; uncorrected gray text reads weak on
+e-ink). Rationale (epfb-re/rmBifrost + our refresh research): Gallery 3 needs the slow FULL
+multi-pass waveform to develop colour, while fast/partial waveforms leave colour washed out —
+but develop MONO fully and fast. B&W mode also forces the fast waveform per content present:
+`EpaperRefresh::presentFast()` calls `EPFramebuffer::swapBuffers` from WpeView's frameSwapped
++0 ms (the QPA's fb mutex is free there; afterRendering self-deadlocks). **ABI reality check:**
+current OS builds (3.28) export `swapBuffers(QRect, EPScreenMode, QFlags)` — NO EPContentType
+arg; the 4-arg form is legacy-only. init() tries the new mangled name first, falls back to
+legacy. **Gotcha caught on device:** settings load in `WpeEngine::start()` (worker), NOT in the
 constructor — reading `m_settings` from main() before start() returns defaults; initial state
-must reach the view via the signal emitted in start(), not a direct call. Verified on device:
-settings row renders, tap toggles + persists (`bwFast=1`), colour test page grabs at
-saturation=0 with correct luma separation.
+must reach the view via the signal emitted in start(), not a direct call. Same commit family:
+reader-mode OFF was broken by our own auto-refresh guard (toggle-off reloads the page;
+`m_expectUserNav` now marks that reload as a user action). Verified on device: tap toggles +
+persists; colour test page at saturation=0 with correct luma; Wikipedia in B&W is dark/crisp;
+reader ON→tap→`load started`→`load finished` (guard no longer eats the toggle-off reload).
 
 **Iconography pass (2026-07-26).** All chrome icons are now Lucide geometry (lucide.dev, ISC) on a
 shared 24×24 grid: `ig()` maps a grid point into the 44 px icon box, `strokeIcon()` strokes one
