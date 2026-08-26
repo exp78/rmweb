@@ -33,10 +33,9 @@ A native **WPE WebKit** web browser for the **reMarkable Paper Pro** e-ink table
 | | | |
 |---|---|---|
 | ![Wikipedia](docs/screenshots/wikipedia.jpg) | ![e-ink lab](docs/screenshots/eink-lab.png) | ![settings](docs/screenshots/settings.png) |
-| Wikipedia | e-ink lab | Settings page |
+| Wikipedia | e-ink lab (animations frozen, ad slots collapsed) | Settings page |
 
-More: [loading pill with stop button](docs/screenshots/loading-badge.png) ·
-[e-ink lab: animations frozen, ad slots collapsed, wide media fit](docs/screenshots/eink-lab.png)
+More: [loading pill with stop button](docs/screenshots/loading-badge.png)
 
 ## Why it's interesting
 
