@@ -34,7 +34,14 @@ cleanup(){
     # word-splitting is intentional: pgrep returns space-separated PIDs, one kill per PID
     for p in $(pgrep "$n" 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
   done
-  [ -n "${STOPPED:-}" ] && { log "restarting xochitl"; systemctl start xochitl; }  # home UI back FIRST
+  # kill/kill -9 are async: wait until the app is actually gone and has released the
+  # epaper framebuffer, otherwise xochitl starts into a held framebuffer and crashes.
+  i=0; while pgrep rmweb-wpeqt >/dev/null 2>&1 && [ "$i" -lt 10 ]; do sleep 1; i=$((i+1)); done
+  sleep 2
+  # xochitl has StartLimitIntervalSec=600/Burst=4 and OnFailure=emergency.target: a handful of
+  # stops/starts within 10 min (xovi toggle + rmweb launch/quit cycles) trips an EMERGENCY REBOOT.
+  # Clear the burst counter so this legitimate restore start can never be the one that trips it.
+  [ -n "${STOPPED:-}" ] && { log "restarting xochitl"; systemctl reset-failed xochitl 2>/dev/null; systemctl start xochitl; }  # home UI back FIRST
   [ -n "${MOUNTED:-}" ] && umount /usr/libexec 2>/dev/null
   rmdir "$LOCK" 2>/dev/null
 }

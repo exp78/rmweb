@@ -288,6 +288,29 @@ first. **XOVI drop-in gotcha:** a bare `systemctl restart xochitl` makes systemd
 etc-...-xochitl.service.d.mount unit (tmpfs drop-in unmounts → next start is STOCK). Only restart
 xochitl via /home/root/xovi/start, and tripletap does exactly that.
 
+**OS update 3.28.0.163 → 3.28.0.164 (2026-08-26) + recovery procedure.** An OTA swaps the A/B
+rootfs: /home survives (rmweb, xovi, vellum, tripletap, KOReader, appload registrations all intact),
+/etc + /usr are wiped (tripletap's systemd unit, the custom suspended.png, the /usr/libexec overlay).
+xochitl identifies as 3.28.0.164 (`IMG_VERSION` in /etc/os-release; the "3.51.0" string in the binary
+is an internal component, and distro VERSION=5.8.199 scarthgap is not the user-facing version).
+Recovery that worked, in order: (1) smoke-test `LD_PRELOAD=/home/root/xovi/xovi.so` with an EMPTY
+/tmp XOVI_ROOT, xochitl stopped, manual foreground run — xovi.so loads fine on .164; (2)
+`/home/root/xovi/rebuild_hashtable` (rebuilds qt-resource-rebuilder hashtab against the new xochitl);
+(3) manual full-stack run with the real XOVI_ROOT to prove appload patches MainView; only then (4)
+`/home/root/xovi/start`. (5) tripletap: re-run enable.sh — its xovi-tripletap.service file lived only
+in /etc, so it was recreated (`Type=simple`, `ExecStart=/bin/bash /home/root/xovi-tripletap/main.sh`,
+`Restart=always`), enable --now. (6) suspended.png: re-copy /home/root/suspended-custom.png →
+/usr/share/remarkable/suspended.png (fresh .orig backup), ShowSleepScreenCarousel=false survived in
+xochitl.conf. EPFramebuffer ABI unchanged on .164 (`swapBuffers(QRect,EPScreenMode,QFlags)` still
+exported by /usr/lib/plugins/scenegraph/libqsgepaper.so) — rmweb worked as-is, verified by grab.
+**StartLimit landmine, fixed in the launcher:** xochitl.service has StartLimitIntervalSec=600 /
+StartLimitBurst=4 + OnFailure=emergency.target, and the burst counter counts EVERY systemd start —
+a few xochitl restarts within 10 min (xovi toggle + rmweb launch/quit cycles, or a test session)
+trips an emergency REBOOT without any actual crash. `device/rmweb` cleanup() now waits for
+rmweb-wpeqt to die before starting xochitl (kills are async; xochitl starting into a held
+framebuffer crashes) and calls `systemctl reset-failed xochitl` before `systemctl start xochitl`
+so a legitimate restore start can never be the one that trips the limit.
+
 **Sleep screen (2026-07-27).** Custom suspend image: `/usr/share/remarkable/suspended.png` (remount /
 rw; original backed up as .orig; custom copy at /home/root/suspended-custom.png — OS updates revert
 rootfs). Stock format is 1620×2160 GrayscaleAlpha, but **truecolor RGB renders fine on Paper Pro**
