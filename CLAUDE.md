@@ -257,8 +257,8 @@ must be eyeballed).
 **Site survey (2026-07-27).** Deterministic e-ink lab page (local http.server on 10.11.99.5:8765 —
 CSS spinner/blink, six cosmetic ad selectors, 2400 px image, wide table): animations frozen, ALL ad
 containers collapsed, wide media/tables fit — the calm-down kit + css-display-none work as designed.
-Live sites with blocking on: wikipedia, news.ycombinator.com and a heavy news portal render fully (portal
-nonWhite=1057 @12 s). **a heavy news portal** with desktop UA still paints nothing within the 13 s verdict window
+Live sites with blocking on: wikipedia, news.ycombinator.com and a heavy news portal render fully
+(the portal: nonWhite=1057 @12 s). **a heavy news portal** with desktop UA still paints nothing within the 13 s verdict window
 (the "Couldn't display" notice fires correctly — not a css-display-none casualty; SITECSS=0 blanks
 too). ~~Sustained news-portal loads hard-reboot the device (OOM)~~ — **RETRACTED**: the three reboots during
 this survey were my own test harness. Journal evidence: each ends with `/usr/sbin/rm-emergency.sh
