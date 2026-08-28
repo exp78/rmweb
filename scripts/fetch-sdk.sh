@@ -15,7 +15,9 @@ verify() {
 
 mkdir -p "$SDK_DIR"
 if [ -f "$out" ]; then
-  echo "Already present, verifying checksum…"; verify; exit 0
+  echo "Already present, verifying checksum…"
+  verify || { echo "CHECKSUM FAILED — removing $out"; rm -f "$out"; exit 1; }
+  exit 0
 fi
 echo "Downloading ferrari aarch64 SDK (~467 MB)…"
 curl -fL --progress-bar -o "$out" "$URL"

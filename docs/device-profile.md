@@ -9,7 +9,8 @@ any firmware update (especially storage, glibc, kernel, and xochitl offsets).
 
 - Transport: **USB ethernet**. Device IP **`10.11.99.1`**; host interface `en12` gets `10.11.99.5/27`.
 - SSH: `root@10.11.99.1`, **key auth configured** (our `~/.ssh/id_ed25519.pub` is in the device's `authorized_keys`).
-- Root password is stored in repo-local `.env` (gitignored). Find it on-device at
+- Root password is noted in repo-local `.env` (gitignored) **for reference only — no script reads it**
+  (SSH goes by key). Find it on-device at
   *Settings → General → Help → Copyrights and licenses*.
 - Ping RTT ~1.45 ms.
 
@@ -79,13 +80,15 @@ any firmware update (especially storage, glibc, kernel, and xochitl offsets).
 **Reusable (link dynamically, do NOT bundle):** Qt 6.10.3 (Core/Gui/Qml/Quick/QuickControls2/
 Svg/Network/DBus/WebSockets/Xml…), cairo 1.18, pixman, freetype 2.13 (`.6.20.1`), fontconfig,
 harfbuzz (+`-cairo`,`-gobject`), **icu 74**, glib/gio/gobject/gmodule 2.78, libpng16, libjpeg62,
-libxml2, libcurl, **openssl 3** (libssl/libcrypto), libgcrypt, libsystemd, libudev, **libdrm**.
+libxml2, libcurl, **openssl 3** (libssl/libcrypto), libgcrypt, libsystemd, libudev, **libdrm**,
+liblcms2, libzstd, libffi, libnghttp2 (the last four are present on 3.28.0.164 — confirmed by the
+release-tarball NEEDED audit).
 
 **Missing → must cross-build & bundle under `/home`:**
 WPE WebKit (`libWPEWebKit`), `libwpe` + `WPEBackend` (or WPEPlatform), **Mesa** (llvmpipe +
-software EGL/GLESv2 + surfaceless), **libsoup3** (+ sqlite3, libpsl, libnghttp2),
-**libwebp** (required by WPE), **libxkbcommon**, libepoxy, a TLS backend for glib-networking
-(GnuTLS+libtasn1, or configure for openssl). **No compiler on device** → cross-compile only.
+software EGL/GLESv2 + surfaceless), **libsoup3** (+ sqlite3, libpsl),
+**libwebp** (required by WPE), **libxkbcommon**, libepoxy, glib-networking
+(configured for the OpenSSL backend). **No compiler on device** → cross-compile only.
 
 ## Toolchain
 

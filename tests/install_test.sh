@@ -9,12 +9,20 @@ fails=0
 
 echo "case 1: missing app binary -> non-zero exit"
 R="$TMP/a"; mkdir -p "$R"; cp "$ROOT_REPO/device/rmweb" "$ROOT_REPO/device/rmweb-env.sh" "$R/"
+cp "$ROOT_REPO/VERSION" "$R/VERSION"   # VERSION present, so the failure is the integrity gate
 RMWEB_ROOT="$R" sh "$INSTALL" >/dev/null 2>&1; rc=$?
 [ "$rc" != 0 ] || { echo "  FAIL: expected non-zero (no bin/rmweb-wpeqt)"; fails=$((fails+1)); }
 
-echo "case 2: complete bundle -> success, version + executable"
+echo "case 2: missing VERSION -> hard fail with a clear message"
+R="$TMP/a2"; mkdir -p "$R/bin" "$R/libexec/wpe-webkit-2.0"; : > "$R/bin/rmweb-wpeqt"
+cp "$ROOT_REPO/device/rmweb" "$ROOT_REPO/device/rmweb-env.sh" "$ROOT_REPO/device/install.sh" "$R/"
+out=$(RMWEB_ROOT="$R" sh "$INSTALL" 2>&1); rc=$?
+[ "$rc" != 0 ] || { echo "  FAIL: expected non-zero (no VERSION)"; fails=$((fails+1)); }
+echo "$out" | grep -q "VERSION" || { echo "  FAIL: expected a VERSION error message, got: $out"; fails=$((fails+1)); }
+
+echo "case 3: complete bundle -> success, version + executable"
 EXPECTED_VER="$(cat "$ROOT_REPO/VERSION")"   # single source of truth: the repo-root VERSION file
-R="$TMP/b"; mkdir -p "$R/bin"; : > "$R/bin/rmweb-wpeqt"
+R="$TMP/b"; mkdir -p "$R/bin" "$R/libexec/wpe-webkit-2.0"; : > "$R/bin/rmweb-wpeqt"
 cp "$ROOT_REPO/device/rmweb" "$ROOT_REPO/device/rmweb-env.sh" "$ROOT_REPO/device/install.sh" "$R/"
 cp "$ROOT_REPO/VERSION" "$R/VERSION"   # bundle.sh deploys VERSION next to install.sh
 RMWEB_ROOT="$R" sh "$INSTALL" >/dev/null 2>&1; rc=$?

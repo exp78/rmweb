@@ -2,20 +2,19 @@
 set -euo pipefail
 # Assemble the WPE runtime bundle and deploy it to /home/root/rmweb on the Paper Pro.
 # Ships our built .so (+ sqlite3/webp pulled from the SDK sysroot, which the device runtime
-# lacks), the Mesa software-GL drivers, the WPE subprocess helpers, WebKit resources +
-# injected-bundle, and the wpe_render proof binary. The other ~24 deps (glib, icu, cairo,
-# freetype, harfbuzz, openssl, libxml2, png/jpeg, ...) are reused from the device.
+# lacks), the Mesa software-GL drivers, the WPE subprocess helpers, and WebKit resources +
+# injected-bundle. The other ~24 deps (glib, icu, cairo, freetype, harfbuzz, openssl, libxml2,
+# png/jpeg, ...) are reused from the device.
 cd "$(dirname "$0")/.."
 [ -f .env ] && . ./.env || true
 HOST="${REMARKABLE_HOST:-10.11.99.1}"; DUSER="${REMARKABLE_USER:-${DEVICE_USER:-root}}"   # REMARKABLE_USER (.env) is canonical; DEVICE_USER = legacy fallback
 S=build/stage/usr; M=build/stage-mesa/usr; B=build/bundle
 
-rm -rf "$B"; mkdir -p "$B/lib/dri" "$B/lib/gio/modules" "$B/libexec" "$B/share/glvnd/egl_vendor.d" "$B/bin"
+rm -rf "$B"; mkdir -p "$B/lib/dri" "$B/lib/gio/modules" "$B/libexec" "$B/bin"
 cp -a "$S"/lib/*.so*                "$B/lib/"
 cp -a "$M"/lib/*.so*                "$B/lib/"
 cp -a "$S"/lib/gio/modules/*.so     "$B/lib/gio/modules/"            2>/dev/null || true   # glib-networking (TLS)
 cp -a "$M"/lib/dri/*.so             "$B/lib/dri/"                    2>/dev/null || true
-cp -a "$M"/share/glvnd/egl_vendor.d/. "$B/share/glvnd/egl_vendor.d/" 2>/dev/null || true
 # llvmpipe: multi-core + SIMD-JIT software rasterizer — ~64x faster page compositing than softpipe
 # (fixes the ~6 s page turn; see the six-second-render memory). Replace the softpipe swrast driver with
 # the llvm-enabled build, and bundle libLLVM + only the deps the device lacks (libz3/tinfo/edit/bsd/md).
@@ -31,26 +30,12 @@ if [ -f build/stage-mesa-llvm/usr/lib/dri/swrast_dri.so ]; then
 else
   echo "[bundle] WARN: no llvmpipe build (build/stage-mesa-llvm) — shipping softpipe (slow). Run engine/mesa-llvmpipe.incontainer.sh"
 fi
-# Qt Virtual Keyboard (on-screen URL entry): module libs + QML module + input-context plugin. Its Qt deps
-# (Gui/Qml/Quick/Svg/Layouts/Window) come from the device's system Qt at runtime (6.10.3 on current
-# 3.28 builds; the plugin is built against the SDK's 6.8.2 — same-major older-minor plugins load fine).
-# Run with QT_IM_MODULE=qtvirtualkeyboard and
-# QML_IMPORT_PATH/QT_PLUGIN_PATH pointed at the bundle (they EXTEND, not replace, the device defaults).
-if [ -d build/stage-vkb/usr/lib/qml/QtQuick/VirtualKeyboard ]; then
-  cp -a build/stage-vkb/usr/lib/libQt6VirtualKeyboard*.so* "$B/lib/"
-  mkdir -p "$B/qml/QtQuick" "$B/plugins/platforminputcontexts"
-  cp -a build/stage-vkb/usr/lib/qml/QtQuick/VirtualKeyboard "$B/qml/QtQuick/"
-  cp -a build/stage-vkb/usr/lib/plugins/platforminputcontexts/libqtvirtualkeyboardplugin.so "$B/plugins/platforminputcontexts/"
-else
-  echo "[bundle] WARN: no build/stage-vkb — on-screen keyboard unavailable (run scripts/build-vkb.sh)"
-fi
 cp -a "$S"/libexec/wpe-webkit-2.0   "$B/libexec/"
 cp -a "$S"/lib/wpe-webkit-2.0       "$B/lib/"                        2>/dev/null || true   # injected-bundle
 cp -a "$S"/share/wpe-webkit-2.0     "$B/share/"                      2>/dev/null || true   # resources
 # Reader mode: vendored Mozilla Readability.js (+ isProbablyReaderable), injected on "Reader" (Apache-2.0).
 mkdir -p "$B/share/reader"
 cp -a engine/wpeqt/reader/Readability.js engine/wpeqt/reader/Readability-readerable.js "$B/share/reader/"
-cp -a build/wpe_render              "$B/bin/"
 # The app binary itself — a release bundle must be self-contained. (Dev deploy via run-wpeqt-on-device.sh
 # scp's a fresh build over this; here we ship whatever build/ currently holds so the tarball is complete.)
 [ -f build/rmweb-wpeqt ] && cp -a build/rmweb-wpeqt "$B/bin/" \
@@ -71,17 +56,24 @@ cp VERSION "$B/VERSION"   # single source of truth: the repo-root VERSION file
 # /usr/libexec overlay on the device, so they get the ABSOLUTE bundle lib dir instead.
 if docker image inspect rmweb-sdk >/dev/null 2>&1; then
   docker run --rm -v "$PWD:/work" -w /work rmweb-sdk bash -euc '
-    rp() { [ -d "$1" ] && find "$1" -maxdepth 1 \( -name "*.so" -o -name "*.so.*" \) -type f -exec patchelf --set-rpath "$2" {} +; }
+    rp() { [ -d "$1" ] || return 0; find "$1" -maxdepth 1 \( -name "*.so" -o -name "*.so.*" \) -type f -exec patchelf --set-rpath "$2" {} +; }
     rp build/bundle/lib                      "\$ORIGIN"
     rp build/bundle/lib/dri                  "\$ORIGIN/.."
     rp build/bundle/lib/gio/modules          "\$ORIGIN/../.."
     rp build/bundle/lib/wpe-webkit-2.0       "\$ORIGIN/.."
-    rp build/bundle/plugins/platforminputcontexts "\$ORIGIN/../lib"
     rp build/bundle/bin                      "\$ORIGIN/../lib"
     find build/bundle/libexec/wpe-webkit-2.0 -maxdepth 1 -type f -exec patchelf --set-rpath /home/root/rmweb/lib {} +
-  ' || echo "[bundle] WARN: patchelf pass failed — LD_LIBRARY_PATH remains required"
+  ' || rpath_fail="patchelf pass failed"
 else
-  echo "[bundle] WARN: no rmweb-sdk docker image — bundled libs left without rpath (LD_LIBRARY_PATH required)"
+  rpath_fail="no rmweb-sdk docker image"
+fi
+if [ -n "${rpath_fail:-}" ]; then
+  # Release 0.9.0 shipped with NO rpath at all because this only WARNed — make it fatal for tarballs.
+  if [ -n "${RMWEB_PACKAGE_ONLY:-}" ]; then
+    echo "[bundle] ERROR: $rpath_fail — a release bundle without rpath is broken (LD_LIBRARY_PATH does not cover transitive deps)" >&2
+    exit 1
+  fi
+  echo "[bundle] WARN: $rpath_fail — bundled libs left without rpath (LD_LIBRARY_PATH required)"
 fi
 
 echo "[bundle] local size:"; du -sh "$B"

@@ -4,10 +4,10 @@ A native **WPE WebKit** web browser for the **reMarkable Paper Pro** e-ink table
 
 ![start page](docs/screenshots/start-page.png)
 
-> **Status: v0.9.0 — beta.** The primary use case is **reading**; general browsing is basic.
+> **Status: v0.9.1 — beta.** The primary use case is **reading**; general browsing is basic.
 > Implemented and verified on-device: reader mode (Mozilla Readability, light/dark theme), B2 chrome
 > painted into the frame (with C++ hit-test and inverted press feedback on every button and key),
-> touch/pen input via evdev with a phantom-touch guard, on-screen URL keyboard, bookmarks/history/
+> touch input via evdev with a phantom-touch guard, on-screen URL keyboard, bookmarks/history/
 > settings persisted in the profile dir, a redesigned HTML start page (`rmweb:` scheme) with letter
 > avatars and a tabs-lite open-pages switcher, a **separate settings page** (tap-to-toggle rows,
 > applies immediately), page/reader zoom, content blocking (WebKit UserContentManager filter) with
@@ -20,7 +20,8 @@ A native **WPE WebKit** web browser for the **reMarkable Paper Pro** e-ink table
 > selects), learn-as-you-type autofill for email/username/name fields (passwords are never
 > learned), a per-host password store (obfuscated — NOT encrypted), styled error pages with Retry,
 > a TLS padlock, address-bar search over local bookmarks+history (with a web-search link),
-> long-press link peek, a KOReader-style reading-progress bar, a coherent **Lucide icon set** drawn
+> long-press link peek, a **B&W fast mode** (grayscale present + the fast mono waveform) and a
+> **mobile/desktop UA toggle** (both in Settings), a KOReader-style reading-progress bar, a coherent **Lucide icon set** drawn
 > as vectors (crisp on e-ink, font-independent), a home-screen icon in the stock launcher (XOVI +
 > AppLoad), and a no-brick launcher that stops/restores xochitl. E-ink-safe: CPU-only llvmpipe +
 > Skia, ~120–250 ms page turns, low RAM.
@@ -47,11 +48,12 @@ on the CPU. rmweb renders the web entirely in software — **Skia CPU raster + M
 ## Architecture (short)
 
 ```
-input (touch/pen) → shell (Qt6/QML chrome) → engine (WPE, software GL)
+input (touch) → shell (hand-painted C++ chrome on a QQuickPaintedItem) → engine (WPE, software GL)
         ARGB8888 frame → display (Qt6 + epaper QPA) → imx-drm → E-Ink 1620×2160
 ```
 
-Five isolated modules: `engine`, `display`, `input`, `shell`, `platform`.
+The design's five modules folded into `engine/wpeqt` (input/shell/display inside `main.cpp`), plus
+`device/` for the on-device glue.
 Full design: [`docs/superpowers/specs/2026-06-24-rmweb-browser-design.md`](docs/superpowers/specs/2026-06-24-rmweb-browser-design.md).
 Verified hardware facts: [`docs/device-profile.md`](docs/device-profile.md).
 
@@ -64,10 +66,20 @@ official reMarkable "ferrari" Yocto SDK.
 
 ## Build & Install
 
+Prebuilt archives on [GitHub Releases](https://github.com/exp78/rmweb/releases) install without any
+toolchain — see [`docs/install.md`](docs/install.md).
+
+Building from source needs a `linux/arm64` Docker engine (on macOS: colima + docker-buildx) and the
+reMarkable Yocto SDK — setup in [`toolchain/README.md`](toolchain/README.md). The WPE WebKit + Mesa
+build takes **hours and tens of GB of disk**.
+
 ```bash
-./scripts/fetch-sdk.sh          # download Yocto SDK once
-./scripts/build-wpeqt.sh        # build rmweb-wpeqt
-./scripts/bundle.sh             # create device bundle
+./scripts/fetch-sdk.sh                                # download the Yocto SDK once
+docker build -f toolchain/Dockerfile -t rmweb-sdk .   # cross-compile image
+./scripts/build-wpe.sh deps                           # WPE WebKit deps + Mesa llvmpipe (hours)
+./scripts/build-wpe.sh build                          # WPE WebKit itself
+./scripts/build-wpeqt.sh                              # build rmweb-wpeqt
+./scripts/bundle.sh                                   # create device bundle
 ./scripts/run-wpeqt-on-device.sh show https://example.com
 ```
 

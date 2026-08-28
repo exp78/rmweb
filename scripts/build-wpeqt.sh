@@ -10,7 +10,6 @@ docker run --rm -v "$PWD":/work -w /work rmweb-sdk bash -lc '
   SR=$SDKTARGETSYSROOT
   cp -a /work/build/stage/usr/.      "$SR/usr/"
   cp -a /work/build/stage-mesa/usr/. "$SR/usr/"
-  cp -a /work/build/stage-vkb/usr/.  "$SR/usr/" 2>/dev/null || true   # Qt Virtual Keyboard qml+libs so qmlimportscanner resolves it
   rm -rf /work/build/wpeqt
   cmake -S /work/engine/wpeqt -B /work/build/wpeqt -G Ninja -DCMAKE_BUILD_TYPE=Release
   cmake --build /work/build/wpeqt -j"$(nproc)"

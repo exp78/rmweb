@@ -1,31 +1,42 @@
 # Installing rmweb on the reMarkable Paper Pro
 
-rmweb installs entirely under `/home/root/rmweb` (the only writable, OTA-surviving location). It never
-modifies `/etc` or the rootfs, and it never disables xochitl — it only stops it while the browser is on
-screen and restarts it on exit.
+rmweb installs entirely under `/home/root/rmweb` (the only writable, OTA-surviving location). It makes
+no persistent changes to `/etc` or the rootfs — while it runs, the launcher mounts a temporary overlay
+over `/usr/libexec` (unmounted on exit) — and it never disables xochitl: it only stops it while the
+browser is on screen and restarts it on exit.
 
 ## Install from a prebuilt archive (no toolchain needed)
 
 `scripts/package.sh` produces a self-contained release tarball (`dist/rmweb-<version>.tar.gz`, ~110 MB —
-it carries the app plus every runtime library, so no build tools are needed to install it). Prebuilt
-archives are attached to [GitHub Releases](https://github.com/exp78/rmweb/releases) — install v0.9.0
+it carries everything the stock OS doesn't provide, so no build tools are needed to install it — but
+it does need the stock OS with its system Qt 6; verified on OS 3.28.x). Prebuilt
+archives are attached to [GitHub Releases](https://github.com/exp78/rmweb/releases) — install v0.9.1
 without any toolchain:
 
 ```sh
 # 1. Download the archive from Releases and copy it to the tablet over USB:
-scp rmweb-0.9.0.tar.gz root@10.11.99.1:/home/root/
+scp rmweb-0.9.1.tar.gz root@10.11.99.1:/home/root/
 # 2. Extract + wire up on the device (no toolchain here):
 ssh root@10.11.99.1 'mkdir -p /home/root/rmweb \
-  && gunzip -c /home/root/rmweb-0.9.0.tar.gz | tar -C /home/root/rmweb -xf - \
+  && gunzip -c /home/root/rmweb-0.9.1.tar.gz | tar -C /home/root/rmweb -xf - \
   && /home/root/rmweb/install.sh'
 ```
 
-Re-running the same steps upgrades in place. To build the archive yourself instead:
-`./scripts/build-wpeqt.sh && ./scripts/package.sh`, then the same two steps with `dist/rmweb-0.9.0.tar.gz`.
+Upgrading: quit rmweb, remove the old tree (`rm -rf /home/root/rmweb`), then repeat the two steps
+above. The user profile lives in `/home/root/.rmweb` and survives the reinstall (only `rmweb.log`,
+kept in the app dir, is lost). To build the archive yourself instead:
+`./scripts/build-wpeqt.sh && ./scripts/package.sh`, then the same two steps with `dist/rmweb-0.9.1.tar.gz`.
 
 ## Build + deploy from source (dev host)
 
+Prereqs: a `linux/arm64` Docker engine (on macOS: colima + docker-buildx) and the reMarkable Yocto
+SDK — see [toolchain/README.md](../toolchain/README.md). The WPE WebKit + Mesa build takes hours and
+tens of GB of disk.
+
 ```sh
+./scripts/fetch-sdk.sh                                 # download the SDK once
+docker build -f toolchain/Dockerfile -t rmweb-sdk .    # cross-compile image
+./scripts/build-wpe.sh deps && ./scripts/build-wpe.sh build   # WPE WebKit + Mesa (hours)
 # Build the app and assemble + deploy the bundle straight to the device over USB-SSH:
 ./scripts/build-wpeqt.sh
 ./scripts/bundle.sh
@@ -40,7 +51,9 @@ ssh root@10.11.99.1 '/home/root/rmweb/install.sh'
 
 The browser takes over the screen (xochitl is stopped). Tap the **⏻** button at the right of the toolbar
 to quit — xochitl (your normal reMarkable UI) comes back automatically, WITH XOVI/AppLoad if they were
-running. xochitl is always restored on exit, crash, or kill; a reboot always restores it too.
+running. xochitl is restored on exit, crash, or a caught signal (the launcher traps EXIT/TERM/INT/HUP).
+The one exception: SIGKILL (`kill -9`) to the launcher itself cannot be trapped — xochitl then stays
+stopped (screen left black / on the frozen browser frame) until a reboot, which always restores it.
 
 ## Home-screen icon (optional, layer B: XOVI + AppLoad)
 

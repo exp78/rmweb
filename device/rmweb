@@ -41,24 +41,46 @@ cleanup(){
   # xochitl has StartLimitIntervalSec=600/Burst=4 and OnFailure=emergency.target: a handful of
   # stops/starts within 10 min (xovi toggle + rmweb launch/quit cycles) trips an EMERGENCY REBOOT.
   # Clear the burst counter so this legitimate restore start can never be the one that trips it.
-  [ -n "${STOPPED:-}" ] && { log "restarting xochitl"; systemctl reset-failed xochitl 2>/dev/null; systemctl start xochitl; }  # home UI back FIRST
+  if [ -n "${STOPPED:-}" ]; then
+    log "restarting xochitl"; systemctl reset-failed xochitl 2>/dev/null; systemctl start xochitl  # home UI back FIRST
+    # A start that only LOOKS fine leaves the user on a blank panel: verify, retry once, then warn.
+    if ! systemctl is-active --quiet xochitl; then
+      sleep 2; systemctl reset-failed xochitl 2>/dev/null; systemctl start xochitl
+    fi
+    systemctl is-active --quiet xochitl || log "WARN: xochitl still not active after restart"
+  fi
   [ -n "${MOUNTED:-}" ] && umount /usr/libexec 2>/dev/null
   rmdir "$LOCK" 2>/dev/null
 }
 trap 'cleanup' EXIT
 trap 'cleanup; exit 143' TERM
 trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 129' HUP   # dropped ssh must not strand the device with xochitl stopped + lock held
 
-# Single instance (mkdir is atomic on BusyBox). If the lock exists, another run owns xochitl — bail without
-# touching it (DONE=1 so the EXIT trap's cleanup is a no-op and won't restart xochitl under the other run).
+# Single instance (mkdir is atomic on BusyBox). The lock dir survives reboots (e.g. an emergency-reboot
+# while rmweb ran): if no rmweb-wpeqt is alive the lock is stale — take it over instead of refusing every
+# future start. With a LIVE process behind the lock, bail without touching xochitl (DONE=1 so the EXIT
+# trap's cleanup is a no-op and won't restart xochitl under the other run).
 if ! mkdir "$LOCK" 2>/dev/null; then
-  echo "[rmweb] already running (or stale $LOCK; remove it if no rmweb is running)" >&2
-  DONE=1; exit 1
+  if ! pgrep rmweb-wpeqt >/dev/null 2>&1; then
+    echo "[rmweb] stale $LOCK (no rmweb-wpeqt running) — taking over" >&2
+    rmdir "$LOCK" 2>/dev/null || rm -rf "$LOCK"
+    mkdir "$LOCK" 2>/dev/null || { echo "[rmweb] could not acquire $LOCK" >&2; DONE=1; exit 1; }
+  else
+    echo "[rmweb] already running (lock $LOCK held by a live rmweb-wpeqt)" >&2
+    DONE=1; exit 1
+  fi
 fi
 
 rotate_log   # bound the persistent log before this run's appends
 log "start"
-if systemctl is-active --quiet xochitl; then log "stopping xochitl"; systemctl stop xochitl && STOPPED=1; fi
+if systemctl is-active --quiet xochitl; then
+  log "stopping xochitl"
+  # STOPPED before the stop: on the appload fallback path (no systemd-run) the stop SIGTERMs our own
+  # cgroup — a TERM landing mid-stop must still find STOPPED set so cleanup restarts xochitl.
+  STOPPED=1
+  if ! systemctl stop xochitl; then STOPPED=; log "ERROR: could not stop xochitl"; exit 1; fi
+fi
 
 # WPE spawns helpers from the baked /usr/libexec/wpe-webkit-2.0 and / is read-only -> overlay it. Drop any
 # stale overlay from a hard-killed prior run first, so we always mount our fresh helpers.
@@ -66,9 +88,15 @@ umount /usr/libexec 2>/dev/null || true
 if [ ! -e /usr/libexec/wpe-webkit-2.0 ]; then
   rm -rf "$R/ovl"; mkdir -p "$R/ovl/upper/wpe-webkit-2.0" "$R/ovl/work"
   cp -a "$R/libexec/wpe-webkit-2.0/." "$R/ovl/upper/wpe-webkit-2.0/"
-  mount -t overlay overlay -o lowerdir=/usr/libexec,upperdir="$R/ovl/upper",workdir="$R/ovl/work" /usr/libexec && MOUNTED=1
+  # A silently failed overlay leaves WPE unable to spawn its subprocesses — bail (trap restores xochitl).
+  if ! mount -t overlay overlay -o "lowerdir=/usr/libexec,upperdir=$R/ovl/upper,workdir=$R/ovl/work" /usr/libexec; then
+    log "ERROR: overlay mount on /usr/libexec failed"
+    exit 1
+  fi
+  MOUNTED=1
 fi
 
+# shellcheck source=/dev/null
 . "$R/rmweb-env.sh"
 
 rotate_log   # the app's own append below is the main growth source

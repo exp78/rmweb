@@ -8,10 +8,9 @@ those components.
 Runtime libraries (linked, not modified)
 ----------------------------------------
 * WPE WebKit (https://wpewebkit.org) — LGPL-2.1+ / BSD-2-Clause (WebCore).
-  Dynamic linking; no modifications. Source: https://webkit.org/build-options/
+  Dynamic linking; no modifications. Releases: https://wpewebkit.org/releases/
 * Qt 6 (https://www.qt.io) — LGPL-3.0. Dynamic linking; no modifications.
-  reMarkable ships Qt on the device; Qt Virtual Keyboard module (GPL-3.0) is
-  used unmodified as a runtime plugin.
+  reMarkable ships Qt on the device; rmweb links against the system build.
 * Mesa (https://mesa3d.org) — MIT. llvmpipe software rasterizer.
 * glib-networking / OpenSSL — LGPL-2.1+ / Apache-2.0 (TLS backend).
 

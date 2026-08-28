@@ -4,7 +4,7 @@ set -euo pipefail
 # then ALWAYS restart xochitl (even if the app crashes).
 # Usage: scripts/run-on-device.sh <local-binary> [app-args...]
 cd "$(dirname "$0")/.."
-[ -f .env ] && . ./.env
+[ -f .env ] && . ./.env || true
 HOST="${REMARKABLE_HOST:-10.11.99.1}"
 DEVICE_USER="${REMARKABLE_USER:-${DEVICE_USER:-root}}"   # REMARKABLE_USER (.env) is canonical; DEVICE_USER = legacy fallback
 BIN="${1:?usage: run-on-device.sh <local-binary> [app-args...]}"; shift || true

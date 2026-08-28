@@ -1,9 +1,10 @@
 # Browser UI survey — what to borrow for rmweb
 
 > Cross-project survey (2026-06-28) of open-source browsers, done to design rmweb's
-> reading shell. rmweb stack reminder: chrome = **Qt6 Qt Quick / QML (Controls 2)**,
+> reading shell. rmweb stack reminder: chrome = **hand-painted C++ (QQuickPaintedItem — QuickControls2
+> is not linked)**,
 > engine = **WPE WebKit on CPU** (renders ARGB frames), display = **color e-ink** (Gallery 3,
-> 1620×2160, slow refresh), input = **finger + pen**. MVP = a calm *reading* browser.
+> 1620×2160, slow refresh), input = **finger** (pen is not handled). MVP = a calm *reading* browser.
 >
 > Method: four parallel research agents over four clusters. Every claim below traces to a
 > repo cited in **Sources**. This doc is the "насмотренность" map — what each project does
@@ -134,7 +135,7 @@ color refresh). Minimum-viable = size ± / serif-sans / width / line-spacing (~9
     (back/fwd/reload-stop/address/menu/tabs) reading `canGoBack/canGoForward/loading/requestedUrl`
     — **near-verbatim into our existing ToolBar** (it's Controls2, not Kirigami here).
   - `InputSheet.qml` + `UrlDelegate.qml` = URL-entry overlay + suggestion row (pairs with our
-    TextField + Qt VKB).
+    URL field + our own C++ on-screen keyboard).
   - `FindInPageBar.qml`, bookmarks/history/downloads pages, settings-as-page-stack
     (`src/settings/*`: General / Adblock / SearchEngine / NavigationBar).
   - Web-prompt dialogs: `PermissionQuestion`, `AuthSheet`, `JavaScriptDialogSheet`.
@@ -175,7 +176,7 @@ ephemeral + single-key "kill JS/images" escape hatch for heavy pages on CPU.
 | Feature | Tier | e-ink + touch note |
 |---|---|---|
 | Façade refactor + Epiphany signal wiring | **MVP** | the seam everything else binds to |
-| Smart bar (URL+search, one field) + autocomplete from history/bookmarks | **MVP** | full-screen overlay, big target, VKB; debounce, partial refresh |
+| Smart bar (URL+search, one field) + autocomplete from history/bookmarks | **MVP** | full-screen overlay, big target, on-screen keyboard; debounce, partial refresh |
 | Back/Fwd/Reload-Stop/Home | **MVP** | edge-swipe back + buttons; reload⇄stop combined |
 | **Paginate + asymmetric tap-zones + flat turns** | **MVP** | next=right/swipe, prev=left strip, top=chrome |
 | **Adaptive refresh + "full every N" + grayscale-mode toggle** | **MVP** | we own the waveform — our differentiator |

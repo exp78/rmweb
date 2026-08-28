@@ -40,7 +40,10 @@
 #include <sys/ioctl.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <cstdlib>
@@ -66,8 +69,8 @@ Q_LOGGING_CATEGORY(lcEngine, "rmweb.engine", QtWarningMsg)  // per-frame/tap tra
 
 // Finger digitizer raw range (Elan, verified on device) -> 1620x2160 panel; swipe thresholds in panel px.
 static const int kPanelW = 1620, kPanelH = 2160, kTouchRawW = 2064, kTouchRawH = 2832;
-static const double kPageStepPx = 2000.0;   // ~one screen of scroll per page turn (with a little overlap)
-// (swipe/tap thresholds live in gesture.h GestureParams — single source of truth)
+// (swipe/tap thresholds live in gesture.h GestureParams — single source of truth; the page-turn
+//  step itself is innerHeight*0.92, computed in the pageBy JS — callers pass only a direction)
 
 // Milliseconds elapsed since a monotonic timestamp (for the "[t] ... @Xms" instrumentation).
 static inline double msSince(gint64 us) { return (g_get_monotonic_time() - us) / 1000.0; }
@@ -109,7 +112,8 @@ extern "C" void crashHandler(int sig) {
 // The orderly Qt/WebKit teardown path intermittently SIGABRTs/SEGVs on this stack, and any
 // fatal signal here costs a DEVICE REBOOT via the watchdog — the ⏻ button and save mode already
 // use the same _Exit escape. Async-signal-safe: _Exit only (no flush — stderr is line-buffered,
-// so at most one partial line is lost; profile writes flush on normal loop exit / debounce).
+// so at most one partial line is lost; profile writes flush on the ⏻ button (flushSync) and on
+// normal loop exit — a SIGTERM exit skips the flush, losing at most one debounce window (<=1.5 s)).
 extern "C" void termHandler(int) { std::_Exit(0); }
 
 // WKContentRuleList (Safari/WebKit content-blocker JSON): drop third-party scripts/media/fonts — i.e. ads,
@@ -127,7 +131,7 @@ static const char *kBlockRules =
        "\"ins.adsbygoogle,.adsbygoogle,div[id^='div-gpt-ad'],div[data-ad],.ad-slot,.adslot,"
        "iframe[id^='google_ads'],div[id^='yandex_rtb'],div[id^='adfox_'],.js-ad-slot,.advertising\"}}]";
 
-// Optional mobile User-Agent (opt-in via RMWEB_UA=mobile): makes heavy JS-app sites (e.g. a heavy SPA site) serve their
+// Optional mobile User-Agent (opt-in via RMWEB_UA=mobile): makes heavy JS-app sites (e.g. a heavy SPA news site) serve their
 // lighter MOBILE layout, which renders where the desktop one stays blank. NOT the default — a mobile UA makes
 // server-rendered content sites (Wikipedia & co.) serve a JS-only mobile skin that paints blank on this CPU
 // engine. iPhone Safari is an honest fit (WPE is WebKit/Safari-family).
@@ -242,7 +246,7 @@ public:
         : m_url(std::move(url)), m_w(w), m_h(h),
           m_ctx(g_main_context_new()), m_loop(g_main_loop_new(m_ctx, FALSE)),
           m_cancel(g_cancellable_new()) {
-        if (const char *e = getenv("RMWEB_READER_FONT")) { const int v = atoi(e); if (v >= 16 && v <= 96) m_readerFont = v; }
+        if (const char *e = getenv("RMWEB_READER_FONT")) { const int v = atoi(e); if (v >= 14 && v <= 96) m_readerFont = v; }
     }
 
     ~WpeEngine() {
@@ -295,14 +299,18 @@ public Q_SLOTS:
                                                    // reaches the view via the signal — never read
                                                    // m_settings from main() (that runs before start).
         // RMWEB_READER_FONT env wins over persisted value (same guard as ctor, re-applied after settings load).
-        if (const char *e = getenv("RMWEB_READER_FONT")) { const int v = atoi(e); if (v >= 16 && v <= 96) m_readerFont = v; }
+        if (const char *e = getenv("RMWEB_READER_FONT")) { const int v = atoi(e); if (v >= 14 && v <= 96) m_readerFont = v; }
 
         GError *err = nullptr;
         WPEDisplay *display = wpe_display_headless_new();
         if (!display || !wpe_display_connect(display, &err)) {
-            qWarning() << "[wpe] display connect failed:" << (err ? err->message : "?");
+            // No display = nothing can ever render — die loudly right here. A bare return would
+            // skip g_main_loop_run and leave the GUI hung on a white screen. _Exit, not qFatal:
+            // a SIGABRT here costs a device reboot via the watchdog (see crashHandler).
+            qWarning("[wpe] FATAL: display connect failed: %s", (err ? err->message : "?"));
             g_clear_error(&err);
-            return;
+            fflush(nullptr);
+            std::_Exit(2);
         }
         qInfo("[t] display connected @%.0fms", msSince(m_startUs));
 
@@ -319,6 +327,7 @@ public Q_SLOTS:
         }
         m_view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW,
             "display", display, "user-content-manager", m_ucm, nullptr));
+        g_object_unref(display);   // the view took its own ref at construct time; drop ours
         WPEView *wpeView = webkit_web_view_get_wpe_view(m_view);
         // Readability: lay the page out at device-pixel-ratio `dpr` so the CSS viewport is narrower
         // (panel/dpr) -> responsive sites reflow to a readable, fits-width layout. Toplevel sizes are
@@ -361,6 +370,11 @@ public Q_SLOTS:
             }
             if (type != WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION) return FALSE;
             auto* self = static_cast<WpeEngine*>(data);
+            // Consume the user-navigation exemption up front: several paths below return early
+            // (rmweb: command, blocked/throttled auto-refresh), and the flag must not leak
+            // onto a later, unrelated navigation.
+            const bool expectUserNav = self->m_expectUserNav;
+            self->m_expectUserNav = false;
             auto* nav = WEBKIT_NAVIGATION_POLICY_DECISION(dec);
             WebKitNavigationAction* act = webkit_navigation_policy_decision_get_navigation_action(nav);
             WebKitURIRequest* req = webkit_navigation_action_get_request(act);
@@ -398,13 +412,18 @@ public Q_SLOTS:
                         qInfo("[reader] dark theme %s", self->m_settings.readerDark ? "on" : "off");
                         done();
                     } else if (cmd == "toggle-ua") {
-                        // Mobile UA = lighter server-rendered pages (a heavy news portal becomes READABLE — SSR
-                        // headlines instead of a JS-app skeleton). Applied live; persists in settings.
+                        // Mobile UA = lighter server-rendered pages (heavy news portals become READABLE
+                        // — SSR headlines instead of a JS-app skeleton). Applied live; persists in settings.
                         self->m_settings.ua = (self->m_settings.ua == "mobile") ? "" : "mobile";
                         rmweb::saveSettings(self->m_profileDir, self->m_settings);
+                        // An RMWEB_UA env override still wins for this run (runtime-only, never
+                        // persisted): the stored value flips, the live UA stays the env one.
+                        const std::string ua = !self->m_envUa.empty() ? self->m_envUa : self->m_settings.ua;
+                        const char *real = ua.empty() ? nullptr : (ua == "mobile") ? kMobileUA : ua.c_str();
                         webkit_settings_set_user_agent(webkit_web_view_get_settings(self->m_view),
-                            self->m_settings.ua.empty() ? nullptr : kMobileUA);   // nullptr = WPE default
-                        qInfo("[ua] %s", self->m_settings.ua.empty() ? "desktop (default)" : kMobileUA);
+                            real);   // nullptr = WPE default
+                        qInfo("[ua] %s%s", real ? real : "desktop (default)",
+                              self->m_envUa.empty() ? "" : " (RMWEB_UA override)");
                         done();
                     } else if (cmd == "settings") {
                         self->openSettings();
@@ -433,6 +452,10 @@ public Q_SLOTS:
                         rmweb::saveSettings(self->m_profileDir, self->m_settings);
                         qInfo("[form] autofill memory cleared (settings)");
                         done();
+                    } else {
+                        // A command this build doesn't know (e.g. a stale generated page left by a
+                        // different version): never swallow it silently — log and stay on the page.
+                        qWarning("[nav] unknown rmweb: command ignored: %s", cmd.c_str());
                     }
                 } else {
                     qWarning("[nav] rmweb: command from non-start page ignored (current: %s)", cur ? cur : "(none)");
@@ -442,17 +465,18 @@ public Q_SLOTS:
             }
             // Auto-refresh guard: a navigation back to the CURRENT url that WE didn't initiate
             // (meta refresh / JS location.reload / href=self) gets throttled — on this device a
-            // re-render costs 40-80 s, and a heavy news portal's refresh yanked the reader view mid-article.
+            // re-render costs 40-80 s, and a news portal's refresh yanked the reader view mid-article.
             // The window is anchored at LOAD_FINISHED (render time doesn't eat the pause), set by the
             // persisted autoRefreshSec setting (15 s default; -1 = block all, 0 = guard off;
-            // RMWEB_AUTOREFRESH_MS env wins at startup). Reader mode blocks it outright.
-            // User reload/Go (m_expectUserNav) and link/back-forward navigations always pass.
-            if (uri && self->m_view && !self->m_expectUserNav) {
+            // RMWEB_AUTOREFRESH_MS env wins for this run). Reader mode blocks it outright.
+            // User reload/Go/link tap (expectUserNav) and back-forward navigations always pass.
+            if (uri && self->m_view && !expectUserNav) {
                 const WebKitNavigationType nt = webkit_navigation_action_get_navigation_type(act);
                 if (nt == WEBKIT_NAVIGATION_TYPE_OTHER || nt == WEBKIT_NAVIGATION_TYPE_RELOAD) {
                     const char *cur = webkit_web_view_get_uri(self->m_view);
                     if (cur && std::string(cur) == uri) {
-                        const int sec = self->m_settings.autoRefreshSec;
+                        const int sec = (self->m_envAutoRefreshSec >= 0) ? self->m_envAutoRefreshSec
+                                                                         : self->m_settings.autoRefreshSec;
                         if (self->m_readerMode || sec < 0) {
                             qInfo("[guard] auto-refresh blocked (%s)", self->m_readerMode ? "reader mode" : "setting");
                             webkit_policy_decision_ignore(dec);
@@ -471,33 +495,33 @@ public Q_SLOTS:
                     }
                 }
             }
-            self->m_expectUserNav = false;   // consumed by the first navigation decision it reaches
             return FALSE;
         }), this);
 
-        // User-Agent: env overrides; else persisted setting; else WPE default.
+        // User-Agent: env override for this run only; else persisted setting; else WPE default.
         // RMWEB_UA=mobile opts into lighter mobile layout for heavy JS-app sites; any other non-empty value =
         // that exact string; "off" = use WPE default and clear any persisted UA (saved to disk below, so
-        // the clear survives the next launch).
+        // the clear survives the next launch). The override lives in m_envUa and is NEVER copied into
+        // m_settings — a debounced settings write must not persist an env lever (same rule as RMWEB_BLOCK).
         {
-            std::string ua = m_settings.ua;
             const char *uaEnv = getenv("RMWEB_UA");
-            if (uaEnv && *uaEnv && std::string(uaEnv) != "off") ua = uaEnv;
-            else if (uaEnv && std::string(uaEnv) == "off") ua = "";
+            if (uaEnv && *uaEnv && std::string(uaEnv) != "off") m_envUa = uaEnv;
+            if (uaEnv && std::string(uaEnv) == "off") m_settings.ua.clear();
+            const std::string ua = !m_envUa.empty() ? m_envUa : m_settings.ua;
             if (!ua.empty()) {
                 const char* real = (ua == "mobile") ? kMobileUA : ua.c_str();
                 webkit_settings_set_user_agent(webkit_web_view_get_settings(m_view), real);
-                qInfo("[ua] %s", real);
+                qInfo("[ua] %s%s", real, m_envUa.empty() ? "" : " (RMWEB_UA override)");
             }
-            m_settings.ua = ua;
             // Persist the "off" clear immediately: a direct write is fine here (startup, before the loop
             // runs) — the debounced queueSave() exists for the runtime hot paths.
             if (uaEnv && std::string(uaEnv) == "off") rmweb::saveSettings(m_profileDir, m_settings);
         }
-        // Auto-refresh guard: persisted setting; RMWEB_AUTOREFRESH_MS env (ms, >0) wins for this run —
-        // it stays a diagnostic lever and is NOT persisted (the settings page cycles the stored value).
+        // Auto-refresh guard: persisted setting; RMWEB_AUTOREFRESH_MS env (ms, >0) wins for this run.
+        // The env value goes to m_envAutoRefreshSec, NOT m_settings.autoRefreshSec — it stays a
+        // diagnostic lever and is NOT persisted (the settings page cycles the stored value).
         if (const int v = qEnvironmentVariableIntValue("RMWEB_AUTOREFRESH_MS"); v > 0)
-            m_settings.autoRefreshSec = (v + 999) / 1000;   // ceil ms -> s
+            m_envAutoRefreshSec = (v + 999) / 1000;   // ceil ms -> s
         // DIAG (RMWEB_NOJS=1): disable JavaScript entirely — splits "slow site" into JS-engine vs
         // CSS/layout cost (our own scroll/probe/reader JS goes down too; diagnostic only).
         if (qEnvironmentVariableIntValue("RMWEB_NOJS") == 1) {
@@ -574,6 +598,23 @@ public Q_SLOTS:
             g_main_loop_quit(static_cast<GMainLoop*>(l)); return G_SOURCE_REMOVE; }, m_loop);
     }
 
+    // ⏻-exit profile flush (called from the GUI thread, normal context): marshal flushPendingWrites
+    // onto the worker context and wait for it, BOUNDED — a stuck worker must not stall power-off
+    // (the flush itself is tens of ms; the cap only covers a busy queue). The SIGTERM handler does
+    // NOT do this (signal context = async-signal-safe _Exit only; see termHandler).
+    void flushSync() {
+        struct FlushState { std::mutex mtx; std::condition_variable cv; bool done = false; };
+        // Shared state: on a timed-out wait the worker-side lambda may still run after we return.
+        auto st = std::make_shared<FlushState>();
+        marshalToCtx([this, st] {
+            flushPendingWrites();
+            { std::lock_guard<std::mutex> lk(st->mtx); st->done = true; }
+            st->cv.notify_one();
+        });
+        std::unique_lock<std::mutex> lk(st->mtx);
+        st->cv.wait_for(lk, std::chrono::milliseconds(250), [&st] { return st->done; });
+    }
+
     // Scroll one page in dy's direction (the page-turn JS picks the step; called from the GUI thread
     // on a swipe). Marshalled onto the worker thread;
     // WebKit repaints at the new offset (mapped view + single-threaded Skia) and clamps the scroll for us.
@@ -629,6 +670,12 @@ public Q_SLOTS:
     void toggleSiteCssSetting() {
         m_settings.siteCss = !m_settings.siteCss;
         rmweb::saveSettings(m_profileDir, m_settings);
+        // RMWEB_SITECSS=0 is a run-scoped lever (the startup path honours it): the tap still flips
+        // the persisted value for the next launch, but must NOT enable the stylesheet this run.
+        if (qgetenv("RMWEB_SITECSS") == "0") {
+            qInfo("[sitecss] toggle persisted, but RMWEB_SITECSS=0 env override wins for this run");
+            return;
+        }
         if (m_settings.siteCss && !m_siteCssOn) {
             WebKitUserStyleSheet *ss = webkit_user_style_sheet_new(
                 kSiteCss, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_STYLE_LEVEL_USER, nullptr, nullptr);
@@ -661,10 +708,13 @@ public Q_SLOTS:
             if (f) webkit_user_content_filter_unref(f);
             g_clear_error(&err); g_object_unref(obj); return;
         }
-        if (f) { webkit_user_content_manager_add_filter(self->m_ucm, f);
-                 if (self->m_blockFilter) webkit_user_content_filter_unref(self->m_blockFilter);
-                 self->m_blockFilter = f;
-                 qInfo("[block] compiled + on (settings)"); }
+        if (f) { if (self->m_blockFilter) webkit_user_content_filter_unref(self->m_blockFilter);
+                 self->m_blockFilter = f;   // keep our ref either way — a later "on" re-adds it
+                 // Race: the user toggled blocking back OFF while this async compile was in flight.
+                 // Honour the CURRENT setting — keep the compiled filter, but do not activate it.
+                 if (self->m_settings.block) { webkit_user_content_manager_add_filter(self->m_ucm, f);
+                                               qInfo("[block] compiled + on (settings)"); }
+                 else qInfo("[block] compiled, but setting is off again — kept inactive"); }
         else   { qWarning("[block] filter compile failed: %s", err ? err->message : "?"); g_clear_error(&err); }
         g_object_unref(obj);   // the filter store
     }
@@ -710,6 +760,12 @@ public Q_SLOTS:
         marshalToCtx([this, x, y, peek] {
             if (!m_view) return;
             m_lastProbePeek = peek;
+            // A link tap navigates via synthetic JS (location.href=... in the probe below) — WebKit
+            // classifies that NAVIGATION_TYPE_OTHER, indistinguishable from a site auto-refresh, so
+            // the auto-refresh guard would eat a tap on a same-URL link. Exempt the next navigation;
+            // the policy decision consumes the flag up front. (Peek never navigates — setting the
+            // flag there would leak the exemption onto an unrelated navigation.)
+            if (!peek) m_expectUserNav = true;
             const double scale = std::max(0.5, m_dpr * m_zoom);
             const int cx = int(x / scale), cy = int(y / scale);
             gchar *js = g_strdup_printf(
@@ -876,14 +932,15 @@ public Q_SLOTS:
             webkit_web_view_evaluate_javascript(m_view, js, -1, nullptr, nullptr, m_cancel, &WpeEngine::onFieldSet, nullptr);
         });
     }
-    void pageNext()  { pageBy(kPageStepPx); }   // façade page-turn (wraps the scroll+repaint in pageBy)
-    void pagePrev()  { pageBy(-kPageStepPx); }
+    void pageNext()  { pageBy(+1); }   // façade page-turn (wraps the scroll+repaint in pageBy;
+    void pagePrev()  { pageBy(-1); }   // only dy's sign matters — the JS picks the actual step)
     // Text size -/+ (the A-/A+ chrome buttons): page zoom in normal mode, reader font in reader mode.
     void zoomBy(int dir) {
         marshalToCtx([this, dir] {
             if (!m_view) return;
             if (m_readerMode) {
-                m_readerFont = std::clamp(m_readerFont + (dir > 0 ? 4 : -4), 14, 64);   // reader column font px
+                // reader column font px — same [14,96] range as loadSettings and RMWEB_READER_FONT
+                m_readerFont = std::clamp(m_readerFont + (dir > 0 ? 4 : -4), 14, 96);
                 gchar *js = g_strdup_printf("var r=document.getElementById('rmweb-reader');if(r)r.style.fontSize='%dpx';", m_readerFont);
                 webkit_web_view_evaluate_javascript(m_view, js, -1, nullptr, nullptr, m_cancel, nullptr, nullptr);
                 g_free(js);
@@ -1075,7 +1132,8 @@ private:
         if (!self) return;
         self->m_readerApplying = false;
         if (st == "ok") { self->m_readerMode = true; Q_EMIT self->readerModeChanged(true); qInfo("[reader] applied"); }
-        else qWarning("[reader] not applied: %s", st.c_str());
+        else { qWarning("[reader] not applied: %s", st.c_str());
+               Q_EMIT self->notice(QStringLiteral("No article found on this page")); }
     }
     // After each load: does the page look like an article? -> enable/disable the Reader button.
     void checkReaderable() {
@@ -1100,7 +1158,7 @@ private:
     // any visible content — a heavy client-side app finishes loading but builds ~nothing on the CPU interpreter.
     // m_loadGen invalidates the check if the user navigated away during the grace period. The timer RE-ARMS
     // itself while the load is still in progress: on a slow site (15 s+ of network) a fixed 13 s-from-start
-    // deadline would otherwise judge the page "blank" while bytes are still arriving (a heavy news portal false positive).
+    // deadline would otherwise judge the page "blank" while bytes are still arriving (observed false positive on a heavy news portal).
     static constexpr int kRenderTimeoutMs = 13000;  // after load-start (re-armed while loading): time to paint
     static constexpr int kBlankSamples = 8;         // fewer than this many non-white frame samples = ~blank
     struct RenderCheckMsg { WpeEngine *self; guint gen; };
@@ -1266,6 +1324,12 @@ private:
         // Generated pages loaded with an about:blank base (address-bar search results) must not
         // clobber the address bar — the typed query stays (set when the search was kicked off).
         if (u && std::string(u) == "about:blank") return;
+        // Our own internal pages (file:// under the profile dir — start page, settings) are browser
+        // chrome, not content: show a short marker instead of the raw local path.
+        if (u && std::string(u).rfind("file://" + self->m_profileDir + "/", 0) == 0) {
+            Q_EMIT self->urlChanged(QStringLiteral("rmweb"));
+            return;
+        }
         Q_EMIT self->urlChanged(QString::fromUtf8(u ? u : ""));
     }
 
@@ -1547,8 +1611,8 @@ private:
 
         const double dt   = self->m_lastBufUs ? (tIn - self->m_lastBufUs) / 1000.0 : 0.0;
         const double flip = self->m_pageUs    ? (tIn - self->m_pageUs)    / 1000.0 : -1.0;
-        qCDebug(lcEngine, "[t] frame %d @%.0fms  build=%.1fms  dt=%.1fms  flip-latency=%.1fms  sig=%08x %s  %dx%d",
-              self->m_frames, msSince(self->m_startUs), msSince(tIn), dt, flip, sig,
+        qCDebug(lcEngine, "[t] frame %d @%.0fms  dt=%.1fms  flip-latency=%.1fms  sig=%08x %s  %dx%d",
+              self->m_frames, msSince(self->m_startUs), dt, flip, sig,
               changed ? "NEW" : "dup", w, h);
         self->m_lastBufUs = tIn;
         if (!changed) return;   // nothing visually new — do not repaint the panel
@@ -1592,6 +1656,8 @@ private:
     std::vector<rmweb::Bookmark> m_bookmarks;
     std::vector<rmweb::HistoryEntry> m_history;
     rmweb::Settings m_settings;
+    std::string m_envUa;                    // RMWEB_UA override — runtime only, NEVER persisted (wins over m_settings.ua)
+    int m_envAutoRefreshSec = -1;           // RMWEB_AUTOREFRESH_MS override in seconds (-1 = unset) — runtime only, never persisted
     WebKitUserContentFilter *m_blockFilter = nullptr;  // compiled rule list (our ref) — settings toggle
     bool m_siteCssOn = false;          // kSiteCss currently in the UCM (mirrors settings after a toggle)
     std::vector<rmweb::ScrollEntry> m_scroll;       // per-URL reading positions (scroll.txt)
@@ -1640,7 +1706,7 @@ public:
             m_kbPressed = -1;                                // release the flashed key
             if (m_editing) schedule(/*guardTouch=*/false);   // flush address+keys without re-arming touch blank
         });
-        // Content present throttle: heavy SPAs (a heavy news portal etc.) emit NEW frames every ~300ms forever
+        // Content present throttle: heavy SPAs (heavy news SPAs etc.) emit NEW frames every ~300ms forever
         // (ads/tickers). Presenting each to e-ink locks the UI under continuous refresh + touch guard.
         // Keep the latest pixels, paint at most every kContentMinPresentMs unless forceNextContent().
         if (const int v = qEnvironmentVariableIntValue("RMWEB_CONTENT_PRESENT_MS"); v > 0)
@@ -1737,6 +1803,7 @@ public:
         return Address;
     }
     bool chromeOn()  const { return m_chromeOn; }
+    bool readerAvailable() const { return m_readerable || m_readerMode; }   // a Reader tap is a no-op otherwise
     bool isLoading() const { return m_loading; }
     bool isEditing() const { return m_editing; }
     // Tap on the X at the right end of the "Loading NN%" pill (rect stashed by drawLoadingBadge).
@@ -1794,6 +1861,7 @@ public:
     void beginEdit() {
         m_editing = true;
         m_editField = false; m_editMasked = false;
+        m_chromeWasOff = false;   // the address bar is only reachable with the chrome already on
         g_urlEditing.store(true, std::memory_order_release);
         m_editBuf.clear();   // start blank; m_addr stays as the "old" value until a successful Go
         m_kbShift = false; m_kbSym = false; rebuildKeys();   // always reopen on the plain letters page
@@ -1802,12 +1870,14 @@ public:
     }
     // Form-field entry (a text field on the page was tapped): the keyboard opens PRE-FILLED with the
     // field's current value; Go commits into the field (fieldTextEntered), Cancel discards.
-    // masked = password input -> the echo shows '*'. Chrome is summoned so the input line is visible.
+    // masked = password input -> the echo shows '*'. Chrome is summoned so the input line is visible
+    // (m_chromeWasOff remembers a hidden bar; endEdit restores it).
     // suggest = autofill prefill, used only when the field itself is empty (a learned value the
     // user can edit or accept with Go).
     void beginFieldEdit(const QString &value, bool masked, const QString &suggest) {
         m_editing = true;
         m_editField = true; m_editMasked = masked;
+        m_chromeWasOff = !m_chromeOn;           // remember — endEdit re-hides a summoned bar
         m_chromeOn = true;                      // the keyboard needs the bar (chrome may be hidden)
         g_urlEditing.store(true, std::memory_order_release);
         const bool useSuggest = value.isEmpty() && !suggest.isEmpty();   // prefill an EMPTY field only
@@ -1822,6 +1892,7 @@ public:
         m_kbFlush.stop();
         m_editing = false;
         m_editField = false; m_editMasked = false;
+        if (m_chromeWasOff) { m_chromeOn = false; m_chromeWasOff = false; }   // re-hide a summoned bar
         m_kbPressed = -1;
         g_urlEditing.store(false, std::memory_order_release);
         m_editBuf.clear();
@@ -1954,8 +2025,10 @@ private Q_SLOTS:
         if (wait > 0) QTimer::singleShot(wait, this, [this]{ releaseGate(); });
         else releaseGate();
         // B&W fast mode: the QPA's own present used its auto waveform; re-push the frame with the FAST
-        // MONO waveform so page turns develop immediately. frameSwapped fires after the QPA's present
-        // returned (its fb mutex is free); +0 ms puts us fully outside the render-loop tick regardless.
+        // MONO waveform so page turns develop immediately. Safe ONLY under QSG_RENDER_LOOP=basic
+        // (single-threaded, GUI-thread rendering): frameSwapped then fires after the QPA's present
+        // returned (its fb mutex is free), and +0 ms puts us fully outside the render-loop tick.
+        // main() refuses to wire this path (m_epd stays null) under any other render loop.
         if (m_bwFast && m_lastPresentHadContent && m_epd)
             QTimer::singleShot(0, this, [this]{ epdPresentFastIfOk(m_epd); });
     }
@@ -2315,6 +2388,7 @@ private:
     QString m_addr;
     bool m_editing = false;             // URL-entry mode: the on-screen keyboard is shown over the page
     bool m_editField = false;           // editing a PAGE form field (vs the address bar URL)
+    bool m_chromeWasOff = false;        // chrome visibility before a field edit summoned the bar (endEdit restores it)
     bool m_editMasked = false;          // the field is a password input -> echo '*'
     QString m_editBuf;                  // the URL currently being typed
     std::vector<rmweb::Key> m_keys;     // keyboard layout, rebuilt on page/Shift change (rebuildKeys)
@@ -2343,10 +2417,24 @@ public Q_SLOTS:
     void run() {
         int fd = openByName("Elan touch input");
         if (fd < 0) { qWarning("[touch] 'Elan touch input' node not found"); return; }
-        if (ioctl(fd, EVIOCGRAB, reinterpret_cast<void*>(1)) != 0)
-            qWarning("[touch] EVIOCGRAB failed (device held elsewhere)");
-        else
-            qInfo("[touch] grabbed 'Elan touch input' — reading finger touch directly");
+        // The grab is NOT optional: without it the epaper QPA's broken touch dispatch reaches
+        // WebKit and crashes it (see the class comment). Retry a few times (the launcher may
+        // still be releasing the device), then exit cleanly — the launcher restores xochitl.
+        bool grabbed = false;
+        for (int attempt = 1; attempt <= 5 && !grabbed; ++attempt) {
+            grabbed = ioctl(fd, EVIOCGRAB, reinterpret_cast<void*>(1)) == 0;
+            if (!grabbed && attempt < 5) {
+                qWarning("[touch] EVIOCGRAB failed (attempt %d/5, device held elsewhere) — retrying", attempt);
+                g_usleep(500000);   // 500 ms backoff; blocks only this thread
+            }
+        }
+        if (!grabbed) {
+            qWarning("[touch] EVIOCGRAB failed after 5 attempts — cannot run ungrabbed, exiting");
+            close(fd);
+            fflush(nullptr);
+            std::_Exit(1);   // clean exit code, no WebKit teardown (watchdog-safe)
+        }
+        qInfo("[touch] grabbed 'Elan touch input' — reading finger touch directly");
 
         // Protocol-B, first finger. ABS_MT_TRACKING_ID (contact start / -1 lift) arrives BEFORE the
         // POSITION_X/Y of the same SYN frame, so latching the swipe-start at TRACKING_ID time would capture
@@ -2432,6 +2520,7 @@ private:
         case Gesture::LongPress:
             if (editing) return;                                         // no peeking while the keyboard is up
             if (m_lastTapUs && now - m_lastTapUs < 250000) return;       // same anti-double as a tap
+            if (touchGuarded()) { qCDebug(lcEngine, "[touch] dropped (refresh guard)"); return; }
             m_lastTapUs = now;
             qCDebug(lcEngine, "[touch] long-press @ %d,%d", x, y);
             Q_EMIT longPress(x, y);
@@ -2452,6 +2541,8 @@ private:
 // scenegraph plugin libqsgepaper.so). Two uses: the RMWEB_MANUAL_PRESENT diagnostic (afterRendering hook — note that path
 // self-deadlocks the render loop's fb mutex, kept only for cadence experiments), and WpeView's
 // B&W fast mode (presentFast, called from frameSwapped +0 ms, where the mutex is already free).
+// The mutex-free guarantee comes from QSG_RENDER_LOOP=basic (single-threaded, GUI-thread rendering)
+// ONLY — main() checks the env and refuses to wire the presentFast hook under any other render loop.
 //   * fast grayscale  (Mono, QualityFast, NoRefresh)      — every frame, so a page turn shows immediately;
 //   * full colour flash (Color, QualityFull, CompleteRefresh) — every kFullEvery frames, develops colour +
 //     clears ghosting ("grayscale now, colour catches up"). Symbols verified in libqsgepaper.so via readelf.
@@ -2487,10 +2578,17 @@ public:
     bool ok() const { return m_fb != nullptr; }
     // B&W fast mode: force the fast MONO waveform for the frame the QPA just presented. Caller context:
     // WpeView's frameSwapped +0 ms — the render loop's fb mutex is released by then (calling this from
-    // afterRendering instead self-deadlocks; see class comment).
+    // afterRendering instead self-deadlocks; see class comment). The fast mono waveform leaves residue
+    // with each present, so ghosting builds up over successive turns — standard e-ink practice (xochitl
+    // does the same) is a periodic full flash to clear it: every kFastFullEvery content presents here.
     void presentFast() {
         if (!m_fb) return;
-        swap(QRect(0, 0, kPanelW, kPanelH), 1, 0);            // QualityFast, NoRefresh
+        if (++m_fastFrames >= kFastFullEvery) {
+            m_fastFrames = 0;
+            fullSwap();                                       // anti-ghost full flash
+        } else {
+            swap(QRect(0, 0, kPanelW, kPanelH), 0, 1, 0);     // Mono, QualityFast, NoRefresh
+        }
     }
     // Present what the scenegraph just rendered. Enum values: EPContentType{Mono=0,Color=1} (legacy ABI),
     // EPScreenMode{QualityFast=1,QualityFull=4}, UpdateFlag{NoRefresh=0,CompleteRefresh=1}.
@@ -2504,19 +2602,22 @@ public:
         const gint64 now = g_get_monotonic_time();
         if (m_lastPresentUs && (now - m_lastPresentUs) < 150000) return;   // >= ~150 ms between presents
         m_lastPresentUs = now;
-        const QRect full(0, 0, kPanelW, kPanelH);
         ++m_frames;
         const bool isFull = (m_fullEvery > 0 && (m_frames % m_fullEvery) == 0);
         qCDebug(lcEngine, "[present] #%d swap enter full=%d", m_frames, isFull);
-        if (isFull) swap(full, 4, 1);   // full quality + anti-ghost flash (develops colour)
-        else        swap(full, 1, 0);   // fast, no flash
+        if (isFull) fullSwap();                                     // full quality + anti-ghost flash (develops colour)
+        else        swap(QRect(0, 0, kPanelW, kPanelH), 0, 1, 0);   // Mono, fast, no flash
         qCDebug(lcEngine, "[present] #%d swap done", m_frames);
     }
 private:
+    // One full-quality flash: develops colour and clears accumulated ghosting. Shared by present()'s
+    // colour cadence and presentFast()'s anti-ghost cadence.
+    void fullSwap() { swap(QRect(0, 0, kPanelW, kPanelH), 1, 4, 1); }   // Color, QualityFull, CompleteRefresh
     // swap dispatch: current ABI (QRect, mode, flags) vs legacy (QRect, contentType, mode, flags).
-    void swap(const QRect &r, int mode, int flags) {
+    // The legacy ABI takes the content type — pass it through (a full flash is Color, not Mono).
+    void swap(const QRect &r, int contentType, int mode, int flags) {
         if (m_swap) m_swap(m_fb, r, mode, flags);
-        else m_swapLegacy(m_fb, r, 0 /*Mono*/, mode, flags);
+        else m_swapLegacy(m_fb, r, contentType, mode, flags);
     }
     typedef void *(*InstanceFn)();
     // ABI of EPFramebuffer::swapBuffers(...): the implicit `this` is the 1st arg; the enums and the
@@ -2524,6 +2625,8 @@ private:
     typedef void (*SwapFn)(void *self, QRect, int, int);
     typedef void (*SwapLegacyFn)(void *self, QRect, int, int, int);
     int m_fullEvery = 6;   // full colour flash every N presents (env RMWEB_FULL_EVERY; <=0 = grayscale only)
+    static const int kFastFullEvery = 100;   // fast-mono (bwFast) content presents between anti-ghost full flashes
+    int m_fastFrames = 0;                    // bwFast content presents since the last anti-ghost flash
     InstanceFn m_instance = nullptr;
     SwapFn m_swap = nullptr;
     SwapLegacyFn m_swapLegacy = nullptr;
@@ -2652,7 +2755,12 @@ int main(int argc, char **argv) {
             if (u.startsWith(QLatin1Char('/')) && u.size() > 1) {
                 view->forceNextContent();   // the find scroll/highlight must paint promptly
                 engine.findText(u.mid(1));
-            } else if (rmweb::looksLikeUrl(u.toStdString())) {
+            } else if (rmweb::looksLikeUrl(u.toStdString())
+                       && rmweb::isSafeLinkUrl(rmweb::normalizeUrl(u.toStdString()))) {
+                // Typed navigation is restricted to http(s): a hand-typed scheme'd non-web URL
+                // (file:// & co. — normalizeUrl passes scheme'd input through) becomes a search
+                // query instead. Internal file:// loads (start page, settings) never come
+                // through the address bar, so they are unaffected.
                 engine.loadUrl(u);
             } else {
                 view->forceNextContent();   // the results page must paint promptly
@@ -2684,7 +2792,13 @@ int main(int argc, char **argv) {
         // the panel by default; opt back into manual present only with RMWEB_MANUAL_PRESENT (diagnostic).
         static EpaperRefresh epaper;
         if (qgetenv("QT_QPA_PLATFORM") == "epaper" && epaper.init()) {
-            view->setEpaperRefresh(&epaper);   // B&W fast mode's fast-mono presents (frameSwapped path)
+            // presentFast (B&W fast mode) is only safe under the single-threaded basic render loop —
+            // the fb-mutex-free guarantee at frameSwapped (see the EpaperRefresh class comment).
+            // Under any other loop do NOT wire the hook: presents fall back to the QPA's own path.
+            if (qgetenv("QSG_RENDER_LOOP") == "basic")
+                view->setEpaperRefresh(&epaper);   // B&W fast mode's fast-mono presents (frameSwapped path)
+            else
+                qWarning("[refresh] QSG_RENDER_LOOP is not \"basic\" — fast-mono presents disabled");
             if (win && qEnvironmentVariableIsSet("RMWEB_MANUAL_PRESENT"))
                 QObject::connect(win, &QQuickWindow::afterRendering, win,
                                  [] { epaper.present(); }, Qt::DirectConnection);
@@ -2712,14 +2826,20 @@ int main(int argc, char **argv) {
                     case WpeView::Reload:  view->forceNextContent();
                         view->isLoading() ? engine.stopLoading() : engine.reload(); return;
                     case WpeView::Home:    view->forceNextContent(); engine.goHome();     return;
-                    case WpeView::Reader:  view->forceNextContent(); engine.toggleReader(); return;
+                    case WpeView::Reader:
+                        // Greyed-out button (page has no article and reader mode is off): dead tap.
+                        if (!view->readerAvailable()) return;
+                        view->forceNextContent(); engine.toggleReader(); return;
                     case WpeView::ZoomOut: view->forceNextContent(); engine.zoomBy(-1);   return;
                     case WpeView::ZoomIn:  view->forceNextContent(); engine.zoomBy(+1);   return;
                     case WpeView::Address: view->beginEdit();  return;   // open the on-screen URL keyboard
                     case WpeView::Bookmark: engine.toggleBookmark(); return;
                     case WpeView::Power:
-                        // Single tap exits. std::_Exit skips WebKit teardown SIGABRT (watchdog-safe).
-                        qInfo("[exit] power — leaving");
+                        // Single tap exits. Flush pending debounced profile writes first (bounded wait
+                        // on the worker — otherwise the last <=1.5 s of history/settings is lost), then
+                        // std::_Exit skips WebKit teardown SIGABRT (watchdog-safe).
+                        qInfo("[exit] power — flushing profile, leaving");
+                        engine.flushSync();
                         std::_Exit(0);
                     case WpeView::None:    break;             // tap not on the bar
                     default:              break;
@@ -2871,7 +2991,7 @@ int main(int argc, char **argv) {
         if (const int autoMs = qEnvironmentVariableIntValue("RMWEB_AUTOPAGE_MS"); autoMs > 0) {
             auto *t = new QTimer(&app);
             QObject::connect(t, &QTimer::timeout, &app, [&engine, dir = 1]() mutable {
-                engine.pageBy(dir > 0 ? kPageStepPx : -kPageStepPx);
+                engine.pageBy(dir);   // only the sign matters — the JS picks the actual step
                 dir = -dir;
             });
             t->start(autoMs);

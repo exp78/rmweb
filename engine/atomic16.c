@@ -1,7 +1,13 @@
 /* Minimal libatomic providing 16-byte (__int128) atomics for ARMv8.0 (cortex-a53,
  * no LSE) where GCC needs out-of-line helpers but the SDK ships no libatomic.
  * Lock-based implementation (a small spinlock pool keyed by address) -- correct
- * and sufficient for WebKit/libpas usage. ABI matches GCC's libatomic. */
+ * and sufficient for WebKit/libpas usage. ABI matches GCC's libatomic.
+ *
+ * TODO: the ABI surface here is incomplete -- __atomic_fetch_sub/and/or/xor/nand_16,
+ * __atomic_test_and_set_16, __atomic_clear_16 and __atomic_is_lock_free are missing.
+ * Today's WPE links fine, but a WebKit rebuild with different flags may hit undefined
+ * symbols at runtime -> add the remaining helpers here, or add a symbol check to the
+ * bundle step. */
 #include <stdint.h>
 #include <stddef.h>
 

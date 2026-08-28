@@ -9,7 +9,10 @@
  * between buffer-rendered signals. If the cadence here is fast (tens of ms) -> the app's threading is the
  * gate. If it is still ~6 s -> the gate is intrinsic to WPE/WebKit on this device.
  *
- * Build/run via scripts/build-wpe.sh cadence (see engine/render-wpe.incontainer.sh).
+ * Build (host, Docker — same container invocation pattern as scripts/build-wpe.sh's incon()):
+ *   docker run --rm -v "$PWD":/work -w /work rmweb-sdk bash -lc 'bash engine/cadence-build.incontainer.sh'
+ * -> build/wpe_cadence (aarch64), compile-only on the host; copy to the device and run it there
+ * (see engine/cadence-build.incontainer.sh).
  */
 #include <wpe/webkit.h>
 #include <wpe/wpe-platform.h>

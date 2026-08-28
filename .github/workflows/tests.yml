@@ -1,0 +1,19 @@
+name: tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # run-tests.sh drives clang++ (C++ unit tests), bash (shell tests) and shellcheck
+      # (lint of the shipped device shell); install the compiler + linter explicitly.
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y clang shellcheck
+      - name: Run host tests
+        run: bash scripts/run-tests.sh

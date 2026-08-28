@@ -13,12 +13,12 @@ cross-compile everything we deploy to the device.
   colima start --cpu 14 --memory 32 --disk 150 --vm-type vz --mount-type virtiofs
   ```
 - **`docker-buildx` is required** — the Dockerfile uses `RUN --mount=type=bind` (BuildKit) to install
-  the SDK without baking the 446 MB installer into an image layer.
+  the SDK without baking the 467 MB installer into an image layer.
 
 ## Build the image
 
 ```sh
-./scripts/fetch-sdk.sh                                   # downloads the ~446 MB SDK installer (gitignored)
+./scripts/fetch-sdk.sh                                   # downloads the ~467 MB SDK installer (gitignored)
 docker build -f toolchain/Dockerfile -t rmweb-sdk .      # installs the SDK into the image at /opt/rmpp-sdk
 ```
 

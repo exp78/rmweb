@@ -40,8 +40,9 @@ echo "case 3: do not restart xochitl we never stopped"
 setup; APP_MODE=clean PATH="$STUBS:$PATH" RMWEB_ROOT="$R" XOCHITL_ACTIVE=0 sh "$LAUNCHER"
 nowant "systemctl stop xochitl"; nowant "systemctl start xochitl"
 
-echo "case 4: lock contention refuses to start (no xochitl touch)"
+echo "case 4: lock contention with a LIVE rmweb-wpeqt refuses to start (no xochitl touch)"
 setup; mkdir "$R/.lock"
+make_stub pgrep 'echo 999999; exit 0'   # a live process holds the lock (high PID: kill must not hit a real proc)
 APP_MODE=clean PATH="$STUBS:$PATH" RMWEB_ROOT="$R" XOCHITL_ACTIVE=1 sh "$LAUNCHER"; rc=$?
 [ "$rc" = 1 ] || { echo "  FAIL: expected rc=1, got $rc"; fails=$((fails+1)); }
 nowant "systemctl stop xochitl"; nowant "systemctl start xochitl"
@@ -50,8 +51,39 @@ nowant "systemctl stop xochitl"; nowant "systemctl start xochitl"
 echo "case 5: TERM mid-run restores xochitl"
 setup; APP_MODE=hang PATH="$STUBS:$PATH" RMWEB_ROOT="$R" XOCHITL_ACTIVE=1 sh "$LAUNCHER" &
 LPID=$!; sleep 1; kill -TERM "$LPID" 2>/dev/null
-for _ in 1 2 3 4 5 6; do grep -q "systemctl start xochitl" "$STUBLOG" && break; sleep 0.5; done
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do grep -q "systemctl start xochitl" "$STUBLOG" && break; sleep 0.5; done
 wait "$LPID" 2>/dev/null
 want "systemctl start xochitl"
+
+echo "case 6: SIGHUP mid-run restores xochitl and releases the lock"
+setup; APP_MODE=hang PATH="$STUBS:$PATH" RMWEB_ROOT="$R" XOCHITL_ACTIVE=1 sh "$LAUNCHER" &
+LPID=$!; sleep 1; kill -HUP "$LPID" 2>/dev/null
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do grep -q "systemctl start xochitl" "$STUBLOG" && break; sleep 0.5; done
+wait "$LPID" 2>/dev/null
+want "systemctl start xochitl"
+[ -d "$R/.lock" ] && { echo "  FAIL: lock not released after HUP"; fails=$((fails+1)); }
+
+echo "case 7: lingering pids delay but do not skip the xochitl restart"
+setup
+# pgrep reports a live pid for the first two calls, then nothing: cleanup's wait loop must
+# ride it out and still reach reset-failed + start.
+make_stub pgrep 'c=$(cat "'"$STUBLOG"'.n" 2>/dev/null || echo 0); c=$((c+1)); echo "$c" > "'"$STUBLOG"'.n"; [ "$c" -le 2 ] && { echo 999999; exit 0; }; exit 1'
+APP_MODE=clean PATH="$STUBS:$PATH" RMWEB_ROOT="$R" XOCHITL_ACTIVE=1 sh "$LAUNCHER"
+want "systemctl reset-failed xochitl"; want "systemctl start xochitl"
+
+echo "case 8: oversized rmweb.log is rotated before launch"
+setup; dd if=/dev/zero of="$R/rmweb.log" bs=1048576 count=6 2>/dev/null
+APP_MODE=clean PATH="$STUBS:$PATH" RMWEB_ROOT="$R" XOCHITL_ACTIVE=1 sh "$LAUNCHER"
+logsize=$(wc -c < "$R/rmweb.log" | tr -dc '0-9')
+[ "$logsize" -lt 2097152 ] || { echo "  FAIL: log not rotated (size $logsize)"; fails=$((fails+1)); }
+grep -q "log rotated" "$R/rmweb.log" || { echo "  FAIL: no rotation note in log"; fails=$((fails+1)); }
+
+echo "case 9: stale lock (no live rmweb-wpeqt) is taken over"
+setup; mkdir "$R/.lock"   # default pgrep stub exits 1 -> no live process -> stale
+out=$(APP_MODE=clean PATH="$STUBS:$PATH" RMWEB_ROOT="$R" XOCHITL_ACTIVE=1 sh "$LAUNCHER" 2>&1); rc=$?
+[ "$rc" = 0 ] || { echo "  FAIL: expected rc=0, got $rc"; fails=$((fails+1)); }
+echo "$out" | grep -q "stale" || { echo "  FAIL: expected a stale-lock notice"; fails=$((fails+1)); }
+want "systemctl stop xochitl"; want "systemctl start xochitl"
+[ -d "$R/.lock" ] && { echo "  FAIL: lock not released"; fails=$((fails+1)); }
 
 if [ "$fails" = 0 ]; then echo "launcher_test: OK"; else echo "launcher_test: $fails FAIL"; exit 1; fi

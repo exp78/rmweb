@@ -21,7 +21,7 @@ Read `docs/superpowers/specs/2026-06-24-rmweb-browser-design.md` (design) and
   waveforms for us. Direct `/dev/dri/card0` DRM is a *later* upgrade (panel packing is undocumented).
 
 ## Architecture (5 isolated modules)
-`engine` (WPE→ARGB frames) · `display` (Qt6+epaper QPA) · `input` (evdev touch=event3/pen=event2) ·
+`engine` (WPE→ARGB frames) · `display` (Qt6+epaper QPA) · `input` (evdev touch=event3, finger only) ·
 `shell` (QML chrome) · `platform` (lifecycle: stop/restore xochitl, install, OTA hook).
 Data flow: input → shell → engine renders → ARGB SHM → display (QImage→QtQuick sw scene→epaper)→e-ink.
 
@@ -30,14 +30,13 @@ Reuse on-device (link dynamically): Qt 6 (system build — 6.8.2 pre-OTA, 6.10.3
 same-major BC keeps rmweb running), cairo, icu74, glib2.78, freetype, harfbuzz, openssl3,
 libcurl, libxml2, libpng/jpeg, libdrm, libudev/systemd. Bundle (build): WPE WebKit, libwpe/WPEBackend,
 Mesa(llvmpipe), libsoup3 (+sqlite3/libpsl/nghttp2), libwebp, libxkbcommon, libepoxy,
-gnutls/glib-networking, qtvirtualkeyboard (built against the SDK's Qt 6.8.2 — same-major plugins
-built with an older minor load fine under the newer system Qt).
+glib-networking (OpenSSL backend).
 
 ## Working agreement
 - Respond to the user in **Russian**.
 - Per phase: implement → **verify on device** → **code-review subagent** → **simplify subagent**.
-- Track work in the task list (phases 0→6). Use subagents for parallel/independent work.
-- Local git now; publish to GitHub later. Commit trailer: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
+- Track work in the task list (phases 0→7 done). Use subagents for parallel/independent work.
+- Public repo: github.com/exp78/rmweb. Commit trailer: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
 
 ## Build/deploy flow (Phase 0 ✅ verified 2026-06-24)
 `./scripts/fetch-sdk.sh` → `docker build -f toolchain/Dockerfile -t rmweb-sdk .` →
@@ -45,7 +44,7 @@ cross-compile C/C++ via `./scripts/build.sh '<cmd>'` or CMake via `./scripts/cma
 deploy+run via `./scripts/deploy.sh <bin>` (plain) or `./scripts/run-on-device.sh <bin> [args]` (stops xochitl,
 runs via epaper, restores xochitl). `hello` ran on the Paper Pro (aarch64, reMarkable Ferrari).
 
-## Display path (Phase 1 🔶 in progress — see docs/research-reuse.md)
+## Display path (Phase 1 ✅ done — see docs/research-reuse.md)
 - Present via **Qt6 QtQuick (QML) ONLY** (NOT QtWidgets/QRasterWindow — those never reach the panel).
 - Run with `QT_QPA_PLATFORM=epaper QT_QUICK_BACKEND=epaper`, **xochitl stopped**. Size the Window to
   `Screen.width/height` (official recipe — don't force geometry from C++ after creation).
@@ -96,13 +95,15 @@ facts, all verified on-device and written up in `docs/research/` (4 sourced docs
   miscompiles / state corrupts). So all JIT tiers are broken — likely a JSC codegen issue for this
   toolchain (cortex-a53 + `-mbranch-protection`/PAC, or pointer compression). Keep the interpreter; lighten
   heavy pages via content-blocking instead. Toggles: `RMWEB_JIT=1`, `RMWEB_JSC_OPTS="JSC_x=y ..."`.
-  **Measured 2026-07-26:** a heavy news portal on the interpreter — load finished @40s (network FINE, WPENetworkProcess
+  **Measured 2026-07-26:** a heavy SPA news site on the interpreter — load finished @40s (network
+  FINE, WPENetworkProcess
   idle), then WPEWebProcess pegged 93–98% CPU for 150s straight and the page NEVER hydrates past its SSR
   skeleton. Wikipedia-class (server-rendered, light JS) works great. Refined with `RMWEB_NOJS=1` (diag
   lever, disables JavaScript entirely — ours too): with JS OFF the load STILL wasn't done at 80s
   ("Loading 65%" — the page drags megabytes of assets through the USB link) and CPU stayed ~86% —
   so the cost is three-way: network volume, CSS/layout/paint pipeline, JS execution. **The working
-  lever is `RMWEB_UA=mobile`:** a heavy news portal with the iPhone UA serves SSR HEADLINES (readable news at ~80s,
+  lever is `RMWEB_UA=mobile`:** the same site with the iPhone UA serves SSR HEADLINES (readable news
+  at ~80s,
   no hydration needed) instead of the desktop JS-app skeleton. Surfaced as a start-page Settings row
   "Sites: mobile (lighter)/desktop" (`rmweb:toggle-ua` — flips `settings.ua`, applies live via
   `webkit_settings_set_user_agent(..., nullptr|kMobileUA)`, persists). ua=mobile is ON in this device's
@@ -118,7 +119,8 @@ to go elsewhere; the white-out still hides the stale page, so typing happens ove
 backdrop (verified: blank.html verdict → RMWEB_DEBUG_KB → grab shows chrome + white + keyboard).
 **Auto-refresh guard (2026-07-26):** a same-URL navigation we didn't initiate (meta refresh / JS
 location.reload / href=self) is throttled to one per `RMWEB_AUTOREFRESH_MS` (default 15000) anchored
-at LOAD_FINISHED — render time doesn't eat the pause — and blocked OUTRIGHT in reader mode (a heavy news portal's
+at LOAD_FINISHED — render time doesn't eat the pause — and blocked OUTRIGHT in reader mode (the heavy
+news site's
 auto-refresh used to yank the reader view mid-article after an 80 s re-render). `m_expectUserNav`
 (set by reload()/loadUrl() = toolbar Reload, keyboard Go) always passes; link/back-forward types are
 exempt. Verified on-device with a meta-refresh=5s page: auto fire at 5s → `[guard] auto-refresh
@@ -139,7 +141,10 @@ Phase 4 (scope A) shipped the reading shell: B2 chrome (hand-painted into the WP
 reader mode (Mozilla Readability), on-screen URL keyboard, page/reader zoom, tap-to-follow-links, loading +
 "couldn't render" indicators, mobile-UA-as-opt-in + readability CSS. Then code-review + simplify checkpoints.
 
-Phase 5 ✅ DONE (verified on device 2026-07-01). **Phase 2 Engine Hardening (2026-07-09):** JIT stabilized (opt-in baseline JIT: `RMWEB_JIT=1` → `JSC_useBaselineJIT=1 JSC_usePollingTraps=1 JSC_useDFGJIT=0 JSC_useFTLJIT=0`, interpreter stays default; diagnostic `RMWEB_JSC_OPTS`); WebProcess crash recovery with exponential-backoff reload (`onWebProcessTerminated`, main.cpp:767); richer `crashHandler` logging PID/TID; touch-guard default raised to 450 ms (`touchGuardTailUs`, `RMWEB_TOUCH_GUARD_MS`); `seq_cst` atomics; present/buffer null-checks; perf env (`RMWEB_SKIA_THREADS`, `WEBKIT_FORCE_VBLANK_TIMER=1`). Known doc bug: `Q_LOGGING_CATEGORY(lcEngine)` is declared (main.cpp:62) but **never used** — all logging is plain `qInfo`/`qWarning`; its comment ("filter with WEBKIT_DEBUG=rmweb.engine") is wrong — Qt logging categories are filtered via `QT_LOGGING_RULES` (e.g. `QT_LOGGING_RULES=rmweb.engine.debug=true`).
+Phase 5 ✅ DONE (verified on device 2026-07-01). **Phase 2 Engine Hardening (2026-07-09):** JIT stabilized (opt-in baseline JIT: `RMWEB_JIT=1` → `JSC_useBaselineJIT=1 JSC_usePollingTraps=1 JSC_useDFGJIT=0 JSC_useFTLJIT=0`, interpreter stays default; diagnostic `RMWEB_JSC_OPTS`); WebProcess crash recovery with exponential-backoff reload (`onWebProcessTerminated`, main.cpp:767); richer `crashHandler` logging PID/TID; touch-guard default raised to 450 ms (`touchGuardTailUs`, `RMWEB_TOUCH_GUARD_MS`); `seq_cst` atomics; present/buffer null-checks; perf env (`RMWEB_SKIA_THREADS`, `WEBKIT_FORCE_VBLANK_TIMER=1`). Logging: `Q_LOGGING_CATEGORY(lcEngine)`
+(main.cpp:65) feeds ~24 `qCDebug` call-sites; the category is runtime-OFF by default and enabled via
+`QT_LOGGING_RULES` (e.g. `QT_LOGGING_RULES=rmweb.engine.debug=true` — forwarded by
+scripts/run-wpeqt-on-device.sh).
 
 **Phase 6 Batches 3/4 — claims NOT confirmed by code (corrected 2026-07-19).** These entries claimed dark mode (`RMWEB_READER_THEME`), typography presets (serif/sans, line-height/width), smooth auto-scroll with tap-to-pause, article export, night mode, focus mode (chrome auto-hide), style presets (News/Book/Academic/Minimal), a reading-progress bar with time estimate, per-URL scroll-position restore, and Phase 7 hooks (tab stubs, form/login detection signals, download hooks). Grep over `engine/wpeqt/` shows **none of these exist**: the reader stylesheet is a single hardcoded light theme (`kReaderCss`, main.cpp:173 — it does include table/code/img rules); the only reader tuning knob is `RMWEB_READER_FONT` (font size, main.cpp:222); `RMWEB_AUTOPAGE_MS` is a *diagnostic* auto-page driver (main.cpp:1712), not a user-facing auto-scroll; `RMWEB_READER_DIR` is the directory the vendored Readability.js is *loaded from* (main.cpp:164), not an export target. The only progress UI is the "Loading NN%" badge driven by WebKit's estimated-load-progress (main.cpp:1098). The original claims were erroneous; see `docs/review-2026-07-18.md` HIGH#1.
 
@@ -240,17 +245,18 @@ build/verify/<step>.{png,log} with log-grep hints. Verification fixes (c2d6c90):
 RMWEB_DEBUG_SEARCH diag path now mirrors urlEntered: setAddr(term) + hide progress);
 RMWEB_DEBUG_FORM feeds the learner (`engine.learnFieldText` after `setFieldText`). Slow-site false
 positive fixed (2026-07-26): the blank-check timer (`scheduleRenderCheck`, 13 s from LOAD_STARTED) used
-to judge the page while a slow load was STILL in progress (a heavy news portal: load finished @34s, verdict @31s →
+to judge the page while a slow load was STILL in progress (heavy SPA: load finished @34s, verdict @31s →
 bogus "Couldn't display the page"); it now RE-ARMS itself while `m_loadInProgress` (set at
 LOAD_STARTED, cleared at LOAD_FINISHED / non-cancelled load-failed) and only judges a finished load —
-verified on a heavy news portal (`[render] nonWhite=912 blank=0` after finish, no notice over the site skeleton).
+verified on that site (`[render] nonWhite=912 blank=0` after finish, no notice over the site skeleton).
 The notice itself is now a PAGE state, not an overlay: `paint()` whites out the stale frame when
 `m_renderFailed` (before: the box floated over the previous site → "notice + half-rendered page" mess).
 Regression step in verify-on-device.sh [8/9]: blank.html must yield the clean white notice. **Verify gotchas:**
 probe coords = css px * dpr * **zoom** — the script pins `zoom=1.0` in the device profile first (a
 leftover zoom silently shifts every hit target); the auto-pager ALTERNATES direction (down @4s,
 up @8s) so grab @6s, not ≥8s; a grab can come out pure black mid-refresh (transient — just retake);
-qCDebug(lcEngine) lines ([t] pageBy / page JS done sy=) are compiled OUT of the device log — autopage
+qCDebug(lcEngine) lines ([t] pageBy / page JS done sy=) are runtime-OFF by default in the device log
+(enable via `QT_LOGGING_RULES`) — autopage
 proof is the grab, not the log. Start-page CSS sharing stayed deferred (touch geometry + visuals,
 must be eyeballed).
 
@@ -258,9 +264,9 @@ must be eyeballed).
 CSS spinner/blink, six cosmetic ad selectors, 2400 px image, wide table): animations frozen, ALL ad
 containers collapsed, wide media/tables fit — the calm-down kit + css-display-none work as designed.
 Live sites with blocking on: wikipedia, news.ycombinator.com and a heavy news portal render fully
-(the portal: nonWhite=1057 @12 s). **a heavy news portal** with desktop UA still paints nothing within the 13 s verdict window
+(the portal: nonWhite=1057 @12 s). **A heavy SPA news site** with desktop UA still paints nothing within the 13 s verdict window
 (the "Couldn't display" notice fires correctly — not a css-display-none casualty; SITECSS=0 blanks
-too). ~~Sustained news-portal loads hard-reboot the device (OOM)~~ — **RETRACTED**: the three reboots during
+too). ~~Sustained heavy-site loads hard-reboot the device (OOM)~~ — **RETRACTED**: the three reboots during
 this survey were my own test harness. Journal evidence: each ends with `/usr/sbin/rm-emergency.sh
 invoked` right after `xochitl.service: Failed with result 'start-limit-hit'` — the
 xochitl.service.d override maps OnFailure=emergency.target → rm-emergency.service → clean reboot

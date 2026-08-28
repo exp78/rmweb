@@ -27,6 +27,7 @@ int main() {
     TmpDir tmp;
     const std::string dir = tmp.path;
     CHECK(!dir.empty());
+    if (dir.empty()) return 1;   // mkdtemp failed — continuing would write into "/history.txt" etc.
 
     // toggleBookmark + isBookmarked
     std::vector<Bookmark> bm;
@@ -69,6 +70,7 @@ int main() {
     // corrupt/missing -> defaults
     Settings s3 = loadSettings(dir + "/missing-subdir");
     CHECK(s3.zoom == 1.0); CHECK(s3.readerFont == 30); CHECK(s3.ua.empty());
+    CHECK(s3.block);                                   // no settings file -> content blocker defaults on
 
     // atomicWrite: a failed write returns false and must NOT clobber an existing good file
     CHECK(!detail::atomicWrite(dir + "/missing/x.txt", "data"));   // missing parent dir
@@ -198,6 +200,25 @@ int main() {
     Settings sa4; sa4.autofillName = "a\tb\nc";
     CHECK(saveSettings(dir, sa4));
     CHECK(loadSettings(dir).autofillName == "a b c");             // control chars sanitized
+
+    // settings: block / siteCss / bwFast / autoRefreshSec round-trip + defaults
+    Settings sb; sb.block = false; sb.siteCss = false; sb.bwFast = true; sb.autoRefreshSec = 60;
+    CHECK(saveSettings(dir, sb));
+    Settings sb2 = loadSettings(dir);
+    CHECK(!sb2.block); CHECK(!sb2.siteCss); CHECK(sb2.bwFast); CHECK(sb2.autoRefreshSec == 60);
+    CHECK(detail::atomicWrite(dir + "/settings.txt", "zoom=1.0\n"));
+    Settings sb3 = loadSettings(dir);
+    CHECK(sb3.block); CHECK(sb3.siteCss); CHECK(!sb3.bwFast);     // absent keys -> defaults
+    CHECK(sb3.autoRefreshSec == 15);
+
+    // loadSettings snaps autoRefreshSec to the fixed valid set {-1,0,15,30,60} (the settings page
+    // cycles through it); anything else falls back to the 15 s default
+    CHECK(detail::atomicWrite(dir + "/settings.txt", "autoRefreshSec=7\n"));
+    CHECK(loadSettings(dir).autoRefreshSec == 15);                // off-set value -> snapped
+    for (int v : {-1, 0, 60}) {
+        CHECK(detail::atomicWrite(dir + "/settings.txt", "autoRefreshSec=" + std::to_string(v) + "\n"));
+        CHECK(loadSettings(dir).autoRefreshSec == v);             // valid set members kept as-is
+    }
 
     // Duplicate URLs in the store (hand-edited file): loadBookmarks keeps both — no dedupe on
     // load — and toggleBookmark removes only the FIRST match. Current behavior, pinned here.
