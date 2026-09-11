@@ -15,11 +15,13 @@ A native **WPE WebKit** web browser for the **reMarkable Paper Pro** e-ink table
 > stylesheet** (kills CSS animations/transitions/smooth scrolling), an **auto-refresh guard** that
 > throttles pages reloading themselves while you read, a loading pill with progress and a **stop
 > button**, persistent cookies (sqlite — logins survive relaunch), per-URL scroll restore, in-page
-> find (`/text` in the address bar), downloads to `~/Downloads`, form filling (tap a text field →
+> find (`/text` in the address bar), downloads to `~/Downloads` with **PDF/EPUB landing straight
+> in the reMarkable library** (visible after quit), form filling (tap a text field →
 > on-screen keyboard with its current value, password masked; tap toggles checkbox/radio and cycles
 > selects), learn-as-you-type autofill for email/username/name fields (passwords are never
 > learned), a per-host password store (obfuscated — NOT encrypted), styled error pages with Retry,
-> a TLS padlock, address-bar search over local bookmarks+history (with a web-search link),
+> a TLS padlock, a per-host **continue-anyway for certificate errors** (captive portals on
+> hotel/cafe wifi; session-scoped), address-bar search over local bookmarks+history (with a web-search link),
 > long-press link peek, a **B&W fast mode** (grayscale present + the fast mono waveform) and a
 > **mobile/desktop UA toggle** (both in Settings), a KOReader-style reading-progress bar, a coherent **Lucide icon set** drawn
 > as vectors (crisp on e-ink, font-independent), a home-screen icon in the stock launcher (XOVI +

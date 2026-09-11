@@ -400,3 +400,13 @@ xochitl restarts WITH XOVI.
 **Phase 7 Batch 2 — NOT IMPLEMENTED (corrected 2026-07-19).** This entry claimed a password manager (XOR+base64 storage in profile.h), context-aware autofill, an on-device JS console, user/content scripts, full history search with filters, plus "final polish" (gesture tuning, error pages, performance dashboard) and a "v0.8.0 release-ready, No TODOs, all features verified" state. **None of these features exist**: `engine/wpeqt/profile.h` stores only bookmarks/history/settings, and `WebKitUserContentManager` is used solely for the content-blocking filter and one built-in site stylesheet (`kSiteCss`, main.cpp:275-281) — no user scripts. Form filling beyond that audit's "stock WebKit behaviour" has since been implemented
 properly (see the Phase 7 Batch 2 form-filling entry above, 2026-07-25); the rest of the Batch 2 claims
 stay erroneous, and the project is a **beta, not release-ready**. Full audit: `docs/review-2026-07-18.md` (HIGH#1).
+
+**2026-09-11 — downloads → library + TLS continue-anyway (v0.9.2 candidates, NOT device-verified yet):**
+PDF/EPUB downloads now self-register in the xochitl store (`engine/wpeqt/library.h`: UUIDv4 stem +
+`<uuid>.{pdf,epub,metadata,content}` — metadata last, it's the registration marker; xochitl rebuilds
+the rest on its post-quit restart). Timestamps are ms-epoch strings; `visibleName` = basename w/o ext.
+TLS: `load-failed` gets TLS errors with domain `g-tls-error-quark` (WPE 2.48.5 has NO WEBKIT_TLS_ERROR
+quark — verified against the source tree, not the docs); detected via quark-name substring. The error
+page offers `rmweb:tls-continue` which whitelists ONLY the current page's own host in a session-scoped
+`m_tlsBypass` set (the command carries no host, so a foreign page can't whitelist another origin), then
+re-navigates via `load_uri` with `m_expectUserNav` armed (the auto-refresh guard would eat it otherwise).

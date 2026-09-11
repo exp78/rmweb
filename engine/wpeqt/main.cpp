@@ -45,6 +45,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <cstdlib>
 #include <cstdio>
@@ -59,6 +60,7 @@
 #include "tapzone.h"   // pure tap-zone classifier (unit-tested in tests/tapzone_test.cpp)
 #include "keyboard.h"  // pure on-screen-keyboard layout + hit-test (unit-tested in tests/keyboard_test.cpp)
 #include "profile.h"   // persistent store: bookmarks / history / settings
+#include "library.h"   // PDF/EPUB download -> xochitl library import (tests/library_test.cpp)
 #include "startpage.h" // start-page HTML generator
 #include "fieldprobe.h"// tap-probe result protocol + JS string escaping (tests/fieldprobe_test.cpp)
 #include <ctime>
@@ -380,10 +382,31 @@ public Q_SLOTS:
             WebKitURIRequest* req = webkit_navigation_action_get_request(act);
             const char* uri = webkit_uri_request_get_uri(req);
             if (uri && std::string(uri).rfind("rmweb:", 0) == 0) {
+                const char *cur = self->m_view ? webkit_web_view_get_uri(self->m_view) : nullptr;
+                const std::string cmd = std::string(uri).substr(6);   // after "rmweb:"
+                // tls-continue is the ONE command honoured OFF the start pages: it comes from our
+                // TLS error page (load_alternate_html — neither home nor settings). Security: the
+                // command carries no host of its own — the bypass can only ever cover the host of
+                // the CURRENT page, so a page can never whitelist an arbitrary origin. https only,
+                // session only (m_tlsBypass lives in RAM), then a real reload (load_uri, not reload:
+                // after load_alternate_html a reload can just bring the error page back).
+                if (cmd == "tls-continue") {
+                    const std::string curS = cur ? cur : "";
+                    const std::string host = rmweb::hostFromUrl(curS);
+                    if (curS.rfind("https://", 0) == 0 && !host.empty() && self->m_view) {
+                        self->m_tlsBypass.insert(host);
+                        qWarning("[tls] bypassing certificate errors for %s (this session only)", host.c_str());
+                        self->m_expectUserNav = true;   // same-URL reload — exempt from the auto-refresh guard
+                        webkit_web_view_load_uri(self->m_view, cur);
+                    } else {
+                        qWarning("[tls] tls-continue ignored (current: %s)", cur ? cur : "(none)");
+                    }
+                    webkit_policy_decision_ignore(dec);
+                    return TRUE;
+                }
                 // rmweb: commands mutate the profile — honour them ONLY from our own generated pages
                 // (file://...home.html / settings.html). Any other page navigating here is a confused-deputy
                 // attempt (location.href='rmweb:clear-history'): log it and swallow the command.
-                const char *cur = self->m_view ? webkit_web_view_get_uri(self->m_view) : nullptr;
                 const std::string home = "file://" + self->m_profileDir + "/home.html";
                 const std::string settingsPage = "file://" + self->m_profileDir + "/settings.html";
                 const bool fromHome = cur && std::string(cur) == home;
@@ -394,7 +417,6 @@ public Q_SLOTS:
                     // NB: [=], not [self, fromSettings] — a comma in the capture list would land at
                     // G_CALLBACK's paren depth 1 and split the macro into "2 arguments".
                     auto done = [=]{ if (fromSettings) self->openSettings(); else self->goHome(); };
-                    const std::string cmd = std::string(uri).substr(6);   // after "rmweb:"
                     if (cmd == "clear-history") {
                         self->m_history.clear();
                         rmweb::saveHistory(self->m_profileDir, self->m_history);
@@ -1357,11 +1379,28 @@ private:
         g_signal_connect(dl, "finished", G_CALLBACK(+[](WebKitDownload *d, gpointer data) {
             auto *self = static_cast<WpeEngine*>(data);
             std::string shown = "Download complete";
+            std::string destPath;
             if (const gchar *dest = webkit_download_get_destination(d)) {
-                std::string s = dest;
+                destPath = dest;
+                std::string s = destPath;
                 const size_t p = s.find_last_of('/');
                 if (p != std::string::npos) s = s.substr(p + 1);
                 if (!s.empty()) shown = "Saved " + s;
+            }
+            // A PDF/EPUB download ALSO goes into the xochitl library (visible there once xochitl
+            // restarts). The raw file stays in Downloads either way (reachable over ssh); an
+            // import failure keeps the plain "Saved ..." toast.
+            if (rmweb::isDocumentFile(destPath)) {
+                std::string name = destPath.substr(destPath.find_last_of('/') + 1);
+                const size_t dot = name.find_last_of('.');
+                if (dot != std::string::npos) name.resize(dot);   // visibleName = no extension
+                std::string ierr;
+                if (rmweb::importDocument(rmweb::xochitlDir(), destPath, name, &ierr)) {
+                    shown = "Added to your library: " + name;
+                    qInfo("[library] imported %s", destPath.c_str());
+                } else {
+                    qWarning("[library] import failed for %s: %s", destPath.c_str(), ierr.c_str());
+                }
             }
             qInfo("[dl] finished: %s", shown.c_str());
             Q_EMIT self->notice(QString::fromStdString(shown));
@@ -1480,9 +1519,26 @@ private:
         }
     }
     static gboolean onTlsError(WebKitWebView *, gchar *failing_uri, GTlsCertificate *,
-                               GTlsCertificateFlags, gpointer) {
+                               GTlsCertificateFlags, gpointer data) {
+        auto *self = static_cast<WpeEngine*>(data);
+        // Per-host session bypass (whitelisted via the TLS error page's "Continue anyway").
+        const std::string host = rmweb::hostFromUrl(failing_uri ? failing_uri : "");
+        if (!host.empty() && self->m_tlsBypass.count(host)) {
+            qWarning("[tls] cert error for %s — proceeding (per-host session bypass)", host.c_str());
+            return TRUE;
+        }
         qWarning("[tls] cert error: %s", failing_uri ? failing_uri : "?");
         return FALSE;   // don't proceed — WebKit fails the load
+    }
+    // WPE 2.48 has no dedicated TLS error domain for load-failed (verified in the source tree: the
+    // GError arrives with the network layer's own quark, "g-tls-error-quark") — detect by quark
+    // name, case-insensitively.
+    static bool isTlsError(const GError *error) {
+        const char *d = (error && error->domain) ? g_quark_to_string(error->domain) : nullptr;
+        if (!d) return false;
+        for (const char *p = d; p[0] && p[1] && p[2]; ++p)
+            if ((p[0] | 0x20) == 't' && (p[1] | 0x20) == 'l' && (p[2] | 0x20) == 's') return true;
+        return false;
     }
     // A navigation failed (DNS, refused, timeout — common on the flaky link): replace the dead end
     // with a styled error page (load_alternate_html does NOT add a history entry; the address bar
@@ -1497,12 +1553,15 @@ private:
         qWarning("[nav] load failed: %s (%s)", uri, (error && error->message) ? error->message : "?");
         if (!uri[0] || !rmweb::isSafeLinkUrl(uri))   // only http(s) gets an error page
             return FALSE;
-        const std::string html = buildErrorPage(uri, (error && error->message) ? error->message : "unknown error");
+        const std::string html = buildErrorPage(uri, (error && error->message) ? error->message : "unknown error",
+                                                isTlsError(error));
         webkit_web_view_load_alternate_html(view, html.c_str(), uri, nullptr);
         return TRUE;
     }
     // Error page in the start page's design language (JS-free, e-ink-safe). Retry = the failed URL.
-    static std::string buildErrorPage(const std::string &uri, const std::string &msg) {
+    // A TLS failure additionally offers the captive-portal escape: whitelist THIS host for the
+    // session and retry (rmweb:tls-continue — see the decide-policy command handler).
+    static std::string buildErrorPage(const std::string &uri, const std::string &msg, bool tls) {
         return
             "<!DOCTYPE html><html><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width,initial-scale=1'><title>rmweb</title><style>"
@@ -1516,7 +1575,12 @@ private:
             "font-size:32px;font-weight:700;color:#000;text-decoration:none;}"
             "</style></head><body>"
             "<div class='glyph'>!</div><h1>Couldn't load the page</h1><div class='u'>" + rmweb::htmlEscape(uri) +
-            "</div><div class='m'>" + rmweb::htmlEscape(msg) + "</div>"
+            "</div><div class='m'>" + rmweb::htmlEscape(msg) + "</div>" +
+            (tls ? std::string("<div class='m'>The certificate could not be verified — this is common on "
+                               "hotel/cafe wifi sign-on pages.</div>"
+                               "<a class='retry' href='rmweb:tls-continue'>Continue anyway "
+                               "(this site only, this session only)</a> ")
+                 : std::string()) +
             "<a class='retry' href='" + rmweb::htmlEscape(uri) + "'>Try again</a>"
             "</body></html>";
     }
@@ -1639,6 +1703,8 @@ private:
     int m_reloadAttempts = 0; // WebProcess-crash auto-reload budget (reset on a successful load)
     bool m_loadInProgress = false;   // LOAD_STARTED..FINISHED/failed — the blank-check re-arms while true
     bool m_expectUserNav = false;    // UI-initiated navigation (reload/Go) — exempt from the auto-refresh guard
+    std::set<std::string> m_tlsBypass;   // hosts whose cert errors the user chose to ignore (session-only,
+                                         // worker thread only; populated by rmweb:tls-continue)
     gint64 m_lastLoadFinishedUs = 0; // auto-refresh throttle anchor (set at LOAD_FINISHED)
     guint m_loadGen = 0;           // bumped on each load start -> a stale render-check (grace timer) is skipped
     gint64 m_loadStartUs = 0;      // monotonic time of the current LOAD_STARTED (for [perf] ms offsets)
