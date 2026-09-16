@@ -201,14 +201,15 @@ int main() {
     CHECK(saveSettings(dir, sa4));
     CHECK(loadSettings(dir).autofillName == "a b c");             // control chars sanitized
 
-    // settings: block / siteCss / bwFast / autoRefreshSec round-trip + defaults
-    Settings sb; sb.block = false; sb.siteCss = false; sb.bwFast = true; sb.autoRefreshSec = 60;
+    // settings: block / siteCss / bwFast / textBoost / autoRefreshSec round-trip + defaults
+    Settings sb; sb.block = false; sb.siteCss = false; sb.bwFast = true; sb.textBoost = false; sb.autoRefreshSec = 60;
     CHECK(saveSettings(dir, sb));
     Settings sb2 = loadSettings(dir);
-    CHECK(!sb2.block); CHECK(!sb2.siteCss); CHECK(sb2.bwFast); CHECK(sb2.autoRefreshSec == 60);
+    CHECK(!sb2.block); CHECK(!sb2.siteCss); CHECK(sb2.bwFast); CHECK(!sb2.textBoost); CHECK(sb2.autoRefreshSec == 60);
     CHECK(detail::atomicWrite(dir + "/settings.txt", "zoom=1.0\n"));
     Settings sb3 = loadSettings(dir);
     CHECK(sb3.block); CHECK(sb3.siteCss); CHECK(!sb3.bwFast);     // absent keys -> defaults
+    CHECK(sb3.textBoost);                                         // textBoost defaults ON
     CHECK(sb3.autoRefreshSec == 15);
 
     // loadSettings snaps autoRefreshSec to the fixed valid set {-1,0,15,30,60} (the settings page

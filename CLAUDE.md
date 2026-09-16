@@ -424,3 +424,21 @@ NEVER painted content (`m_firstContentLogged`). Before, a single transient white
 interrupted` (WebKit policy error 102 — a superseded/download-converted load, not a failure) is now
 swallowed like CANCELLED instead of showing an error page (double-tapped Go used to fake "site won't
 load"; downloads flashed an error page under the toast). Frame-dump debug: RMWEB_DUMP_FRAMES=/dir.
+**2026-09-16 — e-ink colour quality lessons (device-verified on a heavy news SPA + synthetic probes):**
+- **The QPA's auto waveform underdrives black/colour on our frequent small presents** — a pure-#000
+  image area looked pale grey on the panel while the engine frame was perfect (verified via the new
+  RMWEB_DUMP_FRAMES PNG dump). A forced full-quality pass (RMWEB_FULL_PRESENT=1 diagnostic) develops it
+  fully — same depth as xochitl. Env knobs EPFB_NO_AUTO_WF / WEBKIT_FORCE_VBLANK_TIMER=0 change NOTHING.
+- **Fix shipped: settle flash** — re-armed by every content present, fires one full-quality develop
+  after ~1.5 s of quiet (RMWEB_SETTLE_FULL_MS; 0=off). Skipped in bwFast (its own cadence) and while
+  typing; retries at 500 ms while a present is in flight. Fast turns stay fast, quality catches up
+  when you stop — same trade-off as xochitl/KOReader periodic full refresh.
+- **Text paleness is mostly anti-aliasing edges** (thin strokes = mostly mid-gray edge pixels; engine
+  body pixels measured luma≈0). Fix shipped: **Text boost** (settings toggle, default ON, gamma 1.7 on
+  luminance with hue preserved, RMWEB_TEXT_GAMMA tunes) — visibly darker text on ACeP.
+- **qEnvironmentVariableIntValue returns 0 for an UNSET var** — `v >= 0` guards self-disable the
+  feature by default. Always qEnvironmentVariableIsSet first (bug cost one build cycle).
+- **WpeView only has a forward decl of EpaperRefresh** — call it through the epd*IfOk() wrappers
+  defined below the class, or the build fails on the incomplete type.
+- Gotcha recorded earlier but re-confirmed twice today: the epaper present deadlocks if overlapped
+  (gate + dwell + fallback release is load-bearing), and WebKit emits failed→finished for one download.
