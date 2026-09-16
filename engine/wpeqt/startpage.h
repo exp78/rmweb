@@ -213,6 +213,9 @@ inline std::string buildSettingsPage(const Settings& s) {
     row(icon::contrast, "rmweb:toggle-bwfast", "B&amp;W fast mode", onoff[s.bwFast ? 1 : 0]);
     h += "<div class='hint'>Grayscale pages: the panel's fast monochrome update develops them fully "
          "(colour needs the slow full flash). Best for heavy reading sessions.</div>";
+    row(icon::contrast, "rmweb:toggle-textboost", "Darken text (contrast boost)", onoff[s.textBoost ? 1 : 0]);
+    h += "<div class='hint'>Colour mode only: pushes pale anti-aliased text toward black. "
+         "Off in B&amp;W fast mode (that path boosts on its own).</div>";
     h += "<h2>Sites</h2>";
     row(icon::smartphone, "rmweb:toggle-ua", "Site version", s.ua == "mobile" ? "mobile (lighter)" : "desktop");
     row(icon::shield, "rmweb:toggle-block", "Ad &amp; tracker blocking", onoff[s.block ? 1 : 0]);

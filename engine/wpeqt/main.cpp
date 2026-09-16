@@ -273,6 +273,7 @@ Q_SIGNALS:
     void renderFailed(bool failed);                // load finished but the page rendered ~blank (heavy SPA)
     void renderingChanged(bool on);                // true at LOAD_FINISHED for http/https (compositing); false at first-content or fail
     void bwFastChanged(bool on);                   // settings-page B&W fast mode toggle -> view render path
+    void textBoostChanged(bool on);                // settings-page text darkening toggle -> view render path
     void linkMissed();                             // a content tap hit no link -> GUI falls back to chrome toggle
     void bookmarkedChanged(bool on);               // current page bookmark state changed
     void notice(const QString &text);              // transient toast in the chrome (find results, downloads)
@@ -302,6 +303,7 @@ public Q_SLOTS:
         Q_EMIT bwFastChanged(m_settings.bwFast);   // settings load HERE (start), so the initial state
                                                    // reaches the view via the signal — never read
                                                    // m_settings from main() (that runs before start).
+        Q_EMIT textBoostChanged(m_settings.textBoost);   // same delivery path as bwFastChanged
         // RMWEB_READER_FONT env wins over persisted value (same guard as ctor, re-applied after settings load).
         if (const char *e = getenv("RMWEB_READER_FONT")) { const int v = atoi(e); if (v >= 14 && v <= 96) m_readerFont = v; }
 
@@ -487,6 +489,9 @@ public Q_SLOTS:
                         self->goHome();
                     } else if (cmd == "toggle-bwfast") {
                         self->toggleBwFastSetting();
+                        done();
+                    } else if (cmd == "toggle-textboost") {
+                        self->toggleTextBoostSetting();
                         done();
                     } else if (cmd == "toggle-block") {
                         self->toggleBlockSetting();
@@ -750,6 +755,12 @@ public Q_SLOTS:
         rmweb::saveSettings(m_profileDir, m_settings);
         qInfo("[bwfast] %s (settings)", m_settings.bwFast ? "on" : "off");
         Q_EMIT bwFastChanged(m_settings.bwFast);
+    }
+    void toggleTextBoostSetting() {
+        m_settings.textBoost = !m_settings.textBoost;
+        rmweb::saveSettings(m_profileDir, m_settings);
+        qInfo("[text] boost %s (settings)", m_settings.textBoost ? "on" : "off");
+        Q_EMIT textBoostChanged(m_settings.textBoost);
     }
     void toggleBlockSetting() {
         m_settings.block = !m_settings.block;
@@ -1945,6 +1956,7 @@ private:
 // ---------------------------------------------------------------------------
 class EpaperRefresh;   // defined further below — WpeView calls its presentFast in B&W mode
 void epdPresentFastIfOk(EpaperRefresh *e);   // thin call wrapper (complete type only below)
+void epdFullSwapIfOk(EpaperRefresh *e);      // same wrapper for the RMWEB_FULL_PRESENT diagnostic
 
 class WpeView : public QQuickPaintedItem {
     Q_OBJECT
@@ -1961,6 +1973,28 @@ public:
         m_fallback.setSingleShot(true);
         connect(&m_fallback, &QTimer::timeout, this,
                 [this]{ qCDebug(lcEngine, "[t][gui] present fallback-release (no frameSwapped)"); releaseGate(); });
+        // Settle flash (colour mode): the QPA's auto waveform underdrives black/colour on the fast
+        // per-frame presents (device-verified: pure-black image areas come out pale grey). Once the page
+        // stops emitting frames for a beat, one full-quality pass develops the panel properly. Re-armed
+        // by every content present, so active browsing/SPA storms never flash; a page turn costs at most
+        // one flash after you stop. Off in B&W fast mode (its own cadence handles ghosting) and while
+        // typing. RMWEB_SETTLE_FULL_MS=0 disables.
+        m_settleFlash.setSingleShot(true);
+        if (qEnvironmentVariableIsSet("RMWEB_SETTLE_FULL_MS"))
+            m_settleFullMs = qEnvironmentVariableIntValue("RMWEB_SETTLE_FULL_MS");   // 0 disables
+        // Text boost (colour mode): luma tone curve gamma — tune on device (1.7 default; higher =
+        // darker mid-tones). Read once here; the LUT is built lazily on the first toned frame.
+        if (qEnvironmentVariableIsSet("RMWEB_TEXT_GAMMA")) {
+            const float g = qgetenv("RMWEB_TEXT_GAMMA").toFloat();
+            if (g > 0.5f && g < 4.0f) m_textGamma = g;
+        }
+        connect(&m_settleFlash, &QTimer::timeout, this, [this]{
+            if (m_bwFast || m_editing || !m_epd) return;      // no flash over fast mono / typing
+            if (m_inFlight) { m_settleFlash.start(500); return; }   // present still on the panel — retry
+            qCDebug(lcEngine, "[t][gui] settle flash (full develop)");
+            epdFullSwapIfOk(m_epd);
+            bumpTouchGuard();           // the flash's waveform tail can induce phantom taps
+        });
         rebuildKeys();   // URL keyboard, drawn into the frame (B2)
         // Keyboard: buffer keystrokes, paint once after a short idle (e-ink can't keep up with per-key presents).
         m_kbFlush.setSingleShot(true);
@@ -2014,6 +2048,36 @@ public:
                     m_grayDirty = false;
                 }
                 p->drawImage(QRectF(0, 0, w, h), m_imgGray);
+            } else if (m_textBoost) {
+                if (m_tonedDirty) {                         // re-tone once per new frame / toggle
+                    // Colour-mode text darkening: scale each pixel by a LUT over its LUMA, so hue is
+                    // preserved (factor applied equally to R/G/B). The curve gamma (~1.7, tunable via
+                    // RMWEB_TEXT_GAMMA) pushes the grey of anti-aliased text edges toward black while
+                    // near-white stays near-white — AA'd text reads pale grey on the panel otherwise.
+                    // Single fused pass like the bwFast LUT above (a separate convert pass would cost
+                    // ~200 ms/frame on this CPU).
+                    static float lut[256];
+                    static std::once_flag once;
+                    std::call_once(once, [this]{ for (int i = 0; i < 256; ++i) {
+                        lut[i] = i == 0 ? 1.0f
+                             : std::pow(i / 255.0f, m_textGamma) * 255.0f / i; } });
+                    if (m_imgToned.size() != m_img.size())
+                        m_imgToned = QImage(m_img.size(), QImage::Format_ARGB32);
+                    const int rows = m_img.height(), cols = m_img.width();
+                    for (int y = 0; y < rows; ++y) {
+                        const QRgb *src = reinterpret_cast<const QRgb*>(m_img.constScanLine(y));
+                        QRgb *dst = reinterpret_cast<QRgb*>(m_imgToned.scanLine(y));
+                        for (int x = 0; x < cols; ++x) {
+                            const QRgb px = src[x];
+                            const float f = lut[qGray(px)];
+                            dst[x] = qRgba(qMin(255, int(qRed(px)   * f)),
+                                           qMin(255, int(qGreen(px) * f)),
+                                           qMin(255, int(qBlue(px)  * f)), qAlpha(px));
+                        }
+                    }
+                    m_tonedDirty = false;
+                }
+                p->drawImage(QRectF(0, 0, w, h), m_imgToned);
             } else {
                 p->drawImage(QRectF(0, 0, w, h), m_img);
             }
@@ -2249,6 +2313,8 @@ public Q_SLOTS:
     // them fully, while colour content under a fast waveform stays washed out until a slow full pass.
     // And force that fast waveform ourselves per content present (presentFast below).
     void setBwFast(bool v)         { if (v != m_bwFast) { m_bwFast = v; m_grayDirty = true; schedule(); } }
+    // Text boost (colour mode): darken text via a luma tone curve on the frame (paint() below).
+    void setTextBoost(bool v)      { if (v != m_textBoost) { m_textBoost = v; m_tonedDirty = true; schedule(); } }
     void setEpaperRefresh(EpaperRefresh *e) { m_epd = e; }
     void setCanBack(bool v)        { if (v != m_canBack)  { m_canBack  = v; schedule(); } }
     void setCanFwd(bool v)         { if (v != m_canFwd)   { m_canFwd   = v; schedule(); } }
@@ -2298,6 +2364,13 @@ private Q_SLOTS:
         // main() refuses to wire this path (m_epd stays null) under any other render loop.
         if (m_bwFast && m_lastPresentHadContent && m_epd)
             QTimer::singleShot(0, this, [this]{ epdPresentFastIfOk(m_epd); });
+        // Re-arm the settle flash on every content present; it fires once the page goes quiet.
+        if (m_lastPresentHadContent && m_settleFullMs > 0) m_settleFlash.start(m_settleFullMs);
+        // Diagnostic: RMWEB_FULL_PRESENT=1 re-pushes every content frame with the FULL colour waveform
+        // (slow + flashy — not a product path; answers "is the QPA auto waveform underdriving black?").
+        static const bool fullPresent = qgetenv("RMWEB_FULL_PRESENT") == "1";
+        if (fullPresent && m_lastPresentHadContent && m_epd)
+            QTimer::singleShot(0, this, [this]{ epdFullSwapIfOk(m_epd); });
     }
 private:
     // --- B2 frame painters (called by paint(); kept here so paint() stays a short orchestrator) -------------
@@ -2599,7 +2672,7 @@ private:
         // Apply newest WPE frame if any; always present so chrome-only updates (URL bar, keyboard,
         // badges) still refresh when m_img is still null (before the first buffer).
         const bool hadContent = m_hasPending;
-        if (m_hasPending) { m_img = m_pending; m_hasPending = false; m_grayDirty = true; }
+        if (m_hasPending) { m_img = m_pending; m_hasPending = false; m_grayDirty = true; m_tonedDirty = true; }
         m_lastPresentHadContent = hadContent;
         m_dirty = false; m_inFlight = true;
         m_clock.restart();
@@ -2625,12 +2698,18 @@ private:
     bool m_bwFast = false;                       // settings-page B&W fast mode (grayscale present path)
     bool m_grayDirty = true;                     // grayscale cache needs (re)build (new frame / toggle)
     QImage m_imgGray;                            // grayscale copy of m_img (built lazily in paint)
+    bool m_textBoost = false;                    // settings-page text darkening (colour mode; paint below)
+    bool m_tonedDirty = true;                    // toned cache needs (re)build (new frame / toggle)
+    QImage m_imgToned;                           // tone-curved copy of m_img (built lazily in paint)
+    float m_textGamma = 1.7f;                    // luma curve gamma (RMWEB_TEXT_GAMMA; tune on device)
     EpaperRefresh *m_epd = nullptr;              // manual panel present (B&W fast waveform), if available
     bool m_lastPresentHadContent = false;        // last present carried a new page frame (vs chrome-only)
     gint64 m_lastContentPresentUs = 0;            // last e-ink present that carried a new WPE frame
     QImage m_img, m_pending;
     QElapsedTimer m_clock;
     QTimer m_fallback;
+    QTimer m_settleFlash;                        // one full-quality develop once the page goes quiet
+    int m_settleFullMs = 1500;                   // settle delay (RMWEB_SETTLE_FULL_MS; 0 = off)
     QTimer m_kbFlush;                            // keyboard address-bar coalesced redraw
     QTimer m_contentFlush;                       // delayed present of throttled SPA frames
     QTimer m_noticeTimer;                        // toast auto-clear (find results, downloads)
@@ -2876,10 +2955,10 @@ public:
         else        swap(QRect(0, 0, kPanelW, kPanelH), 0, 1, 0);   // Mono, fast, no flash
         qCDebug(lcEngine, "[present] #%d swap done", m_frames);
     }
-private:
     // One full-quality flash: develops colour and clears accumulated ghosting. Shared by present()'s
-    // colour cadence and presentFast()'s anti-ghost cadence.
+    // colour cadence and presentFast()'s anti-ghost cadence. public for the RMWEB_FULL_PRESENT diagnostic.
     void fullSwap() { swap(QRect(0, 0, kPanelW, kPanelH), 1, 4, 1); }   // Color, QualityFull, CompleteRefresh
+private:
     // swap dispatch: current ABI (QRect, mode, flags) vs legacy (QRect, contentType, mode, flags).
     // The legacy ABI takes the content type — pass it through (a full flash is Color, not Mono).
     void swap(const QRect &r, int contentType, int mode, int flags) {
@@ -2903,6 +2982,7 @@ private:
 };
 
 void epdPresentFastIfOk(EpaperRefresh *e) { if (e && e->ok()) e->presentFast(); }
+void epdFullSwapIfOk(EpaperRefresh *e)  { if (e && e->ok()) e->fullSwap(); }
 
 // Reading-shell host: a bare full-screen Window holding the WpeView. The browser chrome is hand-painted
 // INTO the WpeView frame (the "B2" approach) — a QtQuick toolbar does NOT composite under the epaper QPA, so
@@ -3015,6 +3095,8 @@ int main(int argc, char **argv) {
         QObject::connect(&engine, &WpeEngine::bwFastChanged, view, &WpeView::setBwFast,
                          Qt::QueuedConnection);            // worker (decide-policy/start) -> GUI;
                                                            // start() emits the initial state once loaded
+        QObject::connect(&engine, &WpeEngine::textBoostChanged, view, &WpeView::setTextBoost,
+                         Qt::QueuedConnection);            // same path as bwFastChanged
         QObject::connect(&engine, &WpeEngine::urlChanged, view,   // a new page resets the bar until
                          [view]{ view->setReadProgress(-1); });   // the first scroll/restore answers
         QObject::connect(&engine, &WpeEngine::renderingChanged, view,

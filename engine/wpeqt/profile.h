@@ -21,6 +21,8 @@ struct Settings { double zoom = 1.0; int readerFont = 30; std::string ua; bool r
                   bool siteCss = true;      // kSiteCss fit-to-width + e-ink calm-down user stylesheet
                   bool bwFast = false;      // B&W fast mode: grayscale frames -> the fast mono waveform
                                             // develops them fully (colour needs the slow full pass)
+                  bool textBoost = true;    // darken text in COLOUR mode (luma tone curve on the frame;
+                                            // anti-aliased edges otherwise read pale on the panel)
                   int autoRefreshSec = 15;  // >0: min seconds between same-URL auto-navigations;
                                             // 0: guard off (allow all); -1: block all auto-refreshes
                 };
@@ -295,6 +297,7 @@ inline Settings loadSettings(const std::string& dir) {
         else if (k == "block") s.block = (v != "0");
         else if (k == "siteCss") s.siteCss = (v != "0");
         else if (k == "bwFast") s.bwFast = (v == "1");
+        else if (k == "textBoost") s.textBoost = (v != "0");   // default ON: absent/corrupt stays true
         else if (k == "autoRefreshSec") s.autoRefreshSec = std::atoi(v.c_str());
     }
     if (!(s.zoom >= 0.5 && s.zoom <= 3.0)) s.zoom = 1.0;                 // clamp corrupt values
@@ -315,6 +318,7 @@ inline bool saveSettings(const std::string& dir, const Settings& s) {
                     + "block=" + std::string(s.block ? "1" : "0") + "\n"
                     + "siteCss=" + std::string(s.siteCss ? "1" : "0") + "\n"
                     + "bwFast=" + std::string(s.bwFast ? "1" : "0") + "\n"
+                    + "textBoost=" + std::string(s.textBoost ? "1" : "0") + "\n"
                     + "autoRefreshSec=" + std::to_string(s.autoRefreshSec) + "\n";
     return detail::atomicWrite(dir + "/settings.txt", out);
 }
