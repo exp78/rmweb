@@ -393,15 +393,27 @@ public Q_SLOTS:
                 // TLS error page (load_alternate_html — neither home nor settings). Security: the
                 // command carries no host of its own — the bypass can only ever cover the host of
                 // the CURRENT page, so a page can never whitelist an arbitrary origin. https only,
-                // session only (m_tlsBypass lives in RAM), then a real reload (load_uri, not reload:
-                // after load_alternate_html a reload can just bring the error page back).
+                // session only (m_tlsBypass lives in RAM).
                 if (cmd == "tls-continue") {
                     const std::string curS = cur ? cur : "";
                     const std::string host = rmweb::hostFromUrl(curS);
                     if (curS.rfind("https://", 0) == 0 && !host.empty() && self->m_view) {
                         self->m_tlsBypass.insert(host);
                         qWarning("[tls] bypassing certificate errors for %s (this session only)", host.c_str());
-                        self->m_expectUserNav = true;   // same-URL reload — exempt from the auto-refresh guard
+                        // Epiphany-style bypass: flip the session's TLS policy to IGNORE around the
+                        // load instead of answering TRUE from load-failed-with-tls-errors. The proceed
+                        // path loads the page but the WebProcess NEVER paints the document after a TLS
+                        // override (verified on device: zero buffer-rendered frames — no pivot/kick
+                        // helps). With IGNORE the load is an ordinary clean navigation that paints
+                        // normally. Restored to FAIL when this load settles (onLoadChanged/onLoadFailed).
+                        // Tradeoff: while this page loads, other hosts' handshakes go unverified too —
+                        // acceptable for the captive-portal case (a narrow, user-invoked window).
+                        webkit_network_session_set_tls_errors_policy(
+                            webkit_web_view_get_network_session(self->m_view), WEBKIT_TLS_ERRORS_POLICY_IGNORE);
+                        self->m_expectUserNav = true;   // user navigation — exempt from the auto-refresh guard
+                        self->m_tlsContinueKick = true; // the load's FINISHED forces a repaint (insurance)
+                        self->m_tlsIgnoreOn = true;
+                        qInfo("[tls] loading %s with TLS errors ignored", host.c_str());
                         webkit_web_view_load_uri(self->m_view, cur);
                     } else {
                         qWarning("[tls] tls-continue ignored (current: %s)", cur ? cur : "(none)");
@@ -497,7 +509,10 @@ public Q_SLOTS:
             // persisted autoRefreshSec setting (15 s default; -1 = block all, 0 = guard off;
             // RMWEB_AUTOREFRESH_MS env wins for this run). Reader mode blocks it outright.
             // User reload/Go/link tap (expectUserNav) and back-forward navigations always pass.
-            if (uri && self->m_view && !expectUserNav) {
+            // A tls-continue reload passes too: the dispatcher's expectUserNav covers its decision,
+            // and the kick flag (set until that load's FINISHED) also lets the captive portal's own
+            // same-URL meta-refresh through while the sign-on page settles.
+            if (uri && self->m_view && !expectUserNav && !self->m_tlsContinueKick) {
                 const WebKitNavigationType nt = webkit_navigation_action_get_navigation_type(act);
                 if (nt == WEBKIT_NAVIGATION_TYPE_OTHER || nt == WEBKIT_NAVIGATION_TYPE_RELOAD) {
                     const char *cur = webkit_web_view_get_uri(self->m_view);
@@ -1461,6 +1476,24 @@ private:
             self->checkReaderable();                     // article? -> enable/disable the Reader button
             qInfo("[t] load finished @%.0fms", msSince(self->m_startUs));
             qCDebug(lcEngine, "[perf] load-finished @%.0fms", msSince(self->m_loadStartUs));
+            // The tls-continue IGNORE window ends with the load it covered (whatever page that is —
+            // if the user navigated away mid-load, closing it here keeps the window narrow anyway).
+            self->restoreTlsPolicy("finished");
+            // Insurance for the tls-continue load (rmweb:tls-continue): it replaces our own TLS error
+            // page, which was shown via load_alternate_html for this SAME URI — if WebKit ever reports
+            // LOAD_FINISHED without emitting damage/buffer-rendered for the new document, the
+            // blank-check would flag a false "couldn't render" over a page that actually loaded.
+            // Force one fresh commit with the known re-map kick (visible FALSE->TRUE — the same trick
+            // start()/wpe_cadence.c use). Synchronous, no timer: nothing here can outlive its load,
+            // so m_loadGen is unaffected — the render-check armed at this load's STARTED simply
+            // samples the kicked frame.
+            if (self->m_tlsContinueKick) {
+                self->m_tlsContinueKick = false;
+                WPEView *v = webkit_web_view_get_wpe_view(view);
+                wpe_view_set_visible(v, FALSE);
+                wpe_view_set_visible(v, TRUE);
+                qInfo("[tls] post-bypass repaint kick (forced commit)");
+            }
             // Record history for real web pages (not file:// start page, not reader-injected DOM).
             {
                 const char* u = webkit_web_view_get_uri(view);
@@ -1526,7 +1559,10 @@ private:
     static gboolean onTlsError(WebKitWebView *, gchar *failing_uri, GTlsCertificate *,
                                GTlsCertificateFlags, gpointer data) {
         auto *self = static_cast<WpeEngine*>(data);
-        // Per-host session bypass (whitelisted via the TLS error page's "Continue anyway").
+        // Insurance only: the primary bypass is the session policy flip to IGNORE around the
+        // tls-continue load (see the rmweb: dispatcher) — the proceed path below is a last resort
+        // for a race (a bypassed host's handshake already in flight when the policy flip landed).
+        // Note: a TRUE from here loads but historically does NOT paint the document (device-verified).
         const std::string host = rmweb::hostFromUrl(failing_uri ? failing_uri : "");
         if (!host.empty() && self->m_tlsBypass.count(host)) {
             qWarning("[tls] cert error for %s — proceeding (per-host session bypass)", host.c_str());
@@ -1545,6 +1581,16 @@ private:
             if ((p[0] | 0x20) == 't' && (p[1] | 0x20) == 'l' && (p[2] | 0x20) == 's') return true;
         return false;
     }
+    // End the tls-continue IGNORE window: back to the default strict policy (FAIL — we never touch
+    // it at startup) once the load it covered settles (FINISHED or failed). Flag-based, not
+    // host-based: if the user navigated away mid-load, the window still closes at the first settle.
+    void restoreTlsPolicy(const char *why) {
+        if (!m_tlsIgnoreOn || !m_view) return;
+        m_tlsIgnoreOn = false;
+        webkit_network_session_set_tls_errors_policy(webkit_web_view_get_network_session(m_view),
+                                                     WEBKIT_TLS_ERRORS_POLICY_FAIL);
+        qInfo("[tls] strict certificate checks restored (load %s)", why);
+    }
     // A navigation failed (DNS, refused, timeout — common on the flaky link): replace the dead end
     // with a styled error page (load_alternate_html does NOT add a history entry; the address bar
     // keeps the failed URI). Cancelled loads (superseded navigation) are swallowed silently.
@@ -1556,6 +1602,9 @@ private:
         self->m_loadInProgress = false;   // failed load never emits LOAD_FINISHED — un-block the blank-check
         const char *uri = failing_uri ? failing_uri : "";
         qWarning("[nav] load failed: %s (%s)", uri, (error && error->message) ? error->message : "?");
+        // A failed load also ends the tls-continue IGNORE window (a superseded load is swallowed
+        // above as CANCELLED and never reaches here).
+        self->restoreTlsPolicy("failed");
         if (!uri[0] || !rmweb::isSafeLinkUrl(uri))   // only http(s) gets an error page
             return FALSE;
         const std::string html = buildErrorPage(uri, (error && error->message) ? error->message : "unknown error",
@@ -1680,8 +1729,8 @@ private:
 
         const double dt   = self->m_lastBufUs ? (tIn - self->m_lastBufUs) / 1000.0 : 0.0;
         const double flip = self->m_pageUs    ? (tIn - self->m_pageUs)    / 1000.0 : -1.0;
-        qCDebug(lcEngine, "[t] frame %d @%.0fms  dt=%.1fms  flip-latency=%.1fms  sig=%08x %s  %dx%d",
-              self->m_frames, msSince(self->m_startUs), dt, flip, sig,
+        qCDebug(lcEngine, "[t] frame %d @%.0fms  dt=%.1fms  flip-latency=%.1fms  nw=%d  sig=%08x %s  %dx%d",
+              self->m_frames, msSince(self->m_startUs), dt, flip, nonWhite, sig,
               changed ? "NEW" : "dup", w, h);
         self->m_lastBufUs = tIn;
         if (!changed) return;   // nothing visually new — do not repaint the panel
@@ -1710,6 +1759,10 @@ private:
     bool m_expectUserNav = false;    // UI-initiated navigation (reload/Go) — exempt from the auto-refresh guard
     std::set<std::string> m_tlsBypass;   // hosts whose cert errors the user chose to ignore (session-only,
                                          // worker thread only; populated by rmweb:tls-continue)
+    bool m_tlsContinueKick = false;      // a tls-continue load is in flight: exempts the auto-refresh
+                                         // guard + forces a repaint at its LOAD_FINISHED (insurance)
+    bool m_tlsIgnoreOn = false;          // session TLS policy is IGNORE right now (tls-continue window;
+                                         // restored to FAIL by restoreTlsPolicy when that load settles)
     gint64 m_lastLoadFinishedUs = 0; // auto-refresh throttle anchor (set at LOAD_FINISHED)
     guint m_loadGen = 0;           // bumped on each load start -> a stale render-check (grace timer) is skipped
     gint64 m_loadStartUs = 0;      // monotonic time of the current LOAD_STARTED (for [perf] ms offsets)
