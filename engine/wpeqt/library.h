@@ -41,6 +41,26 @@ inline bool isDocumentFile(const std::string &path) {
     return e == "pdf" || e == "epub";
 }
 
+// A download destination that never clobbers an existing file: "name.ext" -> "name-1.ext",
+// "name-2.ext", ... WebKit's EEXIST failure path DELETES the pre-existing file (WebKitDownload.cpp
+// cleanDownloadFiles), so uniqueness matters — overwrite is not an option. Pure POSIX (access F_OK)
+// -> host-unit-testable.
+inline std::string uniqueDownloadName(const std::string &dir, const std::string &name) {
+    if (access((dir + "/" + name).c_str(), F_OK) != 0) return name;
+    std::string stem = name, ext;
+    const size_t dot = name.find_last_of('.');
+    if (dot != std::string::npos && dot > 0) {   // no dot, or dot==0 (".pdf") -> whole name is the stem
+        stem = name.substr(0, dot); ext = name.substr(dot);
+    }
+    for (int i = 1; i < 1000; ++i) {
+        const std::string cand = stem + "-" + std::to_string(i) + ext;
+        if (access((dir + "/" + cand).c_str(), F_OK) != 0) return cand;
+    }
+    // Saturated (>=1000 collisions): last-resort timestamp suffix.
+    return stem + "-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count()) + ext;
+}
+
 // Minimal JSON string escaping (quotes, backslash, control chars) — the project has htmlEscape for
 // markup but no JSON escaper, so this tiny local one covers the single interpolated JSON value.
 inline std::string jsonEscape(const std::string &s) {
@@ -94,44 +114,56 @@ inline bool mkdirs(const std::string &dir, std::string *err) {
     }
     return true;
 }
+// fsync the containing directory so a rename inside it survives a power cut (same best-effort tail
+// as profile.h's atomicWrite — kept local to stay glib/Qt-free).
+inline void fsyncDirOf(const std::string &path) {
+    std::string dir = path;
+    const size_t slash = dir.find_last_of('/');
+    if (slash == std::string::npos) dir = "."; else if (slash == 0) dir = "/"; else dir.erase(slash);
+    const int dfd = open(dir.c_str(), O_RDONLY);
+    if (dfd >= 0) { (void)fsync(dfd); close(dfd); }
+}
 // Chunked binary copy src -> dst with the same atomicity model as atomicWrite (tmp + fsync +
 // rename, byte-count verified). The payload can be tens of MB, so it is NOT slurped into memory.
+// O_NOFOLLOW on the tmp: a planted symlink must not redirect the write. errno is recaptured at the
+// exact failing call, so the message names the real cause.
 inline bool copyFileAtomic(const std::string &dst, const std::string &src, std::string *err) {
     const std::string tmp = dst + ".tmp";
     const int in = open(src.c_str(), O_RDONLY);
     if (in < 0) { if (err) *err = "open " + src + " failed: " + std::strerror(errno); return false; }
     struct stat st {};
     const bool haveSize = fstat(in, &st) == 0;
-    const int out = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    const int out = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0644);
     if (out < 0) {
         if (err) *err = "open " + tmp + " failed: " + std::strerror(errno);
         close(in);
         return false;
     }
-    bool ok = true;
+    int failErr = 0;
+    const char *failWhat = nullptr;
     long long total = 0;
     char buf[1 << 16];
     for (;;) {
         const ssize_t n = read(in, buf, sizeof buf);
         if (n < 0 && errno == EINTR) continue;
-        if (n < 0) { ok = false; break; }
+        if (n < 0) { failErr = errno; failWhat = "read"; break; }
         if (n == 0) break;
         for (ssize_t off = 0; off < n;) {                 // write(2) may be partial
             const ssize_t w = write(out, buf + off, static_cast<size_t>(n - off));
             if (w < 0 && errno == EINTR) continue;
-            if (w <= 0) { ok = false; break; }
+            if (w <= 0) { failErr = errno; failWhat = "write"; break; }
             off += w;
         }
-        if (!ok) break;
+        if (failWhat) break;
         total += n;
     }
-    const int savedErr = errno;
-    if (ok && fsync(out) != 0) ok = false;
-    if (close(out) != 0 && ok) ok = false;
+    if (!failWhat && fsync(out) != 0) { failErr = errno; failWhat = "fsync"; }
+    if (close(out) != 0 && !failWhat) { failErr = errno; failWhat = "close"; }
     close(in);
-    if (ok && haveSize && total != static_cast<long long>(st.st_size)) ok = false;   // truncated copy
-    if (!ok) {
-        if (err) *err = "copy " + src + " -> " + dst + " failed: " + std::strerror(savedErr);
+    if (!failWhat && haveSize && total != static_cast<long long>(st.st_size)) failWhat = "truncated copy";
+    if (failWhat) {
+        if (err) *err = "copy " + src + " -> " + dst + " failed (" + failWhat + ")" +
+                        (failErr ? std::string(": ") + std::strerror(failErr) : std::string());
         std::remove(tmp.c_str());
         return false;
     }
@@ -144,17 +176,23 @@ inline bool copyFileAtomic(const std::string &dst, const std::string &src, std::
 }
 } // namespace detail
 
-// Import srcPath (a finished download) into the xochitl store at xochitlDir. Returns false with a
+// Import srcPath (a finished download) into the xochitl store at xochitlDir. forcedExt, when
+// non-empty ("pdf"/"epub"), overrides the extension gate and the payload suffix — for downloads
+// whose filename has no extension but whose MIME/magic says document. Returns false with a
 // human-readable *err on any failure (no exceptions escape); on a mid-way failure every file it
 // already wrote is unlinked again, so a retry starts clean. Each import mints a fresh UUID, so it
 // never clashes with (or overwrites) an existing library document.
 inline bool importDocument(const std::string &xochitlDir, const std::string &srcPath,
-                           const std::string &visibleName, std::string *err) {
+                           const std::string &visibleName, std::string *err,
+                           const std::string &forcedExt = {}) {
     auto fail = [err](const std::string &m) { if (err) *err = m; return false; };
-    if (!isDocumentFile(srcPath)) return fail("not a pdf/epub: " + srcPath);
-    const std::string ext = lowerExt(srcPath);
+    if (xochitlDir.empty() || xochitlDir[0] != '/') return fail("xochitl dir not absolute: " + xochitlDir);
+    std::string ext = forcedExt.empty() ? lowerExt(srcPath) : forcedExt;
+    for (auto &c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
+    if (ext != "pdf" && ext != "epub") return fail("not a pdf/epub: " + srcPath);
     struct stat st {};
     if (stat(srcPath.c_str(), &st) != 0) return fail("source not readable: " + srcPath);
+    if (st.st_size == 0) return fail("empty file: " + srcPath);
     if (!detail::mkdirs(xochitlDir, err)) return false;
 
     const std::string uuid = makeUuidV4();
@@ -165,10 +203,26 @@ inline bool importDocument(const std::string &xochitlDir, const std::string &src
     auto cleanup = [&] { std::remove(payload.c_str()); std::remove(contentF.c_str()); std::remove(metadataF.c_str()); };
 
     if (!detail::copyFileAtomic(payload, srcPath, err)) return fail(err ? *err : "copy failed");
+    detail::fsyncDirOf(payload);   // make the payload rename durable, like atomicWrite's dir fsync
 
-    // visibleName: no control chars (profile.h sanitize), capped (a title bar is narrow), never empty.
+    // visibleName: no control chars (profile.h sanitize), capped (a title bar is narrow) WITHOUT
+    // splitting a UTF-8 multi-byte sequence at the cut, never empty.
     std::string name = sanitizeField(visibleName);
-    if (name.size() > 120) name.resize(120);
+    if (name.size() > 120) {
+        name.resize(120);
+        // Back off to a UTF-8 boundary: skip continuation bytes, then if the byte before them is a
+        // lead byte whose sequence was cut by the cap, drop that lead byte too. (Continuation bytes
+        // of a COMPLETE trailing sequence are never touched: that sequence's lead sits before them
+        // with its full length available.)
+        size_t k = name.size();
+        while (k > 0 && (static_cast<unsigned char>(name[k - 1]) & 0xC0) == 0x80) --k;
+        if (k > 0) {
+            const unsigned char lead = static_cast<unsigned char>(name[k - 1]);
+            const size_t need = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+            if (name.size() - (k - 1) < need) --k;
+        }
+        name.resize(k);
+    }
     if (name.empty()) name = "download";
 
     const long long nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
