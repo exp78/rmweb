@@ -401,12 +401,26 @@ xochitl restarts WITH XOVI.
 properly (see the Phase 7 Batch 2 form-filling entry above, 2026-07-25); the rest of the Batch 2 claims
 stay erroneous, and the project is a **beta, not release-ready**. Full audit: `docs/review-2026-07-18.md` (HIGH#1).
 
-**2026-09-11 — downloads → library + TLS continue-anyway (v0.9.2 candidates, NOT device-verified yet):**
+**2026-09-11 — downloads → library + TLS continue-anyway (v0.9.2, device-verified 2026-09-16):**
 PDF/EPUB downloads now self-register in the xochitl store (`engine/wpeqt/library.h`: UUIDv4 stem +
 `<uuid>.{pdf,epub,metadata,content}` — metadata last, it's the registration marker; xochitl rebuilds
 the rest on its post-quit restart). Timestamps are ms-epoch strings; `visibleName` = basename w/o ext.
+PDFs are forced to the download path (decide-policy): this build's PDF.js would render inline, but the
+native xochitl reader wins on this CPU. Downloads dedupe as `name-1.ext` (WebKit's EEXIST cleanup would
+otherwise DELETE the user's previous file), and `failed` is flagged so the trailing `finished` signal
+(WebKit emits both) can't toast a false "Saved" or import a truncated file.
 TLS: `load-failed` gets TLS errors with domain `g-tls-error-quark` (WPE 2.48.5 has NO WEBKIT_TLS_ERROR
 quark — verified against the source tree, not the docs); detected via quark-name substring. The error
-page offers `rmweb:tls-continue` which whitelists ONLY the current page's own host in a session-scoped
-`m_tlsBypass` set (the command carries no host, so a foreign page can't whitelist another origin), then
-re-navigates via `load_uri` with `m_expectUserNav` armed (the auto-refresh guard would eat it otherwise).
+page offers `rmweb:tls-continue`, gated on: current URI is https, host matches the one-shot
+`m_tlsErrorHost` (armed by the TLS failure itself), and a real tap gesture (`m_expectUserNav` — all
+taps here are synthetic JS, so WebKit's own gesture APIs never fire). The bypass = flipping the session
+tls-errors-policy to IGNORE for that one load, restoring FAIL on any settle (finished/failed/cancelled/
+web-process-terminated). NB: the WebKit "proceed" override (return TRUE from load-failed-with-tls-
+errors) loads but NEVER paints the document — device-verified three rounds; that's why the policy flip.
+**2026-09-16 — blank-check false positive fixed:** the render check now flags "blank" only if the load
+NEVER painted content (`m_firstContentLogged`). Before, a single transient white frame late in the load
+(SPA re-render / anti-adblock hiccup — ixbt whites out for a beat at ~+11 s with our filter on) reset
+`m_lastNonWhite` and the check whited out the whole page under the notice. Also: `Frame load
+interrupted` (WebKit policy error 102 — a superseded/download-converted load, not a failure) is now
+swallowed like CANCELLED instead of showing an error page (double-tapped Go used to fake "site won't
+load"; downloads flashed an error page under the toast). Frame-dump debug: RMWEB_DUMP_FRAMES=/dir.

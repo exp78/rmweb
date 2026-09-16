@@ -38,6 +38,7 @@
 #include <dirent.h>
 #include <poll.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -47,6 +48,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <cstdlib>
 #include <cstdio>
 #include <cerrno>
@@ -390,34 +392,49 @@ public Q_SLOTS:
                 const char *cur = self->m_view ? webkit_web_view_get_uri(self->m_view) : nullptr;
                 const std::string cmd = std::string(uri).substr(6);   // after "rmweb:"
                 // tls-continue is the ONE command honoured OFF the start pages: it comes from our
-                // TLS error page (load_alternate_html — neither home nor settings). Security: the
-                // command carries no host of its own — the bypass can only ever cover the host of
-                // the CURRENT page, so a page can never whitelist an arbitrary origin. https only,
-                // session only (m_tlsBypass lives in RAM).
+                // TLS error page (load_alternate_html — neither home nor settings). It whitelists a
+                // host's certificate errors, so it is gated hard — a real finger tap on OUR error
+                // page for THIS host:
+                //  (a) expectUserNav — the tap-probe marker. NB: WebKit's own
+                //      navigation_action_is_user_gesture()/LINK_CLICKED can never fire in this app —
+                //      every tap reaches WebKit as synthetic JS (location.href=...) by design, i.e.
+                //      NAVIGATION_TYPE_OTHER with no user activation; the probe IS our gesture channel.
+                //  (b) m_tlsErrorHost — the host whose TLS error page is actually up (set in
+                //      onLoadFailed, one-shot). The command carries no host of its own, and the
+                //      current page's must match the errored one: a page can never whitelist an
+                //      arbitrary origin, and page JS alone fails (a). https only; m_tlsBypass is RAM.
                 if (cmd == "tls-continue") {
                     const std::string curS = cur ? cur : "";
                     const std::string host = rmweb::hostFromUrl(curS);
-                    if (curS.rfind("https://", 0) == 0 && !host.empty() && self->m_view) {
+                    const bool gated = expectUserNav && self->m_view
+                                       && !self->m_tlsErrorHost.empty() && host == self->m_tlsErrorHost
+                                       && curS.rfind("https://", 0) == 0;
+                    if (gated) {
+                        self->m_tlsErrorHost.clear();   // one-shot: consumed by this tap
                         self->m_tlsBypass.insert(host);
                         qWarning("[tls] bypassing certificate errors for %s (this session only)", host.c_str());
-                        // Epiphany-style bypass: flip the session's TLS policy to IGNORE around the
-                        // load instead of answering TRUE from load-failed-with-tls-errors. The proceed
-                        // path loads the page but the WebProcess NEVER paints the document after a TLS
-                        // override (verified on device: zero buffer-rendered frames — no pivot/kick
-                        // helps). With IGNORE the load is an ordinary clean navigation that paints
-                        // normally. Restored to FAIL when this load settles (onLoadChanged/onLoadFailed).
-                        // Tradeoff: while this page loads, other hosts' handshakes go unverified too —
-                        // acceptable for the captive-portal case (a narrow, user-invoked window).
-                        webkit_network_session_set_tls_errors_policy(
-                            webkit_web_view_get_network_session(self->m_view), WEBKIT_TLS_ERRORS_POLICY_IGNORE);
-                        self->m_expectUserNav = true;   // user navigation — exempt from the auto-refresh guard
-                        self->m_tlsContinueKick = true; // the load's FINISHED forces a repaint (insurance)
-                        self->m_tlsIgnoreOn = true;
-                        qInfo("[tls] loading %s with TLS errors ignored", host.c_str());
-                        webkit_web_view_load_uri(self->m_view, cur);
-                    } else {
-                        qWarning("[tls] tls-continue ignored (current: %s)", cur ? cur : "(none)");
+                        // Epiphany-style bypass: certificate errors for an approved host are IGNOREd
+                        // at the navigation decision (below) instead of answering TRUE from
+                        // load-failed-with-tls-errors. The proceed path loads the page but the
+                        // WebProcess NEVER paints the document after a TLS override (verified on
+                        // device: zero buffer-rendered frames — no pivot/kick helps). With IGNORE the
+                        // load is an ordinary clean navigation that paints normally. Restored to FAIL
+                        // when the load settles (restoreTlsPolicy). Tradeoff: while it loads, other
+                        // hosts' handshakes go unverified too — acceptable for the captive-portal
+                        // case (a narrow, user-invoked window).
+                        self->m_expectUserNav = true;   // the deferred load below — guard-exempt
+                        self->m_tlsContinueKick = true; // its FINISHED forces a repaint (insurance)
+                        qInfo("[tls] reloading %s (bypassed this session)", host.c_str());
+                        // Answer the decision FIRST, then load: starting the load inside this handler
+                        // supersedes the decision being answered (GLib warns on stale listeners).
+                        webkit_policy_decision_ignore(dec);
+                        self->marshalToCtx([self, curS] {
+                            if (self->m_view) webkit_web_view_load_uri(self->m_view, curS.c_str());
+                        });
+                        return TRUE;
                     }
+                    qWarning("[tls] tls-continue rejected (gesture=%d errorHost=%s current=%s)",
+                             expectUserNav, self->m_tlsErrorHost.c_str(), cur ? cur : "(none)");
                     webkit_policy_decision_ignore(dec);
                     return TRUE;
                 }
@@ -501,6 +518,21 @@ public Q_SLOTS:
                 }
                 webkit_policy_decision_ignore(dec);
                 return TRUE;
+            }
+            // Session TLS bypass, the honest part: ANY navigation to a host the user already approved
+            // via rmweb:tls-continue runs with certificate errors IGNOREd — repeat visits to an
+            // approved host need no second tap. The flip happens here, at the decision: it is the
+            // only point that knows the FUTURE uri (at LOAD_STARTED get_uri still shows the old
+            // page). restoreTlsPolicy() returns FAIL when that load settles, so the window covers
+            // exactly one load; m_tlsBypass itself lives for the session.
+            if (uri && self->m_view && !self->m_tlsIgnoreOn) {
+                const std::string h = rmweb::hostFromUrl(uri);
+                if (!h.empty() && self->m_tlsBypass.count(h)) {
+                    webkit_network_session_set_tls_errors_policy(
+                        webkit_web_view_get_network_session(self->m_view), WEBKIT_TLS_ERRORS_POLICY_IGNORE);
+                    self->m_tlsIgnoreOn = true;
+                    qInfo("[tls] TLS errors ignored for %s (bypassed this session)", h.c_str());
+                }
             }
             // Auto-refresh guard: a navigation back to the CURRENT url that WE didn't initiate
             // (meta refresh / JS location.reload / href=self) gets throttled — on this device a
@@ -589,6 +621,28 @@ public Q_SLOTS:
             }), this);
             g_signal_connect(webkit_web_view_get_network_session(m_view), "download-started",
                              G_CALLBACK(&WpeEngine::onDownloadStarted), this);
+        }
+        // Downloads-dir sweep: drop interrupted-download leftovers from a previous _Exit'd session —
+        // WebKit's *.wkdownload temp files and zero-byte files (a stray empty file would otherwise
+        // collide with a re-download of the same name). ONLY those two classes, ONLY this dir.
+        {
+            const char *dirEnv = getenv("RMWEB_DOWNLOADS");
+            const std::string dir = (dirEnv && *dirEnv && g_path_is_absolute(dirEnv))
+                                  ? dirEnv : "/home/root/Downloads";
+            int swept = 0;
+            if (DIR *dd = opendir(dir.c_str())) {
+                while (struct dirent *e = readdir(dd)) {
+                    const std::string n = e->d_name;
+                    if (n == "." || n == "..") continue;
+                    const std::string p = dir + "/" + n;
+                    struct stat st {};
+                    if (stat(p.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
+                    const bool wkTemp = n.size() > 11 && n.compare(n.size() - 11, 11, ".wkdownload") == 0;
+                    if ((wkTemp || st.st_size == 0) && unlink(p.c_str()) == 0) ++swept;
+                }
+                closedir(dd);
+            }
+            if (swept) qInfo("[dl] swept %d interrupted-download leftover(s) in %s", swept, dir.c_str());
         }
         // Apply persisted zoom (must be done after the view is fully set up).
         webkit_web_view_set_zoom_level(m_view, m_zoom);
@@ -1218,7 +1272,11 @@ private:
             // Pixel-based (not DOM): an SPA shell has DOM nodes but paints nothing, so DOM heuristics lie.
             // A later non-white frame auto-clears the flag in onBuffer (a slow-but-rendering site recovers).
             if (!self->m_readerMode) {
-                const bool blank = self->m_lastNonWhite < kBlankSamples;
+                // Judge "failed to render" ONLY if this load never painted content at all. A page that
+                // painted and later threw a transient white frame (SPA re-render / anti-adblock hiccup —
+                // observed on ixbt: one white frame at +11 s whited out a perfectly fine page under the
+                // notice) is NOT blank: m_firstContentLogged already proves content existed this load.
+                const bool blank = !self->m_firstContentLogged && self->m_lastNonWhite < kBlankSamples;
                 qInfo("[render] nonWhite=%d blank=%d", self->m_lastNonWhite, blank);
                 self->m_renderFailedState = blank;
                 Q_EMIT self->renderFailed(blank);
@@ -1376,28 +1434,52 @@ private:
     }
 
     // A download started (decide-policy said "download"). Save under /home/root/Downloads
-    // (RMWEB_DOWNLOADS overrides), toast in the chrome on completion/failure. The suggested
-    // filename is stripped to its basename so it can never escape the downloads dir.
+    // (RMWEB_DOWNLOADS overrides — absolute paths only), toast in the chrome on start/completion/
+    // failure. The suggested filename is stripped to its basename so it can never escape the
+    // downloads dir, then de-duplicated (-1, -2, ...): WebKit's EEXIST failure path DELETES the
+    // pre-existing file (WebKitDownload.cpp cleanDownloadFiles), so overwrite is never acceptable.
     static void onDownloadStarted(WebKitNetworkSession *, WebKitDownload *dl, gpointer data) {
         auto *self = static_cast<WpeEngine*>(data);
-        g_signal_connect(dl, "decide-destination", G_CALLBACK(+[](WebKitDownload *d, gchar *suggested, gpointer) -> gboolean {
+        g_signal_connect(dl, "decide-destination", G_CALLBACK(+[](WebKitDownload *d, gchar *suggested, gpointer data) -> gboolean {
+            auto *self = static_cast<WpeEngine*>(data);
             const char *dirEnv = getenv("RMWEB_DOWNLOADS");
-            const std::string dir = (dirEnv && *dirEnv) ? dirEnv : "/home/root/Downloads";
+            std::string dir = (dirEnv && *dirEnv) ? dirEnv : "/home/root/Downloads";
+            // A non-absolute dir makes set_destination silently ignored -> the download hangs
+            // without ever failing. Fall back loudly.
+            if (!g_path_is_absolute(dir.c_str())) {
+                qWarning("[dl] RMWEB_DOWNLOADS not absolute (%s) — using /home/root/Downloads", dir.c_str());
+                dir = "/home/root/Downloads";
+            }
             if (g_mkdir_with_parents(dir.c_str(), 0755) != 0) {
-                qWarning("[dl] mkdir %s failed: %s", dir.c_str(), g_strerror(errno));
-                return FALSE;
+                qWarning("[dl] mkdir %s failed: %s — trying /home/root/Downloads", dir.c_str(), g_strerror(errno));
+                dir = "/home/root/Downloads";
+                if (g_mkdir_with_parents(dir.c_str(), 0755) != 0) {
+                    // NOTE: returning FALSE here would let WebKit's class handler quietly save into
+                    // $HOME — cancelling is the honest failure (plus a toast).
+                    qWarning("[dl] mkdir %s failed: %s — cancelling download", dir.c_str(), g_strerror(errno));
+                    Q_EMIT self->notice(QStringLiteral("Download failed: no writable folder"));
+                    webkit_download_cancel(d);
+                    return TRUE;
+                }
             }
             std::string name = (suggested && *suggested) ? suggested : "download.bin";
             const size_t slash = name.find_last_of('/');
             if (slash != std::string::npos) name = name.substr(slash + 1);
             if (name.empty() || name == "." || name == "..") name = "download.bin";
+            name = rmweb::uniqueDownloadName(dir, name);   // never clobber an earlier download
             // 2022 API: set_destination takes an absolute PATH (the old GTK API took a file:// URI).
+            webkit_download_set_allow_overwrite(d, FALSE);
             webkit_download_set_destination(d, (dir + "/" + name).c_str());
             qInfo("[dl] -> %s/%s", dir.c_str(), name.c_str());
+            // Immediate feedback — on a slow e-ink panel the user would otherwise re-tap the link.
+            Q_EMIT self->notice(QString::fromStdString("Downloading " + name + " …"));
             return TRUE;
-        }), nullptr);
+        }), self);
+        // NOTE: WebKit emits "failed" AND THEN "finished" on a failed download (WebKitDownload.cpp)
+        // — the rmweb-failed data flag makes "finished" a no-op for those.
         g_signal_connect(dl, "finished", G_CALLBACK(+[](WebKitDownload *d, gpointer data) {
             auto *self = static_cast<WpeEngine*>(data);
+            if (g_object_get_data(G_OBJECT(d), "rmweb-failed")) return;   // already reported as failed
             std::string shown = "Download complete";
             std::string destPath;
             if (const gchar *dest = webkit_download_get_destination(d)) {
@@ -1407,28 +1489,62 @@ private:
                 if (p != std::string::npos) s = s.substr(p + 1);
                 if (!s.empty()) shown = "Saved " + s;
             }
+            qInfo("[dl] finished: %s", shown.c_str());
+            Q_EMIT self->notice(QString::fromStdString(shown));
             // A PDF/EPUB download ALSO goes into the xochitl library (visible there once xochitl
-            // restarts). The raw file stays in Downloads either way (reachable over ssh); an
-            // import failure keeps the plain "Saved ..." toast.
-            if (rmweb::isDocumentFile(destPath)) {
+            // restarts). Detection: response MIME first, then the file extension, then a %PDF- magic
+            // sniff (no PK sniffing — any zip would match). The raw file stays in Downloads either
+            // way (reachable over ssh); an import failure keeps the plain "Saved ..." toast.
+            std::string docExt;   // "" = not a document
+            if (WebKitURIResponse *resp = webkit_download_get_response(d)) {
+                const gchar *mime = webkit_uri_response_get_mime_type(resp);
+                if (mime && std::string(mime) == "application/pdf") docExt = "pdf";
+                else if (mime && std::string(mime) == "application/epub+zip") docExt = "epub";
+            }
+            if (docExt.empty() && !destPath.empty()) {
+                const std::string e = rmweb::lowerExt(destPath);
+                if (e == "pdf" || e == "epub") docExt = e;
+            }
+            if (docExt.empty() && !destPath.empty()) {   // octet-stream without a suffix: sniff magic
+                if (FILE *f = fopen(destPath.c_str(), "rb")) {
+                    char magic[5] = {};
+                    if (fread(magic, 1, 5, f) == 5 && std::memcmp(magic, "%PDF-", 5) == 0) docExt = "pdf";
+                    fclose(f);
+                }
+            }
+            if (!docExt.empty() && !destPath.empty()) {
                 std::string name = destPath.substr(destPath.find_last_of('/') + 1);
                 const size_t dot = name.find_last_of('.');
                 if (dot != std::string::npos) name.resize(dot);   // visibleName = no extension
-                std::string ierr;
-                if (rmweb::importDocument(rmweb::xochitlDir(), destPath, name, &ierr)) {
-                    shown = "Added to your library: " + name;
-                    qInfo("[library] imported %s", destPath.c_str());
-                } else {
-                    qWarning("[library] import failed for %s: %s", destPath.c_str(), ierr.c_str());
-                }
+                // Blocking flash I/O (copy + fsync of tens of MB) must not stall the worker context
+                // (project rule: no blocking I/O on the WebKit worker) — import on a detached thread
+                // and marshal the result toast back. Lifetime: the thread holds a ref on m_ctx, so
+                // the marshal target stays valid even mid-shutdown; a source posted after the loop
+                // exited is simply never dispatched (destroy-notify frees it), and ~WpeEngine runs
+                // only after the worker thread joined — the dispatched lambda never sees a dead self.
+                const std::string xo = rmweb::xochitlDir();
+                GMainContext *ctx = static_cast<GMainContext*>(g_main_context_ref(self->m_ctx));
+                std::thread([xo, destPath, name, docExt, ctx, self] {
+                    std::string ierr;
+                    if (!rmweb::importDocument(xo, destPath, name, &ierr, docExt)) {
+                        qWarning("[library] import failed for %s: %s", destPath.c_str(), ierr.c_str());
+                    } else {
+                        qInfo("[library] imported %s", destPath.c_str());
+                        self->marshalToCtx([self, msg = "Added to your library: " + name] {
+                            Q_EMIT self->notice(QString::fromStdString(msg));
+                        });
+                    }
+                    g_main_context_unref(ctx);
+                }).detach();
             }
-            qInfo("[dl] finished: %s", shown.c_str());
-            Q_EMIT self->notice(QString::fromStdString(shown));
         }), self);
-        g_signal_connect(dl, "failed", G_CALLBACK(+[](WebKitDownload *, GError *err, gpointer data) {
+        g_signal_connect(dl, "failed", G_CALLBACK(+[](WebKitDownload *d, GError *err, gpointer data) {
             auto *self = static_cast<WpeEngine*>(data);
+            // WebKit still emits "finished" after this — flag it so that handler no-ops.
+            g_object_set_data(G_OBJECT(d), "rmweb-failed", GINT_TO_POINTER(1));
             qWarning("[dl] failed: %s", err ? err->message : "?");
-            Q_EMIT self->notice(QStringLiteral("Download failed"));
+            Q_EMIT self->notice(QString::fromStdString(
+                std::string("Download failed: ") + (err && err->message ? err->message : "unknown error")));
         }), self);
     }
 
@@ -1456,6 +1572,15 @@ private:
         }
         if (ev == WEBKIT_LOAD_COMMITTED) {
             qCDebug(lcEngine, "[perf] load-committed @%.0fms", msSince(self->m_loadStartUs));
+            // The TLS-error state is per error page: once an UNRELATED host commits,
+            // rmweb:tls-continue must no longer be answerable. The error page's own commit keeps it
+            // (load_alternate_html commits under the failing uri, so the host matches); a successful
+            // reload of the same host also keeps it — harmless: the dispatcher's gesture gate still
+            // applies, and the bypass is per-host anyway.
+            if (!self->m_tlsErrorHost.empty()) {
+                const char *cu = webkit_web_view_get_uri(view);
+                if (rmweb::hostFromUrl(cu ? cu : "") != self->m_tlsErrorHost) self->m_tlsErrorHost.clear();
+            }
             // A real navigation/reload landed fresh original content -> any reader view is gone; reset its state.
             if (self->m_readerMode) { self->m_readerMode = false; Q_EMIT self->readerModeChanged(false); }
             // The old page is gone from here on: drop its identity NOW so a scroll completion landing
@@ -1557,19 +1682,13 @@ private:
         }
     }
     static gboolean onTlsError(WebKitWebView *, gchar *failing_uri, GTlsCertificate *,
-                               GTlsCertificateFlags, gpointer data) {
-        auto *self = static_cast<WpeEngine*>(data);
-        // Insurance only: the primary bypass is the session policy flip to IGNORE around the
-        // tls-continue load (see the rmweb: dispatcher) — the proceed path below is a last resort
-        // for a race (a bypassed host's handshake already in flight when the policy flip landed).
-        // Note: a TRUE from here loads but historically does NOT paint the document (device-verified).
-        const std::string host = rmweb::hostFromUrl(failing_uri ? failing_uri : "");
-        if (!host.empty() && self->m_tlsBypass.count(host)) {
-            qWarning("[tls] cert error for %s — proceeding (per-host session bypass)", host.c_str());
-            return TRUE;
-        }
+                               GTlsCertificateFlags, gpointer) {
+        // Always fail: a TRUE from here (the "proceed" path) loads the page but the WebProcess NEVER
+        // paints the document after a TLS override (device-verified). The per-host session bypass
+        // works WITHOUT this signal instead: a navigation to an approved host flips the session
+        // policy to IGNORE at the decision (decide-policy), so no TLS error is ever signalled for it.
         qWarning("[tls] cert error: %s", failing_uri ? failing_uri : "?");
-        return FALSE;   // don't proceed — WebKit fails the load
+        return FALSE;   // don't proceed — WebKit fails the load (our error page offers the bypass)
     }
     // WPE 2.48 has no dedicated TLS error domain for load-failed (verified in the source tree: the
     // GError arrives with the network layer's own quark, "g-tls-error-quark") — detect by quark
@@ -1596,19 +1715,34 @@ private:
     // keeps the failed URI). Cancelled loads (superseded navigation) are swallowed silently.
     static gboolean onLoadFailed(WebKitWebView *view, WebKitLoadEvent, gchar *failing_uri,
                                  GError *error, gpointer data) {
-        if (error && g_error_matches(error, WEBKIT_NETWORK_ERROR, WEBKIT_NETWORK_ERROR_CANCELLED))
-            return TRUE;   // superseded navigation — silent (this API has no WebKitLoadError domain)
         auto *self = static_cast<WpeEngine*>(data);
+        self->m_tlsErrorHost.clear();   // a fresh failure replaces any previous TLS-error state
+        if (error && (g_error_matches(error, WEBKIT_NETWORK_ERROR, WEBKIT_NETWORK_ERROR_CANCELLED)
+                      // "Frame load interrupted" (policy domain, code 102): the load was cut short by
+                      // another navigation or a download conversion — an interruption, not a failure.
+                      // Showing an error page for it both scares the user (double-tapped Go looks like
+                      // "site won't load") and flashes an error under every completed download toast.
+                      || g_error_matches(error, WEBKIT_POLICY_ERROR,
+                                         WEBKIT_POLICY_ERROR_FRAME_LOAD_INTERRUPTED_BY_POLICY_CHANGE))) {
+            // Superseded navigation — silent (this API has no WebKitLoadError domain), but it still
+            // ENDS the tls-continue IGNORE window it interrupted (and its repaint kick).
+            self->restoreTlsPolicy("cancelled");
+            self->m_tlsContinueKick = false;
+            return TRUE;
+        }
         self->m_loadInProgress = false;   // failed load never emits LOAD_FINISHED — un-block the blank-check
         const char *uri = failing_uri ? failing_uri : "";
         qWarning("[nav] load failed: %s (%s)", uri, (error && error->message) ? error->message : "?");
-        // A failed load also ends the tls-continue IGNORE window (a superseded load is swallowed
-        // above as CANCELLED and never reaches here).
+        // A failed load also ends the tls-continue IGNORE window.
         self->restoreTlsPolicy("failed");
         if (!uri[0] || !rmweb::isSafeLinkUrl(uri))   // only http(s) gets an error page
             return FALSE;
+        const bool tls = isTlsError(error);
+        // A TLS error page is what makes rmweb:tls-continue answerable — arm it for THIS host
+        // (the dispatcher also requires a fresh tap gesture and the matching current URI).
+        if (tls) self->m_tlsErrorHost = rmweb::hostFromUrl(uri);
         const std::string html = buildErrorPage(uri, (error && error->message) ? error->message : "unknown error",
-                                                isTlsError(error));
+                                                tls);
         webkit_web_view_load_alternate_html(view, html.c_str(), uri, nullptr);
         return TRUE;
     }
@@ -1641,6 +1775,8 @@ private:
     static void onWebProcessTerminated(WebKitWebView *view, WebKitWebProcessTerminationReason reason, gpointer data) {
         auto *self = static_cast<WpeEngine*>(data);
         qWarning("[crash] WebProcess terminated (reason=%d, Phase2-hardened recovery), attempts=%d", reason, self->m_reloadAttempts);
+        self->restoreTlsPolicy("terminated");   // the network session outlives the crashed WebProcess
+        self->m_tlsContinueKick = false;        // the crashed load will never FINISHED — disarm the kick
         // hardened: exponential backoff + diagnostic log (avoids tight loops on repeated crashes)
         if (self->m_reloadAttempts < 3) {
             self->m_reloadAttempts++;
@@ -1763,6 +1899,8 @@ private:
                                          // guard + forces a repaint at its LOAD_FINISHED (insurance)
     bool m_tlsIgnoreOn = false;          // session TLS policy is IGNORE right now (tls-continue window;
                                          // restored to FAIL by restoreTlsPolicy when that load settles)
+    std::string m_tlsErrorHost;          // host of the CURRENTLY SHOWN TLS error page (set in onLoadFailed,
+                                         // one-shot consumed by rmweb:tls-continue; "" = not answerable)
     gint64 m_lastLoadFinishedUs = 0; // auto-refresh throttle anchor (set at LOAD_FINISHED)
     guint m_loadGen = 0;           // bumped on each load start -> a stale render-check (grace timer) is skipped
     gint64 m_loadStartUs = 0;      // monotonic time of the current LOAD_STARTED (for [perf] ms offsets)
@@ -1856,17 +1994,22 @@ public:
         if (!m_img.isNull()) {
             if (m_bwFast) {
                 if (m_grayDirty) {                          // convert once per new frame / toggle
-                    m_imgGray = m_img.convertedTo(QImage::Format_Grayscale8);
-                    // Contrast boost for the fast mono waveform: gamma ~2 pushes mid-gray text toward
-                    // black while pure white stays white (uncorrected gray text reads weak on e-ink).
+                    // Single-pass BGRA -> gamma-LUT grayscale: convertedTo()+separate LUT loop cost
+                    // ~200 ms/frame on this CPU (two 3.5-MP passes + an alloc); fusing them is ~4x
+                    // cheaper. Contrast boost (gamma ~2) pushes mid-gray text toward black — uncorrected
+                    // gray text reads weak under the fast mono waveform.
                     static uchar lut[256];
                     static std::once_flag once;
                     std::call_once(once, []{ for (int i = 0; i < 256; ++i) {
                         const double n = i / 255.0;
                         lut[i] = uchar(std::min(255.0, std::pow(n, 2.0) * 255.0 + 0.5)); } });
-                    for (int y = 0; y < m_imgGray.height(); ++y) {
-                        uchar *row = m_imgGray.scanLine(y);
-                        for (int x = 0; x < m_imgGray.bytesPerLine(); ++x) row[x] = lut[row[x]];
+                    if (m_imgGray.size() != m_img.size())
+                        m_imgGray = QImage(m_img.size(), QImage::Format_Grayscale8);
+                    const int rows = m_img.height(), cols = m_img.width();
+                    for (int y = 0; y < rows; ++y) {
+                        const QRgb *src = reinterpret_cast<const QRgb*>(m_img.constScanLine(y));
+                        uchar *dst = m_imgGray.scanLine(y);
+                        for (int x = 0; x < cols; ++x) dst[x] = lut[qGray(src[x])];
                     }
                     m_grayDirty = false;
                 }
@@ -2843,6 +2986,11 @@ int main(int argc, char **argv) {
         QObject::connect(&engine, &WpeEngine::frameReady, view,
                          [view](const QImage &img, int frame) {
             const gint64 t = g_get_monotonic_time();
+            // Debug: RMWEB_DUMP_FRAMES=/dir saves every incoming frame as PNG (engine-side view,
+            // pre-throttle) so rendering bugs can be inspected off-device. Off by default.
+            static const QByteArray dumpDir = qgetenv("RMWEB_DUMP_FRAMES");
+            if (!dumpDir.isEmpty())
+                img.save(QString::fromUtf8(dumpDir) + QStringLiteral("/frame-%1.png").arg(frame));
             view->setImage(img);
             qCDebug(lcEngine, "[t][gui] frame %d -> setImage %.1fms  %dx%d", frame,
                   (g_get_monotonic_time() - t) / 1000.0, img.width(), img.height());
@@ -2919,7 +3067,7 @@ int main(int argc, char **argv) {
             // presentFast (B&W fast mode) is only safe under the single-threaded basic render loop —
             // the fb-mutex-free guarantee at frameSwapped (see the EpaperRefresh class comment).
             // Under any other loop do NOT wire the hook: presents fall back to the QPA's own path.
-            if (qgetenv("QSG_RENDER_LOOP") == "basic")
+            if (qgetenv("QSG_RENDER_LOOP") == "basic" && qgetenv("RMWEB_BW_HOOK") != "0")
                 view->setEpaperRefresh(&epaper);   // B&W fast mode's fast-mono presents (frameSwapped path)
             else
                 qWarning("[refresh] QSG_RENDER_LOOP is not \"basic\" — fast-mono presents disabled");

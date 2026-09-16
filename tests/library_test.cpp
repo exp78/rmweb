@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <dirent.h>
+#include <sys/stat.h>
 using namespace rmweb;
 
 static int fails = 0;
@@ -165,6 +166,82 @@ int main() {
     err.clear();
     CHECK(!importDocument(xo, dl + "/no-such.pdf", "Ghost", &err));
     CHECK(!err.empty());
+
+    // forcedExt: a suffix-less download whose MIME/magic said "pdf" imports as <uuid>.pdf;
+    // a forced non-document ext is still rejected
+    CHECK(detail::atomicWrite(dl + "/bookfile", pdfBytes));
+    err.clear();
+    CHECK(importDocument(xo, dl + "/bookfile", "No Suffix", &err, "pdf"));
+    {
+        bool okPdf = false;
+        for (const auto &n : listDir(xo)) if (n.size() > 4 && n.substr(n.size() - 4) == ".pdf") {
+            const std::string m = slurp(xo + "/" + n.substr(0, n.size() - 4) + ".metadata");
+            if (m.find("\"visibleName\":\"No Suffix\"") != std::string::npos) okPdf = true;
+        }
+        CHECK(okPdf);
+    }
+    CHECK(!importDocument(xo, dl + "/bookfile", "X", &err, "txt"));
+
+    // empty source file -> clean refusal
+    CHECK(detail::atomicWrite(dl + "/empty.pdf", ""));
+    err.clear();
+    CHECK(!importDocument(xo, dl + "/empty.pdf", "Empty", &err));
+    CHECK(err.find("empty file") != std::string::npos);
+
+    // fail-path rollback: an unwritable store dir -> false and NOT A SINGLE file left behind
+    const std::string xoRO = tmp.path + "/xochitl-ro";
+    CHECK(detail::mkdirs(xoRO, nullptr));
+    CHECK(chmod(xoRO.c_str(), 0555) == 0);
+    err.clear();
+    CHECK(!importDocument(xoRO, dl + "/paper.pdf", "Rollback", &err));
+    CHECK(!err.empty());
+    CHECK(listDir(xoRO).empty());        // no payload, no sidecars, no .tmp
+    CHECK(chmod(xoRO.c_str(), 0755) == 0);   // let TmpDir's rm -rf clean up
+
+    // non-absolute store dir is rejected before touching anything
+    CHECK(!importDocument("relative/dir", dl + "/paper.pdf", "X", &err));
+
+    // visibleName cap must not split a UTF-8 sequence: 119 ASCII + a 2-byte 'é' = 121 bytes
+    // -> capped to 119, leaving the 'é' whole-but-dropped rather than a dangling lead byte
+    CHECK(importDocument(xo, dl + "/paper.pdf", std::string(119, 'a') + "\xC3\xA9", &err));
+    {
+        bool found = false;
+        for (const auto &n : listDir(xo)) {
+            if (n.size() < 10 || n.substr(n.size() - 9) != ".metadata") continue;
+            const std::string m = slurp(xo + "/" + n);
+            if (m.find(std::string(119, 'a') + "\"") != std::string::npos) found = true;
+        }
+        CHECK(found);
+        for (const auto &n : listDir(xo)) {
+            if (n.size() < 10 || n.substr(n.size() - 9) != ".metadata") continue;
+            CHECK(slurp(xo + "/" + n).find('\xC3') == std::string::npos);   // no truncated lead byte anywhere
+        }
+    }
+
+    // uniqueDownloadName: no clobber, -1/-2/... before the extension
+    const std::string ud = tmp.path + "/dl-uniq";
+    CHECK(detail::mkdirs(ud, nullptr));
+    CHECK(uniqueDownloadName(ud, "name.ext") == "name.ext");
+    CHECK(detail::atomicWrite(ud + "/name.ext", "x"));
+    CHECK(uniqueDownloadName(ud, "name.ext") == "name-1.ext");
+    CHECK(detail::atomicWrite(ud + "/name-1.ext", "x"));
+    CHECK(uniqueDownloadName(ud, "name.ext") == "name-2.ext");
+    CHECK(uniqueDownloadName(ud, "noext") == "noext");
+    CHECK(detail::atomicWrite(ud + "/noext", "x"));
+    CHECK(uniqueDownloadName(ud, "noext") == "noext-1");
+    CHECK(detail::atomicWrite(ud + "/.pdf", "x"));
+    CHECK(uniqueDownloadName(ud, ".pdf") == ".pdf-1");   // dot at 0: whole name is the stem
+
+    // uuid fuzz: 10k ids are all well-formed v4 and unique
+    {
+        std::set<std::string> seen;
+        for (int i = 0; i < 10000; ++i) {
+            const std::string u = makeUuidV4();
+            CHECK(isUuidV4(u));
+            seen.insert(u);
+        }
+        CHECK(seen.size() == 10000);
+    }
 
     if (fails == 0) std::printf("library_test: OK\n");
     return fails ? 1 : 0;
