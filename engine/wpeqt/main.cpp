@@ -363,8 +363,13 @@ public Q_SLOTS:
                                            WebKitPolicyDecisionType type, gpointer data) -> gboolean {
             // A response whose MIME type WebKit can't display (zip, epub, binary, ...) -> download it
             // to disk instead of failing the navigation (destination handled in onDownloadStarted).
+            // PDF: this build's PDF.js would render it inline, but on a CPU-only e-ink chip the
+            // native xochitl reader is far better — force the download path (lands in the library).
             if (type == WEBKIT_POLICY_DECISION_TYPE_RESPONSE) {
-                if (!webkit_response_policy_decision_is_mime_type_supported(WEBKIT_RESPONSE_POLICY_DECISION(dec))) {
+                WebKitURIResponse *resp = webkit_response_policy_decision_get_response(WEBKIT_RESPONSE_POLICY_DECISION(dec));
+                const char *mime = resp ? webkit_uri_response_get_mime_type(resp) : nullptr;
+                if (!webkit_response_policy_decision_is_mime_type_supported(WEBKIT_RESPONSE_POLICY_DECISION(dec))
+                    || (mime && g_strcmp0(mime, "application/pdf") == 0)) {
                     webkit_policy_decision_download(dec);
                     return TRUE;
                 }
