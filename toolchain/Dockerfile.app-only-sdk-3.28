@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1.7
+# Official Ferrari SDK for firmware 3.28.0.172 / OS 5.8.203.
+# https://developer.remarkable.com/links
+# SDK bytes are supplied from an external named build context, never Git.
+FROM ubuntu:24.04 AS installer
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates file python3 xz-utils && rm -rf /var/lib/apt/lists/*
+COPY --from=sdk_source remarkable-production-image-5.8.203-ferrari-public-aarch64-toolchain.sh /tmp/sdk.sh
+RUN echo '65e5b98f9f7c83d857c5c720f7f6cb2d61fe20f4513dec023ad00aac27c85ae4  /tmp/sdk.sh' | sha256sum -c - \
+    && test "$(stat -c %s /tmp/sdk.sh)" = 497093913 \
+    && sh /tmp/sdk.sh -y -d /opt/remarkable-sdk && rm /tmp/sdk.sh
+
+FROM ubuntu:24.04
+ENV LANG=C.UTF-8
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates cmake file g++ git make ninja-build python3 xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=installer /opt/remarkable-sdk /opt/remarkable-sdk
+WORKDIR /src

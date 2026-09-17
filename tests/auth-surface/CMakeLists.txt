@@ -1,0 +1,13 @@
+cmake_minimum_required(VERSION 3.16)
+project(rmweb_auth_surface_tests LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_AUTOMOC ON)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Test)
+enable_testing()
+add_executable(auth_surface_test ../auth_surface_test.cpp
+    ../../engine/wpeqt/auth-surface.cpp ../../engine/wpeqt/auth-surface.h)
+target_include_directories(auth_surface_test PRIVATE ../../engine/wpeqt)
+target_compile_definitions(auth_surface_test PRIVATE QT_NO_KEYWORDS)
+target_link_libraries(auth_surface_test PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
+target_compile_options(auth_surface_test PRIVATE -Wall -Wextra -Werror)
+add_test(NAME auth_surface_test COMMAND auth_surface_test)

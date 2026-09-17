@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Phone passkey test</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="/client.js" defer></script>
+</head>
+<body><main>
+    <p class="eyebrow">Disposable test</p>
+    <h1>Try your phone passkey</h1>
+    <p id="purpose"></p>
+    <p class="no-account">No account or sign-in is needed. This creates a passkey just for this test.</p>
+    <ol class="steps" aria-label="Test progress">
+        <li id="step-setup" data-state="current" aria-current="step"><strong>1. Set up phone</strong><span>Create a test passkey.</span></li>
+        <li id="step-approval" data-state="pending"><strong>2. Approve on phone</strong><span>Scan the tablet's code.</span></li>
+        <li id="step-verified" data-state="pending"><strong>3. Verified</strong><span>The server checks the proof.</span></li>
+    </ol>
+    <section id="result" class="result" data-outcome="waiting" role="status" aria-live="polite" aria-atomic="true">
+        <h2 id="state-title">Join this test</h2>
+        <p id="status">Open your setup link, or enter the test access code below.</p>
+    </section>
+    <div id="join-controls">
+        <label for="code">Test access code</label>
+        <input id="code" type="password" autocomplete="off" autocapitalize="none" maxlength="128" spellcheck="false">
+        <button id="join" type="button">Join test</button>
+    </div>
+    <button id="perform" type="button" hidden></button>
+    <button id="check" type="button" hidden>Check again</button>
+    <p class="footnote">Use the same test run on both devices. When finished, stop the test and delete its disposable passkey from your phone.</p>
+</main></body>
+</html>

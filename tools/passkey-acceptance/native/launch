@@ -1,0 +1,34 @@
+#!/bin/sh
+# Disposable AppLoad test entry. No production catalog or service changes.
+set -eu
+umask 077
+fail() { echo '[Passkey test] Test browser is unavailable.' >&2; exit 1; }
+A=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || fail
+R=$A/runtime
+# shellcheck disable=SC3045
+ulimit -c 0 || fail
+[ "$#" -eq 1 ] || fail
+case "$1" in https://*/verify) :;; *) fail;; esac
+case "${QTFB_KEY:-}" in ''|*[!0-9]*) fail;; esac
+for executable in rmweb-auth-entry rmweb-auth-browser rmweb-auth-passkey; do
+    [ -f "$A/bin/$executable" ] && [ ! -L "$A/bin/$executable" ] && [ -x "$A/bin/$executable" ] || fail
+done
+[ -f "$R/rmweb-env.sh" ] && [ ! -L "$R/rmweb-env.sh" ] || fail
+unset LD_PRELOAD RMWEB_JSC_OPTS RMWEB_JIT RMWEB_SKIA_THREADS
+export RMWEB_AUTH_RUNTIME="$R"
+# shellcheck source=/dev/null
+. "$R/rmweb-env.sh"
+unset QT_QPA_PLATFORM QT_QUICK_BACKEND QSG_RENDER_LOOP
+unset WEBKIT_INSPECTOR_SERVER WEBKIT_INSPECTOR_HTTP_SERVER WEBKIT_DEBUG SSLKEYLOGFILE
+# Optional disposable demo join code. It stays out of the AppLoad catalog.
+url=$1
+if [ -e "$A/session-code" ] || [ -L "$A/session-code" ]; then
+    [ -f "$A/session-code" ] && [ ! -L "$A/session-code" ] || fail
+    [ "$(stat -c '%u:%a' "$A/session-code")" = '0:600' ] || fail
+    [ "$(wc -c < "$A/session-code")" -le 128 ] || fail
+    code=$(cat "$A/session-code") || fail
+    case "$code" in ''|*[!A-Za-z0-9_-]*) fail;; esac
+    [ "${#code}" -ge 32 ] && [ "${#code}" -le 128 ] || fail
+    url=$url#join=$code
+fi
+exec "$A/bin/rmweb-auth-entry" "$url"

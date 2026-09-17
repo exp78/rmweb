@@ -1,0 +1,65 @@
+--- a/libwebauthn/src/transport/cable/channel.rs
++++ b/libwebauthn/src/transport/cable/channel.rs
+@@ -182,7 +182,11 @@
+ 
+     async fn cbor_recv(&mut self, timeout: Duration) -> Result<CborResponse, CableError> {
+         // First, wait for connection to be established (no timeout for handshake)
+-        self.wait_for_connection().await?;
++        if let Err(error) = self.wait_for_connection().await {
++            // Protocol queues a decoded reply before marking the connection
++            // terminated. Preserve that reply even if the peer then closes.
++            return self.cbor_receiver.try_recv().map_err(|_| error);
++        }
+ 
+         // Now apply timeout only to the actual CBOR operation
+         match time::timeout(timeout, self.cbor_receiver.recv()).await {
+@@ -224,3 +228,49 @@
+         self.persistent_token_store.clone()
+     }
+ }
++
++#[cfg(test)]
++mod private_probe_order_tests {
++    use super::*;
++    use crate::webauthn::error::CtapError;
++
++    fn channel(state: ConnectionState) -> (CableChannel, mpsc::Sender<CborResponse>, watch::Sender<ConnectionState>) {
++        let (cbor_sender, _) = mpsc::channel(1);
++        let (response_sender, cbor_receiver) = mpsc::channel(1);
++        let (ux_update_sender, _) = broadcast::channel(1);
++        let (state_sender, connection_state_receiver) = watch::channel(state);
++        (CableChannel {
++            handle_connection: tokio::spawn(std::future::pending()),
++            cbor_sender, cbor_receiver, ux_update_sender, connection_state_receiver,
++            persistent_token_store: None,
++        }, response_sender, state_sender)
++    }
++
++    #[tokio::test]
++    async fn buffered_error_survives_peer_shutdown() {
++        let (mut channel, response, state) = channel(ConnectionState::Connected);
++        // Actual protocol queues the decoded CTAP frame before a later peer
++        // shutdown marks this watch Terminated. Force that valid ordering.
++        response.send(CborResponse::try_from(&vec![0x2e]).unwrap()).await.unwrap();
++        state.send(ConnectionState::Terminated).unwrap();
++        drop(response);
++        let result = channel.cbor_recv(Duration::from_millis(50)).await;
++        assert!(result.is_ok(), "buffered CTAP response was hidden by peer shutdown");
++        assert_eq!(result.unwrap().status_code, CtapError::NoCredentials);
++    }
++
++    #[tokio::test]
++    async fn connected_error_is_decoded_without_body() {
++        let (mut channel, response, _state) = channel(ConnectionState::Connected);
++        response.send(CborResponse::try_from(&vec![0x2e]).unwrap()).await.unwrap();
++        let result = channel.cbor_recv(Duration::from_millis(50)).await.unwrap();
++        assert_eq!(result.status_code, CtapError::NoCredentials);
++    }
++
++    #[tokio::test]
++    async fn closed_empty_channel_does_not_invent_response() {
++        let (mut channel, response, _state) = channel(ConnectionState::Terminated);
++        drop(response);
++        assert!(channel.cbor_recv(Duration::from_millis(50)).await.is_err());
++    }
++}

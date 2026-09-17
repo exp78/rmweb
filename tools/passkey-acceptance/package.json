@@ -1,0 +1,14 @@
+{
+  "name": "rmweb-passkey-acceptance",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server.js",
+    "demo": "node demo.js",
+    "test": "node --test test/*.test.js",
+    "check": "node --check server.js && node --check demo.js && node --check harness.js && node --check public/client.js"
+  },
+  "dependencies": { "@simplewebauthn/server": "14.0.2" }
+}
