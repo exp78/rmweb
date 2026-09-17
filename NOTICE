@@ -5,14 +5,27 @@ rmweb is MIT-licensed (see LICENSE). It builds on, links against, or ships
 fragments of the following third-party software. Their licenses apply to
 those components.
 
-Runtime libraries (linked, not modified)
-----------------------------------------
+Runtime libraries and optional authentication components
+--------------------------------------------------------
 * WPE WebKit (https://wpewebkit.org) — LGPL-2.1+ / BSD-2-Clause (WebCore).
-  Dynamic linking; no modifications. Releases: https://wpewebkit.org/releases/
+  Dynamic linking. The optional authentication runtime applies the native
+  assertion-provider patch under patches/. Its new GLib API files are
+  LGPL-2.0-or-later and the WPE coordinator is BSD-2-Clause; original notices
+  remain intact. Runtime exports include corresponding source and patches.
+  Releases: https://wpewebkit.org/releases/
 * Qt 6 (https://www.qt.io) — LGPL-3.0. Dynamic linking; no modifications.
   reMarkable ships Qt on the device; rmweb links against the system build.
 * Mesa (https://mesa3d.org) — MIT. llvmpipe software rasterizer.
 * glib-networking / OpenSSL — LGPL-2.1+ / Apache-2.0 (TLS backend).
+* libwebauthn (https://github.com/linux-credentials/libwebauthn) — LGPL-2.1-or-later.
+  The optional phone helper pins and patches this dependency. Its export
+  includes complete source, Cargo.lock, patches, build recipe and crate license
+  inventory under licenses/. See engine/auth-passkey-helper/vendor/libwebauthn-COPYING.
+* Public Suffix List (https://publicsuffix.org) — MPL-2.0. The phone helper uses
+  a checksum-pinned snapshot retaining its license notice.
+* SimpleWebAuthn server (https://github.com/MasterKale/SimpleWebAuthn) — MIT.
+  The disposable acceptance server pins @simplewebauthn/server in its lockfile;
+  it is not part of the tablet runtime.
 
 Vendored components (source shipped in this repo)
 -------------------------------------------------
@@ -30,9 +43,12 @@ Iconography
   that the above copyright notice and this permission notice appear in all
   copies.
 
-Device-side integration (not shipped, documented only)
-------------------------------------------------------
+Device-side integration
+-----------------------
 * XOVI + AppLoad by asivery (https://github.com/asivery) — used on-device to
-  place rmweb in the stock launcher. See docs/install.md for versions.
+  place rmweb in the stock launcher. AppLoad is GPL-3.0; the authentication
+  integration includes source patches, not its binary or firmware resources.
+  Preserve complete corresponding AppLoad source, patches and license when
+  distributing a rebuilt loader. See docs/install.md and patches/appload.md.
 
 Fonts and media bundled with the OS or device are property of their owners.

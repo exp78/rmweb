@@ -1,0 +1,13 @@
+cmake_minimum_required(VERSION 3.16)
+project(rmweb_auth_passkey_tests LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_AUTOMOC ON)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Test)
+enable_testing()
+add_executable(auth_passkey_test ../auth_passkey_test.cpp
+    ../../engine/wpeqt/auth-passkey.cpp ../../engine/wpeqt/auth-passkey.h)
+target_include_directories(auth_passkey_test PRIVATE ../../engine/wpeqt)
+target_compile_definitions(auth_passkey_test PRIVATE QT_NO_KEYWORDS)
+target_link_libraries(auth_passkey_test PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
+target_compile_options(auth_passkey_test PRIVATE -Wall -Wextra -Werror)
+add_test(NAME auth_passkey_test COMMAND auth_passkey_test)

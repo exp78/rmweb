@@ -1,0 +1,39 @@
+* { box-sizing: border-box; }
+body { font: 24px/1.4 sans-serif; color: #000; background: #fff; margin: 0; }
+main { max-width: 760px; margin: auto; padding: 32px 28px 48px; }
+h1 { font-size: 1.7em; line-height: 1.15; margin: 8px 0 20px; }
+h2 { font-size: 1.3em; line-height: 1.2; margin: 0 0 12px; }
+p { margin: 0 0 18px; }
+.eyebrow { font-size: .75em; font-weight: bold; text-transform: uppercase; letter-spacing: .08em; margin: 0; }
+.no-account { padding-bottom: 24px; border-bottom: 2px solid #000; }
+.steps { list-style: none; padding: 0; margin: 24px 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; font-size: .7em; }
+.steps li { padding-top: 10px; border-top: 2px dotted #000; }
+.steps li[data-state="current"] { border-top: 5px solid #000; padding-top: 7px; }
+.steps li[data-state="complete"] { border-top: 5px double #000; padding-top: 7px; }
+.steps span { display: block; margin-top: 6px; }
+.result { border: 2px solid #000; padding: 24px; margin: 26px 0; }
+.result p { margin: 0; }
+.result[data-outcome="pass"] { border: 5px double #000; padding: 21px; }
+.result[data-outcome="pass"] h2 { font-size: 2em; }
+.result[data-outcome="error"] h2 { text-decoration: underline; }
+label, input, button { display: block; }
+label { margin-bottom: 8px; font-weight: bold; }
+input, button { width: 100%; font: inherit; padding: 18px; border: 2px solid #000; background: #fff; color: #000; border-radius: 0; }
+input { margin: 0 0 16px; }
+button { min-height: 72px; margin: 18px 0; cursor: pointer; font-weight: bold; }
+button:disabled { cursor: wait; border-style: dashed; }
+button:focus-visible, input:focus-visible { outline: 3px solid #000; outline-offset: 4px; }
+.footnote { margin-top: 28px; font-size: .72em; }
+[hidden] { display: none !important; }
+@media (min-width: 1000px) {
+    body { font-size: 32px; }
+    main { max-width: 1120px; padding: 48px 60px; }
+    button { min-height: 100px; }
+}
+@media (max-width: 520px) {
+    body { font-size: 18px; }
+    main { padding: 24px 18px 32px; }
+    .steps { gap: 10px; font-size: .73em; }
+    .result { padding: 18px; }
+    .result[data-outcome="pass"] { padding: 15px; }
+}
