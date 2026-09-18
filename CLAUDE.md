@@ -458,3 +458,17 @@ async-signal-safe: the handler only latches a flag, a 100 ms GUI poll runs the c
 before the GUI is up / in headless save mode, and a SECOND TERM (force), still `_Exit` immediately.
 Not covered (accepted): a settle flash already issued to hardware mid-flight (its swapBuffers isn't
 gate-tracked) — the controller completes a commanded waveform autonomously.
+
+**2026-09-18 — partial present (dirty bbox → update(rect), default ON, RMWEB_PARTIAL=0 disables):**
+every frame used to repaint + push the full 1620x2160. WpeView now accumulates a damage rect:
+content pixel-diff bbox in `setImage` (`frameDiffBBox`: row memcmp, exact edges scanned only on
+differing rows — a few ms/frame) ∪ coarse chrome zones marked by the setters (`barZone`/`pillZone`/
+`kbZone`/`progZone`; `markDirtyAll` for first frame/size change/mode toggles/renderFailed white-out),
+and `presentNext` calls `update(rect)` instead of `update()`. **The QPA honors it (device-verified by
+disassembly, no run):** libqsgepaper's present path (OS 3.28 build) accumulates a damage QRegion and
+calls `EPFramebuffer::swapBuffers(QRegion, EPScreenModeMap, NoRefresh)`, skipping empty damage; the
+`swapBuffers(QRect, EPScreenMode, QFlags)` we dlopen is a forwarder into it, so `presentFast(rect)`
+in bwFast re-pushes exactly the damage too. Settle flash / fullSwap stay full-screen by design
+(once per quiet period). QPainter clips to the update rect by itself — paint() needed no clip logic.
+Over-inclusive zones are safe; a MISSED zone would leave stale pixels — if smearing shows up on
+device, RMWEB_PARTIAL=0 first, then audit the zone list against paint().
