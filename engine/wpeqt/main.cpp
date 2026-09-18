@@ -24,6 +24,7 @@
 #include <QPainterPath>
 #include <QPolygonF>
 #include <QElapsedTimer>
+#include <QDir>
 #include <cmath>
 
 #include <wpe/webkit.h>
@@ -123,8 +124,12 @@ extern "C" void crashHandler(int sig) {
 // path — only an immediate _Exit skips that (window <=1.5 s of debounced writes).
 static volatile sig_atomic_t g_termDrainOk = 0;    // display mode, GUI up: TERM may drain first
 static volatile sig_atomic_t g_termRequested = 0;  // SIGTERM latched (termHandler -> GUI poll timer)
+static volatile sig_atomic_t g_termDraining = 0;   // the clean exit is underway (poll re-entry guard:
+                                                   // drainForExit pumps processEvents, which would
+                                                   // dispatch the poll timer again with a fresh budget)
 extern "C" void termHandler(int) {
-    if (!g_termDrainOk || g_termRequested) std::_Exit(0);
+    // Second TERM (or TERM with no GUI to drain on, or TERM mid-drain) = force-exit NOW.
+    if (!g_termDrainOk || g_termRequested || g_termDraining) std::_Exit(0);
     g_termRequested = 1;
 }
 
@@ -282,6 +287,7 @@ Q_SIGNALS:
     void renderingChanged(bool on);                // true at LOAD_FINISHED for http/https (compositing); false at first-content or fail
     void bwFastChanged(bool on);                   // settings-page B&W fast mode toggle -> view render path
     void textBoostChanged(bool on);                // settings-page text darkening toggle -> view render path
+    void settleFlashChanged(bool on);              // settings-page settle-flash toggle -> view panel path
     void linkMissed();                             // a content tap hit no link -> GUI falls back to chrome toggle
     void bookmarkedChanged(bool on);               // current page bookmark state changed
     void notice(const QString &text);              // transient toast in the chrome (find results, downloads)
@@ -312,6 +318,7 @@ public Q_SLOTS:
                                                    // reaches the view via the signal — never read
                                                    // m_settings from main() (that runs before start).
         Q_EMIT textBoostChanged(m_settings.textBoost);   // same delivery path as bwFastChanged
+        Q_EMIT settleFlashChanged(m_settings.settleFlash);   // same delivery path again
         // RMWEB_READER_FONT env wins over persisted value (same guard as ctor, re-applied after settings load).
         if (const char *e = getenv("RMWEB_READER_FONT")) { const int v = atoi(e); if (v >= 14 && v <= 96) m_readerFont = v; }
 
@@ -500,6 +507,9 @@ public Q_SLOTS:
                         done();
                     } else if (cmd == "toggle-textboost") {
                         self->toggleTextBoostSetting();
+                        done();
+                    } else if (cmd == "toggle-settleflash") {
+                        self->toggleSettleFlashSetting();
                         done();
                     } else if (cmd == "toggle-block") {
                         self->toggleBlockSetting();
@@ -771,6 +781,12 @@ public Q_SLOTS:
         rmweb::saveSettings(m_profileDir, m_settings);
         qInfo("[text] boost %s (settings)", m_settings.textBoost ? "on" : "off");
         Q_EMIT textBoostChanged(m_settings.textBoost);
+    }
+    void toggleSettleFlashSetting() {
+        m_settings.settleFlash = !m_settings.settleFlash;
+        rmweb::saveSettings(m_profileDir, m_settings);
+        qInfo("[refresh] settle flash %s (settings)", m_settings.settleFlash ? "on" : "off");
+        Q_EMIT settleFlashChanged(m_settings.settleFlash);
     }
     void toggleBlockSetting() {
         m_settings.block = !m_settings.block;
@@ -1749,6 +1765,14 @@ private:
             // ENDS the tls-continue IGNORE window it interrupted (and its repaint kick).
             self->restoreTlsPolicy("cancelled");
             self->m_tlsContinueKick = false;
+            // If NOTHING is loading now (e.g. a download-converted link tap — WebKit cancels the
+            // navigation with no superseding load), the "Loading…" badge + Stop would otherwise stay
+            // forever (no LOAD_FINISHED ever comes). Only when the pipeline is truly idle, though:
+            // a double-tapped Go has the superseding load in flight, and is_loading() covers it.
+            if (!webkit_web_view_is_loading(view) && self->m_loadInProgress) {
+                self->m_loadInProgress = false;
+                Q_EMIT self->loadingChanged(false);
+            }
             return TRUE;
         }
         self->m_loadInProgress = false;   // failed load never emits LOAD_FINISHED — un-block the blank-check
@@ -1925,7 +1949,8 @@ private:
     gint64 m_lastLoadFinishedUs = 0; // auto-refresh throttle anchor (set at LOAD_FINISHED)
     guint m_loadGen = 0;           // bumped on each load start -> a stale render-check (grace timer) is skipped
     gint64 m_loadStartUs = 0;      // monotonic time of the current LOAD_STARTED (for [perf] ms offsets)
-    bool m_firstContentLogged = false; // true once [perf] first-content has been emitted for this load
+    bool m_firstContentLogged = false; // true once any content frame painted this load — also the
+                                       // blank-check gate: render-failed only when the load NEVER painted
     int m_progressMilestone = 0;   // next progress milestone to log: 25, 50, 75 (reset per load)
     bool m_renderingState = false; // true while compositing (LOAD_FINISHED -> first-content or renderFailed)
     bool m_readerMode = false;     // reader view currently applied (vs the original page)
@@ -1990,21 +2015,35 @@ public:
         // one flash after you stop. Off in B&W fast mode (its own cadence handles ghosting) and while
         // typing. RMWEB_SETTLE_FULL_MS=0 disables.
         m_settleFlash.setSingleShot(true);
-        if (qEnvironmentVariableIsSet("RMWEB_SETTLE_FULL_MS"))
-            m_settleFullMs = qEnvironmentVariableIntValue("RMWEB_SETTLE_FULL_MS");   // 0 disables
+        if (qEnvironmentVariableIsSet("RMWEB_SETTLE_FULL_MS")) {
+            bool ok = false;
+            const int v = qgetenv("RMWEB_SETTLE_FULL_MS").toInt(&ok);
+            if (ok && v >= 0) m_settleFullMs = v;   // 0 disables
+            else qWarning("[refresh] bad RMWEB_SETTLE_FULL_MS — using default %d ms", m_settleFullMs);
+        }
         // Text boost (colour mode): luma tone curve gamma — tune on device (1.7 default; higher =
-        // darker mid-tones). Read once here; the LUT is built lazily on the first toned frame.
+        // darker mid-tones). Read once here; the LUT is built right away (member, not a static —
+        // the gamma is per-process config and this is the only view).
         if (qEnvironmentVariableIsSet("RMWEB_TEXT_GAMMA")) {
             const float g = qgetenv("RMWEB_TEXT_GAMMA").toFloat();
             if (g > 0.5f && g < 4.0f) m_textGamma = g;
         }
+        for (int i = 0; i < 256; ++i)   // factor by luma: darken mid-grey, keep black/white pinned
+            m_toneLut[i] = i == 0 ? 1.0f : std::pow(i / 255.0f, m_textGamma) * 255.0f / i;
         m_partial = qgetenv("RMWEB_PARTIAL") != "0";   // partial present (dirty bbox) on by default
         connect(&m_settleFlash, &QTimer::timeout, this, [this]{
-            if (m_bwFast || m_editing || !m_epd) return;      // no flash over fast mono / typing
+            if (m_bwFast || m_editing || !m_epd || !m_settleOn || m_exiting) return;   // no flash over fast mono / typing / off / exiting
             if (m_inFlight) { m_settleFlash.start(500); return; }   // present still on the panel — retry
             qCDebug(lcEngine, "[t][gui] settle flash (full develop)");
+            bumpTouchGuard();           // blank touch BEFORE the flash — its waveform induces noise
             epdFullSwapIfOk(m_epd);
-            bumpTouchGuard();           // the flash's waveform tail can induce phantom taps
+            bumpTouchGuard();           // ...and re-arm for the waveform tail
+            // A manual swap gets no frameSwapped — arm the present gate by hand so the serializer's
+            // invariant (m_inFlight ⟺ a present is on the panel) survives the flash, and the exit
+            // drain (drainForExit) can wait it out like any other present.
+            m_inFlight = true;
+            m_fallback.start(kFallbackMs);
+            QTimer::singleShot(m_dwellMs, this, [this]{ releaseGate(); });
         });
         rebuildKeys();   // URL keyboard, drawn into the frame (B2)
         // Keyboard: buffer keystrokes, paint once after a short idle (e-ink can't keep up with per-key presents).
@@ -2043,10 +2082,15 @@ public:
     // against frameSwapped. Bounded: a stuck present (no frameSwapped, fallback still pending at
     // 2.5 s) must not stall power-off — log and exit anyway.
     void drainForExit() {
-        m_settleFlash.stop();
+        if (m_draining) return;   // termPoll re-entry via the processEvents below — already draining
+        m_draining = true;
+        m_exiting = true;         // no new presents from here on (setImage/schedule/presentNext no-op)
+        m_settleFlash.stop(); m_contentFlush.stop(); m_noticeTimer.stop();
         if (!m_inFlight) return;
         QElapsedTimer clock; clock.start();
-        while (m_inFlight && clock.elapsed() < 1200)
+        // >= kFallbackMs: outlast the gate's own fallback release, so a present whose frameSwapped
+        // never arrives still "finishes" here instead of tripping the timeout log spuriously.
+        while (m_inFlight && clock.elapsed() < 2500)
             QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
         if (m_inFlight) qWarning("[exit] drain timeout — present still in flight, exiting anyway");
     }
@@ -2058,7 +2102,8 @@ public:
                     // Single-pass BGRA -> gamma-LUT grayscale: convertedTo()+separate LUT loop cost
                     // ~200 ms/frame on this CPU (two 3.5-MP passes + an alloc); fusing them is ~4x
                     // cheaper. Contrast boost (gamma ~2) pushes mid-gray text toward black — uncorrected
-                    // gray text reads weak under the fast mono waveform.
+                    // gray text reads weak under the fast mono waveform. Rows are reinterpreted as
+                    // QRgb — valid because m_img is Format_ARGB32 (WPE BGRA == ARGB32, see onBuffer).
                     static uchar lut[256];
                     static std::once_flag once;
                     std::call_once(once, []{ for (int i = 0; i < 256; ++i) {
@@ -2077,32 +2122,32 @@ public:
                 p->drawImage(QRectF(0, 0, w, h), m_imgGray);
             } else if (m_textBoost) {
                 if (m_tonedDirty) {                         // re-tone once per new frame / toggle
-                    // Colour-mode text darkening: scale each pixel by a LUT over its LUMA, so hue is
-                    // preserved (factor applied equally to R/G/B). The curve gamma (~1.7, tunable via
-                    // RMWEB_TEXT_GAMMA) pushes the grey of anti-aliased text edges toward black while
-                    // near-white stays near-white — AA'd text reads pale grey on the panel otherwise.
-                    // Single fused pass like the bwFast LUT above (a separate convert pass would cost
-                    // ~200 ms/frame on this CPU).
-                    static float lut[256];
-                    static std::once_flag once;
-                    std::call_once(once, [this]{ for (int i = 0; i < 256; ++i) {
-                        lut[i] = i == 0 ? 1.0f
-                             : std::pow(i / 255.0f, m_textGamma) * 255.0f / i; } });
+                    // Colour-mode text darkening: scale each pixel by the ctor-built LUT over its
+                    // LUMA (m_toneLut, gamma ~1.7 via RMWEB_TEXT_GAMMA), so hue is preserved (the
+                    // factor applies equally to R/G/B). Grey anti-aliased text edges go toward black
+                    // while near-white stays near-white — AA'd text reads pale grey on the panel
+                    // otherwise. Single fused pass like the bwFast LUT above; rows reinterpreted as
+                    // QRgb — valid because both images are Format_ARGB32 (WPE BGRA == ARGB32).
+                    // Only rows under the paint clip are toned (a partial present clips to its
+                    // damage bbox); the cache stays dirty until a full-height paint completes it —
+                    // re-toning a row is idempotent (dst is always rebuilt from m_img).
                     if (m_imgToned.size() != m_img.size())
                         m_imgToned = QImage(m_img.size(), QImage::Format_ARGB32);
                     const int rows = m_img.height(), cols = m_img.width();
-                    for (int y = 0; y < rows; ++y) {
+                    const QRect clip = p->clipBoundingRect().toAlignedRect();
+                    const int y0 = qBound(0, clip.top(), rows - 1), y1 = qBound(0, clip.bottom(), rows - 1);
+                    for (int y = y0; y <= y1; ++y) {
                         const QRgb *src = reinterpret_cast<const QRgb*>(m_img.constScanLine(y));
                         QRgb *dst = reinterpret_cast<QRgb*>(m_imgToned.scanLine(y));
                         for (int x = 0; x < cols; ++x) {
                             const QRgb px = src[x];
-                            const float f = lut[qGray(px)];
-                            dst[x] = qRgba(qMin(255, int(qRed(px)   * f)),
-                                           qMin(255, int(qGreen(px) * f)),
-                                           qMin(255, int(qBlue(px)  * f)), qAlpha(px));
+                            const float f = m_toneLut[qGray(px)];
+                            dst[x] = qRgba(qMin(255, int(qRed(px)   * f + 0.5f)),
+                                           qMin(255, int(qGreen(px) * f + 0.5f)),
+                                           qMin(255, int(qBlue(px)  * f + 0.5f)), qAlpha(px));
                         }
                     }
-                    m_tonedDirty = false;
+                    if (y0 <= 0 && y1 >= rows - 1) m_tonedDirty = false;   // full-height paint = complete cache
                 }
                 p->drawImage(QRectF(0, 0, w, h), m_imgToned);
             } else {
@@ -2226,6 +2271,7 @@ public:
         m_kbShift = false; m_kbSym = false; rebuildKeys();   // always reopen on the plain letters page
         m_kbFlush.stop();
         markDirty(barZone() | pillZone() | kbZone());
+        if (m_renderFailed) markDirty(noticeZone());   // editing hides/restores the render-failed notice
         schedule(/*guardTouch=*/false);
     }
     // Form-field entry (a text field on the page was tapped): the keyboard opens PRE-FILLED with the
@@ -2246,6 +2292,7 @@ public:
         m_kbShift = false; m_kbSym = false; rebuildKeys();
         m_kbFlush.stop();
         markDirty(barZone() | pillZone() | kbZone());
+        if (m_renderFailed) markDirty(noticeZone());   // editing hides/restores the render-failed notice
         schedule(/*guardTouch=*/false);
     }
     void endEdit() {
@@ -2258,6 +2305,10 @@ public:
         g_urlEditing.store(false, std::memory_order_release);
         m_editBuf.clear();
         markDirty(barZone() | pillZone() | kbZone());
+        if (m_renderFailed) markDirty(noticeZone());   // editing hides/restores the render-failed notice
+        // Typing suppressed the settle flash (the lambda skips while editing) — re-arm it now,
+        // or a page that went quiet DURING the edit would never get its full-quality develop.
+        if (m_settleOn && m_settleFullMs > 0 && !m_bwFast) m_settleFlash.start(m_settleFullMs);
         schedule(/*guardTouch=*/false);
     }
     void clearEditBuf() {
@@ -2324,14 +2375,8 @@ Q_SIGNALS:
     void fieldTextEntered(const QString &text);   // Go in field mode -> commit into the focused page field
 public Q_SLOTS:
     void setImage(const QImage &img) {
-        // Partial present: accumulate the content diff against the currently shown frame. Identical
-        // frames add nothing; a size change or the first frame dirties the whole panel.
-        if (m_partial) {
-            if (m_img.isNull() || m_img.size() != img.size() || img.format() != QImage::Format_ARGB32)
-                markDirtyAll();
-            else
-                markDirty(frameDiffBBox(m_img, img));
-        }
+        if (m_exiting) return;   // draining for exit: no new presents
+        // (The partial-present content diff runs lazily in presentNext — new frame vs the shown one.)
         m_pending = img;
         m_hasPending = true;
         // Always keep the latest frame. Only schedule an e-ink present if forced (user action) or
@@ -2359,6 +2404,9 @@ public Q_SLOTS:
     void setBwFast(bool v)         { if (v != m_bwFast) { m_bwFast = v; m_grayDirty = true; markDirtyAll(); schedule(); } }
     // Text boost (colour mode): darken text via a luma tone curve on the frame (paint() below).
     void setTextBoost(bool v)      { if (v != m_textBoost) { m_textBoost = v; m_tonedDirty = true; markDirtyAll(); schedule(); } }
+    // Settle flash (settings page): one full-quality develop after the page goes quiet. No repaint
+    // needed — it's a panel-side pass; off just stops a pending timer.
+    void setSettleFlash(bool v)    { if (v != m_settleOn) { m_settleOn = v; if (!v) m_settleFlash.stop(); } }
     void setEpaperRefresh(EpaperRefresh *e) { m_epd = e; }
     void setCanBack(bool v)        { if (v != m_canBack)  { m_canBack  = v; markDirty(barZone()); schedule(); } }
     void setCanFwd(bool v)         { if (v != m_canFwd)   { m_canFwd   = v; markDirty(barZone()); schedule(); } }
@@ -2396,6 +2444,11 @@ private Q_SLOTS:
         if (!m_inFlight) return;
         const int ms = m_clock.isValid() ? int(m_clock.elapsed()) : 0;
         qCDebug(lcEngine, "[t][gui] frameSwapped @%dms (dwell=%d)", ms, m_dwellMs);
+        // Snapshot the present's identity NOW: the releaseGate() below can already re-present
+        // (presentNext overwrites m_lastPresentHadContent/m_lastPresentRect when wait<=0), and the
+        // +0 ms lambdas would then read the NEXT present's values.
+        const bool hadContent = m_lastPresentHadContent;
+        const QRect presentRect = m_lastPresentRect;
         // Waveform tail can induce phantom taps — re-arm only when this present requested a guard
         // (content/chrome). Keyboard flushes leave it off so typing is not blanked mid-burst.
         if (m_lastPresentGuarded) bumpTouchGuard();
@@ -2407,14 +2460,15 @@ private Q_SLOTS:
         // (single-threaded, GUI-thread rendering): frameSwapped then fires after the QPA's present
         // returned (its fb mutex is free), and +0 ms puts us fully outside the render-loop tick.
         // main() refuses to wire this path (m_epd stays null) under any other render loop.
-        if (m_bwFast && m_lastPresentHadContent && m_epd)
-            QTimer::singleShot(0, this, [this]{ epdPresentFastIfOk(m_epd, m_lastPresentRect); });
+        if (m_bwFast && hadContent && m_epd)
+            QTimer::singleShot(0, this, [this, presentRect]{ epdPresentFastIfOk(m_epd, presentRect); });
         // Re-arm the settle flash on every content present; it fires once the page goes quiet.
-        if (m_lastPresentHadContent && m_settleFullMs > 0) m_settleFlash.start(m_settleFullMs);
+        if (hadContent && m_settleOn && m_settleFullMs > 0) m_settleFlash.start(m_settleFullMs);
         // Diagnostic: RMWEB_FULL_PRESENT=1 re-pushes every content frame with the FULL colour waveform
         // (slow + flashy — not a product path; answers "is the QPA auto waveform underdriving black?").
+        // Not in bwFast — presentFast already re-pushes there, a second re-push would double it.
         static const bool fullPresent = qgetenv("RMWEB_FULL_PRESENT") == "1";
-        if (fullPresent && m_lastPresentHadContent && m_epd)
+        if (fullPresent && !m_bwFast && hadContent && m_epd)
             QTimer::singleShot(0, this, [this]{ epdFullSwapIfOk(m_epd); });
     }
 private:
@@ -2709,6 +2763,7 @@ private:
     // guardTouch: e-ink refresh induces phantom taps — blank them for content presents. Keyboard
     // chrome flushes pass false so typing is not blocked mid-burst.
     void schedule(bool guardTouch = true) {
+        if (m_exiting) return;   // draining for exit: no new presents
         m_nextGuardTouch = m_nextGuardTouch || guardTouch;
         if (m_inFlight) m_dirty = true;
         else presentNext();
@@ -2717,17 +2772,26 @@ private:
     // The epaper scenegraph accumulates a damage QRegion and pushes exactly it to the panel
     // (verified on device: EPRenderLoop's present calls swapBuffers(QRegion, EPScreenModeMap,
     // NoRefresh) and skips an empty region), so update(rect) keeps both the raster work AND the
-    // panel refresh to the bbox. We accumulate it: content pixel diffs (setImage) ∪ chrome zones
-    // (the setters). An over-inclusive rect is always safe; a missed zone would leave stale pixels.
+    // panel refresh to the bbox. We accumulate it: content pixel diffs (computed lazily in
+    // presentNext, new frame vs the shown one) ∪ chrome zones (marked by the setters). An
+    // over-inclusive rect is always safe; a missed zone would leave stale pixels.
     void markDirty(const QRect &r) {
         if (r.isNull()) return;
         m_dirtyAccum = m_dirtyAccum.isNull() ? r : m_dirtyAccum.united(r);
     }
     void markDirtyAll() { m_dirtyAccum = QRect(0, 0, kPanelW, kPanelH); }
-    static QRect barZone()  { return QRect(0, 0, kPanelW, kBarH); }                  // chrome bar
-    static QRect pillZone() { return QRect(0, kBarH, kPanelW, 270); }                // badges + notice toast
-    static QRect kbZone()   { return QRect(0, kKbTopY, kPanelW, kPanelH - kKbTopY); }// on-screen keyboard
-    static QRect progZone() { return QRect(0, kPanelH - 10, kPanelW, 10); }          // read-progress strip
+    static QRect barZone()    { return QRect(0, 0, kPanelW, kBarH); }                   // chrome bar
+    static QRect pillZone()   { return QRect(0, kBarH, kPanelW, 270); }               // badges + notice toast
+    static QRect noticeZone() { return QRect(0, int(kPanelH * 0.30), kPanelW, 210); } // render-failed notice (drawRenderNotice)
+    static QRect kbZone()     { return QRect(0, kKbTopY, kPanelW, kPanelH - kKbTopY); }// on-screen keyboard
+    static QRect progZone()   { return QRect(0, kPanelH - 10, kPanelW, 10); }         // read-progress strip
+    // Align a bbox OUTWARD to 8 px — cheap insurance for the panel controller's region granularity.
+    static QRect alignOut8(const QRect &r) {
+        const int x0 = r.left() & ~7, y0 = r.top() & ~7;
+        const int x1 = qMin(kPanelW, (r.left() + r.width() + 7) & ~7);
+        const int y1 = qMin(kPanelH, (r.top() + r.height() + 7) & ~7);
+        return QRect(x0, y0, x1 - x0, y1 - y0);
+    }
     // Bounding box of pixel diffs between two same-size ARGB32 frames: rows memcmp'd first, exact
     // left/right edges scanned only on rows that differ (a few ms for 1620x2160 on this CPU).
     static QRect frameDiffBBox(const QImage &a, const QImage &b) {
@@ -2747,10 +2811,27 @@ private:
         return bot < 0 ? QRect() : QRect(left, top, right - left + 1, bot - top + 1);
     }
     void presentNext() {
+        if (m_exiting) { m_dirty = false; return; }   // draining for exit: no new presents
         // Apply newest WPE frame if any; always present so chrome-only updates (URL bar, keyboard,
         // badges) still refresh when m_img is still null (before the first buffer).
         const bool hadContent = m_hasPending;
-        if (m_hasPending) { m_img = m_pending; m_hasPending = false; m_grayDirty = true; m_tonedDirty = true; }
+        if (m_hasPending) {
+            // Lazy content diff (partial present): the new frame vs the one on screen. BOTH formats
+            // are checked — a non-ARGB32 side would misread as QRgb rows inside frameDiffBBox.
+            if (m_partial) {
+                if (m_img.isNull() || m_img.size() != m_pending.size()
+                        || m_img.format() != QImage::Format_ARGB32
+                        || m_pending.format() != QImage::Format_ARGB32)
+                    markDirtyAll();
+                else
+                    markDirty(frameDiffBBox(m_img, m_pending));
+            }
+            m_img = m_pending; m_hasPending = false; m_grayDirty = true; m_tonedDirty = true;
+        }
+        // No damage at all (identical frame + no chrome change): skip the present instead of arming
+        // the gate for a no-op — an empty update() is a FULL repaint in Qt, and a no-render one
+        // would sit on the fallback timer.
+        if (m_partial && m_dirtyAccum.isNull()) { m_dirty = false; return; }
         m_lastPresentHadContent = hadContent;
         m_dirty = false; m_inFlight = true;
         m_clock.restart();
@@ -2758,9 +2839,9 @@ private:
         m_lastPresentGuarded = m_nextGuardTouch;
         if (m_nextGuardTouch) bumpTouchGuard();  // content/chrome present: blank phantom noise
         m_nextGuardTouch = false;
-        const QRect dirty = m_dirtyAccum;
+        const QRect dirty = alignOut8(m_dirtyAccum);
         m_dirtyAccum = QRect();
-        if (m_partial && !dirty.isNull() && dirty != QRect(0, 0, kPanelW, kPanelH)) {
+        if (m_partial && dirty != QRect(0, 0, kPanelW, kPanelH)) {
             m_lastPresentRect = dirty;
             qCDebug(lcEngine, "[t][gui] present dirty=%dx%d@%d,%d", dirty.width(), dirty.height(),
                     dirty.x(), dirty.y());
@@ -2773,6 +2854,7 @@ private:
     }
     void releaseGate() {
         m_fallback.stop(); m_inFlight = false;
+        if (m_exiting) return;                            // draining for exit: no re-present
         if (m_hasPending || m_dirty) presentNext();   // newer frame or a chrome change queued -> present it
     }
     static const int kFallbackMs = 2500;         // release even if frameSwapped never fires (>= worst refresh)
@@ -2780,6 +2862,8 @@ private:
     int m_dwellMs = 200;                         // min present spacing, ms (RMWEB_PRESENT_DWELL overrides)
     int m_contentMinPresentMs = 1200;            // SPA frame-storm throttle (RMWEB_CONTENT_PRESENT_MS)
     bool m_hasPending = false, m_inFlight = false, m_dirty = false;
+    bool m_exiting = false;                      // drainForExit ran: setImage/schedule/presentNext no-op
+    bool m_draining = false;                     // drainForExit in progress (termPoll re-entry guard)
     bool m_partial = true;                       // partial present (dirty bbox) — RMWEB_PARTIAL=0 disables
     QRect m_dirtyAccum;                          // damage accumulated since the last presentNext
     QRect m_lastPresentRect;                     // damage rect of the in-flight present (presentFast re-push)
@@ -2793,6 +2877,7 @@ private:
     bool m_tonedDirty = true;                    // toned cache needs (re)build (new frame / toggle)
     QImage m_imgToned;                           // tone-curved copy of m_img (built lazily in paint)
     float m_textGamma = 1.7f;                    // luma curve gamma (RMWEB_TEXT_GAMMA; tune on device)
+    float m_toneLut[256];                        // built once in the ctor from m_textGamma
     EpaperRefresh *m_epd = nullptr;              // manual panel present (B&W fast waveform), if available
     bool m_lastPresentHadContent = false;        // last present carried a new page frame (vs chrome-only)
     gint64 m_lastContentPresentUs = 0;            // last e-ink present that carried a new WPE frame
@@ -2800,6 +2885,7 @@ private:
     QElapsedTimer m_clock;
     QTimer m_fallback;
     QTimer m_settleFlash;                        // one full-quality develop once the page goes quiet
+    bool m_settleOn = true;                      // settings-page settle-flash toggle (default on)
     int m_settleFullMs = 1500;                   // settle delay (RMWEB_SETTLE_FULL_MS; 0 = off)
     QTimer m_kbFlush;                            // keyboard address-bar coalesced redraw
     QTimer m_contentFlush;                       // delayed present of throttled SPA frames
@@ -3168,8 +3254,16 @@ int main(int argc, char **argv) {
             // Debug: RMWEB_DUMP_FRAMES=/dir saves every incoming frame as PNG (engine-side view,
             // pre-throttle) so rendering bugs can be inspected off-device. Off by default.
             static const QByteArray dumpDir = qgetenv("RMWEB_DUMP_FRAMES");
-            if (!dumpDir.isEmpty())
-                img.save(QString::fromUtf8(dumpDir) + QStringLiteral("/frame-%1.png").arg(frame));
+            if (!dumpDir.isEmpty()) {
+                static const bool dumpReady = QDir().mkpath(QString::fromUtf8(dumpDir));   // once
+                static bool dumpWarned = false;
+                const QString out = QString::fromUtf8(dumpDir)
+                                  + QStringLiteral("/frame-%1.png").arg(frame, 5, 10, QLatin1Char('0'));
+                if (!(dumpReady && img.save(out)) && !dumpWarned) {
+                    dumpWarned = true;   // once is enough — don't spam the persistent log per frame
+                    qWarning("[dbg] RMWEB_DUMP_FRAMES: cannot save %s", qPrintable(out));
+                }
+            }
             view->setImage(img);
             qCDebug(lcEngine, "[t][gui] frame %d -> setImage %.1fms  %dx%d", frame,
                   (g_get_monotonic_time() - t) / 1000.0, img.width(), img.height());
@@ -3196,6 +3290,8 @@ int main(int argc, char **argv) {
                                                            // start() emits the initial state once loaded
         QObject::connect(&engine, &WpeEngine::textBoostChanged, view, &WpeView::setTextBoost,
                          Qt::QueuedConnection);            // same path as bwFastChanged
+        QObject::connect(&engine, &WpeEngine::settleFlashChanged, view, &WpeView::setSettleFlash,
+                         Qt::QueuedConnection);            // same path again
         QObject::connect(&engine, &WpeEngine::urlChanged, view,   // a new page resets the bar until
                          [view]{ view->setReadProgress(-1); });   // the first scroll/restore answers
         QObject::connect(&engine, &WpeEngine::renderingChanged, view,
@@ -3250,8 +3346,10 @@ int main(int argc, char **argv) {
             // Under any other loop do NOT wire the hook: presents fall back to the QPA's own path.
             if (qgetenv("QSG_RENDER_LOOP") == "basic" && qgetenv("RMWEB_BW_HOOK") != "0")
                 view->setEpaperRefresh(&epaper);   // B&W fast mode's fast-mono presents (frameSwapped path)
+            else if (qgetenv("QSG_RENDER_LOOP") != "basic")
+                qWarning("[refresh] fast-mono presents disabled (QSG_RENDER_LOOP is not \"basic\")");
             else
-                qWarning("[refresh] QSG_RENDER_LOOP is not \"basic\" — fast-mono presents disabled");
+                qWarning("[refresh] fast-mono presents disabled (RMWEB_BW_HOOK=0)");
             if (win && qEnvironmentVariableIsSet("RMWEB_MANUAL_PRESENT"))
                 QObject::connect(win, &QQuickWindow::afterRendering, win,
                                  [] { epaper.present(); }, Qt::DirectConnection);
@@ -3347,7 +3445,8 @@ int main(int argc, char **argv) {
         g_termDrainOk = 1;
         { auto *termPoll = new QTimer(&app);
           QObject::connect(termPoll, &QTimer::timeout, &app, [&engine, view]{
-              if (!g_termRequested) return;
+              if (!g_termRequested || g_termDraining) return;   // drainForExit pumps processEvents —
+              g_termRequested = 0; g_termDraining = 1;          // a re-dispatched poll must not recurse
               qInfo("[exit] SIGTERM — draining panel, flushing profile, leaving");
               view->drainForExit();
               engine.flushSync();
