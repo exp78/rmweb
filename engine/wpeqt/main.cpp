@@ -1965,7 +1965,7 @@ private:
 // not Qt: the epaper QPA does not deliver finger touch to QtQuick items here).
 // ---------------------------------------------------------------------------
 class EpaperRefresh;   // defined further below — WpeView calls its presentFast in B&W mode
-void epdPresentFastIfOk(EpaperRefresh *e);   // thin call wrapper (complete type only below)
+void epdPresentFastIfOk(EpaperRefresh *e, const QRect &r);   // thin call wrapper (complete type only below)
 void epdFullSwapIfOk(EpaperRefresh *e);      // same wrapper for the RMWEB_FULL_PRESENT diagnostic
 
 class WpeView : public QQuickPaintedItem {
@@ -1998,6 +1998,7 @@ public:
             const float g = qgetenv("RMWEB_TEXT_GAMMA").toFloat();
             if (g > 0.5f && g < 4.0f) m_textGamma = g;
         }
+        m_partial = qgetenv("RMWEB_PARTIAL") != "0";   // partial present (dirty bbox) on by default
         connect(&m_settleFlash, &QTimer::timeout, this, [this]{
             if (m_bwFast || m_editing || !m_epd) return;      // no flash over fast mono / typing
             if (m_inFlight) { m_settleFlash.start(500); return; }   // present still on the panel — retry
@@ -2010,7 +2011,7 @@ public:
         m_kbFlush.setSingleShot(true);
         connect(&m_kbFlush, &QTimer::timeout, this, [this]{
             m_kbPressed = -1;                                // release the flashed key
-            if (m_editing) schedule(/*guardTouch=*/false);   // flush address+keys without re-arming touch blank
+            if (m_editing) { markDirty(kbZone()); schedule(/*guardTouch=*/false); }   // flush address+keys without re-arming touch blank
         });
         // Content present throttle: heavy SPAs (heavy news SPAs etc.) emit NEW frames every ~300ms forever
         // (ads/tickers). Presenting each to e-ink locks the UI under continuous refresh + touch guard.
@@ -2025,6 +2026,7 @@ public:
         m_noticeTimer.setSingleShot(true);
         connect(&m_noticeTimer, &QTimer::timeout, this, [this]{
             m_notice.clear();
+            markDirty(pillZone());   // erase the toast
             schedule();
         });
     }
@@ -2171,8 +2173,9 @@ public:
     void pressChrome(Hit h) {
         if (h == None || h == Address || h == AddressClear) return;   // the keyboard opening is feedback enough
         m_pressed = h;
+        markDirty(barZone());
         schedule(/*guardTouch=*/false);
-        QTimer::singleShot(180, this, [this]{ m_pressed = None; schedule(/*guardTouch=*/false); });
+        QTimer::singleShot(180, this, [this]{ m_pressed = None; markDirty(barZone()); schedule(/*guardTouch=*/false); });
     }
     // Panel-px rect of a chrome control (same layout as hitChrome via chromeLayout), for painting.
     QRectF chromeHitRect(Hit h) const {
@@ -2222,6 +2225,7 @@ public:
         m_editBuf.clear();   // start blank; m_addr stays as the "old" value until a successful Go
         m_kbShift = false; m_kbSym = false; rebuildKeys();   // always reopen on the plain letters page
         m_kbFlush.stop();
+        markDirty(barZone() | pillZone() | kbZone());
         schedule(/*guardTouch=*/false);
     }
     // Form-field entry (a text field on the page was tapped): the keyboard opens PRE-FILLED with the
@@ -2241,6 +2245,7 @@ public:
         if (useSuggest) setNotice("Autofill — edit or press Go");
         m_kbShift = false; m_kbSym = false; rebuildKeys();
         m_kbFlush.stop();
+        markDirty(barZone() | pillZone() | kbZone());
         schedule(/*guardTouch=*/false);
     }
     void endEdit() {
@@ -2252,6 +2257,7 @@ public:
         m_kbPressed = -1;
         g_urlEditing.store(false, std::memory_order_release);
         m_editBuf.clear();
+        markDirty(barZone() | pillZone() | kbZone());
         schedule(/*guardTouch=*/false);
     }
     void clearEditBuf() {
@@ -2259,6 +2265,7 @@ public:
         m_editBuf.clear();
         m_kbPressed = -1;
         m_kbFlush.stop();
+        markDirty(barZone());
         schedule(/*guardTouch=*/false);
     }
     void handleEditTap(int x, int y) {
@@ -2273,22 +2280,26 @@ public:
                 // Flash the key NOW (inverted) — on a 200 ms-latency panel immediate feedback is
                 // the difference between "responsive" and "did it register?"; kbFlush restores it.
                 m_kbPressed = i;
+                markDirty(barZone() | kbZone());
                 schedule(/*guardTouch=*/false);
                 m_kbFlush.start(kKbFlushMs);
                 return;
             case rmweb::KeyKind::Shift:
                 m_kbShift = !m_kbShift;
                 rebuildKeys();
+                markDirty(kbZone());
                 schedule(/*guardTouch=*/false);                  // case labels changed — repaint keys now
                 return;
             case rmweb::KeyKind::Sym:
                 m_kbSym = !m_kbSym; m_kbShift = false;           // page switch drops an armed Shift
                 rebuildKeys();
+                markDirty(kbZone());
                 schedule(/*guardTouch=*/false);
                 return;
             case rmweb::KeyKind::Backspace:
                 m_editBuf.chop(1);
                 m_kbPressed = i;
+                markDirty(barZone() | kbZone());
                 schedule(/*guardTouch=*/false);
                 m_kbFlush.start(kKbFlushMs);
                 return;
@@ -2313,6 +2324,14 @@ Q_SIGNALS:
     void fieldTextEntered(const QString &text);   // Go in field mode -> commit into the focused page field
 public Q_SLOTS:
     void setImage(const QImage &img) {
+        // Partial present: accumulate the content diff against the currently shown frame. Identical
+        // frames add nothing; a size change or the first frame dirties the whole panel.
+        if (m_partial) {
+            if (m_img.isNull() || m_img.size() != img.size() || img.format() != QImage::Format_ARGB32)
+                markDirtyAll();
+            else
+                markDirty(frameDiffBBox(m_img, img));
+        }
         m_pending = img;
         m_hasPending = true;
         // Always keep the latest frame. Only schedule an e-ink present if forced (user action) or
@@ -2333,38 +2352,39 @@ public Q_SLOTS:
     }
     // Chrome state (fed by engine signals on the GUI thread). Each re-presents the current frame with the
     // new chrome via the SAME serializer — never a bare update() (that would risk an overlapping present).
-    void setChromeOn(bool v)       { if (v != m_chromeOn) { m_chromeOn = v; schedule(); } }
+    void setChromeOn(bool v)       { if (v != m_chromeOn) { m_chromeOn = v; markDirty(barZone()); schedule(); } }
     // B&W fast mode (settings page): present grayscale frames — the panel's fast mono waveform develops
     // them fully, while colour content under a fast waveform stays washed out until a slow full pass.
     // And force that fast waveform ourselves per content present (presentFast below).
-    void setBwFast(bool v)         { if (v != m_bwFast) { m_bwFast = v; m_grayDirty = true; schedule(); } }
+    void setBwFast(bool v)         { if (v != m_bwFast) { m_bwFast = v; m_grayDirty = true; markDirtyAll(); schedule(); } }
     // Text boost (colour mode): darken text via a luma tone curve on the frame (paint() below).
-    void setTextBoost(bool v)      { if (v != m_textBoost) { m_textBoost = v; m_tonedDirty = true; schedule(); } }
+    void setTextBoost(bool v)      { if (v != m_textBoost) { m_textBoost = v; m_tonedDirty = true; markDirtyAll(); schedule(); } }
     void setEpaperRefresh(EpaperRefresh *e) { m_epd = e; }
-    void setCanBack(bool v)        { if (v != m_canBack)  { m_canBack  = v; schedule(); } }
-    void setCanFwd(bool v)         { if (v != m_canFwd)   { m_canFwd   = v; schedule(); } }
-    void setLoading(bool v)        { if (v != m_loading)  { m_loading  = v; if (v) m_loadProgress = 0.0; schedule(); } }
+    void setCanBack(bool v)        { if (v != m_canBack)  { m_canBack  = v; markDirty(barZone()); schedule(); } }
+    void setCanFwd(bool v)         { if (v != m_canFwd)   { m_canFwd   = v; markDirty(barZone()); schedule(); } }
+    void setLoading(bool v)        { if (v != m_loading)  { m_loading  = v; if (v) m_loadProgress = 0.0; markDirty(barZone() | pillZone()); schedule(); } }
     void setLoadProgress(double p) {                       // throttle repaints to ~10% steps (limit e-ink flicker)
         const bool step = int(p * 10) != int(m_loadProgress * 10);
-        m_loadProgress = p; if (step && m_loading) schedule();
+        m_loadProgress = p; if (step && m_loading) { markDirty(pillZone()); schedule(); }
     }
-    void setRenderFailed(bool v)   { if (v != m_renderFailed) { m_renderFailed = v; schedule(); } }
-    void setTlsState(int s)        { if (s != m_tlsState) { m_tlsState = s; schedule(); } }   // 0 none, 1 https, 2 https+cert errors
-    void setRendering(bool v)      { if (v != m_rendering)  { m_rendering  = v; schedule(); } }
-    void setAddr(const QString &s) { if (s != m_addr)     { m_addr     = s; schedule(); } }
-    void setReaderMode(bool v)     { if (v != m_readerMode)  { m_readerMode  = v; schedule(); } }
-    void setReaderable(bool v)     { if (v != m_readerable) { m_readerable = v; schedule(); } }
-    void setBookmarked(bool v) { if (v != m_bookmarked) { m_bookmarked = v; schedule(); } }
+    void setRenderFailed(bool v)   { if (v != m_renderFailed) { m_renderFailed = v; markDirtyAll(); schedule(); } }   // white-out is full-screen
+    void setTlsState(int s)        { if (s != m_tlsState) { m_tlsState = s; markDirty(barZone()); schedule(); } }   // 0 none, 1 https, 2 https+cert errors
+    void setRendering(bool v)      { if (v != m_rendering)  { m_rendering  = v; markDirty(pillZone()); schedule(); } }
+    void setAddr(const QString &s) { if (s != m_addr)     { m_addr     = s; markDirty(barZone()); schedule(); } }
+    void setReaderMode(bool v)     { if (v != m_readerMode)  { m_readerMode  = v; markDirty(barZone()); schedule(); } }
+    void setReaderable(bool v)     { if (v != m_readerable) { m_readerable = v; markDirty(barZone()); schedule(); } }
+    void setBookmarked(bool v) { if (v != m_bookmarked) { m_bookmarked = v; markDirty(barZone()); schedule(); } }
     void setNotice(const QString &s) {           // transient toast (find results, downloads)
         if (s.isEmpty()) return;
         m_notice = s;
         m_noticeTimer.start(kNoticeMs);          // re-arms if a second notice lands quickly
+        markDirty(pillZone());
         schedule();
     }
     void setReadProgress(double f) {             // reading position 0..1; -1 hides the bar.
-        m_readProgress = f;                      // NO schedule(): a content frame always follows
-    }                                            // (scroll/restore force one) — a separate present
-                                                 // here would double the e-ink flash per page turn
+        if (f != m_readProgress) markDirty(progZone());   // ride the next present (content frame
+        m_readProgress = f;                      // always follows) — a separate present here would
+    }                                            // double the e-ink flash per page turn
 protected:
     void itemChange(ItemChange ch, const ItemChangeData &d) override {
         if (ch == ItemSceneChange && d.window)   // frameSwapped fires after the panel present returns
@@ -2388,7 +2408,7 @@ private Q_SLOTS:
         // returned (its fb mutex is free), and +0 ms puts us fully outside the render-loop tick.
         // main() refuses to wire this path (m_epd stays null) under any other render loop.
         if (m_bwFast && m_lastPresentHadContent && m_epd)
-            QTimer::singleShot(0, this, [this]{ epdPresentFastIfOk(m_epd); });
+            QTimer::singleShot(0, this, [this]{ epdPresentFastIfOk(m_epd, m_lastPresentRect); });
         // Re-arm the settle flash on every content present; it fires once the page goes quiet.
         if (m_lastPresentHadContent && m_settleFullMs > 0) m_settleFlash.start(m_settleFullMs);
         // Diagnostic: RMWEB_FULL_PRESENT=1 re-pushes every content frame with the FULL colour waveform
@@ -2693,6 +2713,39 @@ private:
         if (m_inFlight) m_dirty = true;
         else presentNext();
     }
+    // --- Partial present (RMWEB_PARTIAL=0 disables) ---------------------------------------------
+    // The epaper scenegraph accumulates a damage QRegion and pushes exactly it to the panel
+    // (verified on device: EPRenderLoop's present calls swapBuffers(QRegion, EPScreenModeMap,
+    // NoRefresh) and skips an empty region), so update(rect) keeps both the raster work AND the
+    // panel refresh to the bbox. We accumulate it: content pixel diffs (setImage) ∪ chrome zones
+    // (the setters). An over-inclusive rect is always safe; a missed zone would leave stale pixels.
+    void markDirty(const QRect &r) {
+        if (r.isNull()) return;
+        m_dirtyAccum = m_dirtyAccum.isNull() ? r : m_dirtyAccum.united(r);
+    }
+    void markDirtyAll() { m_dirtyAccum = QRect(0, 0, kPanelW, kPanelH); }
+    static QRect barZone()  { return QRect(0, 0, kPanelW, kBarH); }                  // chrome bar
+    static QRect pillZone() { return QRect(0, kBarH, kPanelW, 270); }                // badges + notice toast
+    static QRect kbZone()   { return QRect(0, kKbTopY, kPanelW, kPanelH - kKbTopY); }// on-screen keyboard
+    static QRect progZone() { return QRect(0, kPanelH - 10, kPanelW, 10); }          // read-progress strip
+    // Bounding box of pixel diffs between two same-size ARGB32 frames: rows memcmp'd first, exact
+    // left/right edges scanned only on rows that differ (a few ms for 1620x2160 on this CPU).
+    static QRect frameDiffBBox(const QImage &a, const QImage &b) {
+        const int w = a.width(), h = a.height();
+        int top = h, bot = -1, left = w, right = -1;
+        for (int y = 0; y < h; ++y) {
+            const QRgb *ra = reinterpret_cast<const QRgb*>(a.constScanLine(y));
+            const QRgb *rb = reinterpret_cast<const QRgb*>(b.constScanLine(y));
+            if (std::memcmp(ra, rb, size_t(w) * 4) == 0) continue;
+            if (y < top) top = y;
+            bot = y;
+            int x = 0;      while (x < w && ra[x] == rb[x]) ++x;
+            int xe = w - 1; while (xe > x && ra[xe] == rb[xe]) --xe;
+            if (x < left) left = x;
+            if (xe > right) right = xe;
+        }
+        return bot < 0 ? QRect() : QRect(left, top, right - left + 1, bot - top + 1);
+    }
     void presentNext() {
         // Apply newest WPE frame if any; always present so chrome-only updates (URL bar, keyboard,
         // badges) still refresh when m_img is still null (before the first buffer).
@@ -2705,7 +2758,17 @@ private:
         m_lastPresentGuarded = m_nextGuardTouch;
         if (m_nextGuardTouch) bumpTouchGuard();  // content/chrome present: blank phantom noise
         m_nextGuardTouch = false;
-        update();                                // -> scene render -> EPRenderLoop present to panel
+        const QRect dirty = m_dirtyAccum;
+        m_dirtyAccum = QRect();
+        if (m_partial && !dirty.isNull() && dirty != QRect(0, 0, kPanelW, kPanelH)) {
+            m_lastPresentRect = dirty;
+            qCDebug(lcEngine, "[t][gui] present dirty=%dx%d@%d,%d", dirty.width(), dirty.height(),
+                    dirty.x(), dirty.y());
+            update(dirty);                       // -> scene render of the region -> EPRenderLoop
+        } else {                                 // pushes exactly it to the panel
+            m_lastPresentRect = QRect(0, 0, kPanelW, kPanelH);
+            update();                            // -> scene render -> EPRenderLoop present to panel
+        }
         m_fallback.start(kFallbackMs);
     }
     void releaseGate() {
@@ -2717,6 +2780,9 @@ private:
     int m_dwellMs = 200;                         // min present spacing, ms (RMWEB_PRESENT_DWELL overrides)
     int m_contentMinPresentMs = 1200;            // SPA frame-storm throttle (RMWEB_CONTENT_PRESENT_MS)
     bool m_hasPending = false, m_inFlight = false, m_dirty = false;
+    bool m_partial = true;                       // partial present (dirty bbox) — RMWEB_PARTIAL=0 disables
+    QRect m_dirtyAccum;                          // damage accumulated since the last presentNext
+    QRect m_lastPresentRect;                     // damage rect of the in-flight present (presentFast re-push)
     bool m_nextGuardTouch = true;                // whether the next present arms the phantom-touch guard
     bool m_lastPresentGuarded = true;            // last present used the guard (for frameSwapped re-arm)
     bool m_forceContentPresent = false;          // next setImage bypasses content throttle (user action)
@@ -2952,13 +3018,14 @@ public:
     // afterRendering instead self-deadlocks; see class comment). The fast mono waveform leaves residue
     // with each present, so ghosting builds up over successive turns — standard e-ink practice (xochitl
     // does the same) is a periodic full flash to clear it: every kFastFullEvery content presents here.
-    void presentFast() {
+    // r = the present's damage rect (partial present): the re-push covers exactly it.
+    void presentFast(const QRect &r) {
         if (!m_fb) return;
         if (++m_fastFrames >= kFastFullEvery) {
             m_fastFrames = 0;
-            fullSwap();                                       // anti-ghost full flash
+            fullSwap();                                       // anti-ghost full flash (always full-screen)
         } else {
-            swap(QRect(0, 0, kPanelW, kPanelH), 0, 1, 0);     // Mono, QualityFast, NoRefresh
+            swap(r, 0, 1, 0);                                 // Mono, QualityFast, NoRefresh
         }
     }
     // Present what the scenegraph just rendered. Enum values: EPContentType{Mono=0,Color=1} (legacy ABI),
@@ -3006,7 +3073,7 @@ private:
     gint64 m_lastPresentUs = 0;
 };
 
-void epdPresentFastIfOk(EpaperRefresh *e) { if (e && e->ok()) e->presentFast(); }
+void epdPresentFastIfOk(EpaperRefresh *e, const QRect &r) { if (e && e->ok()) e->presentFast(r); }
 void epdFullSwapIfOk(EpaperRefresh *e)  { if (e && e->ok()) e->fullSwap(); }
 
 // Reading-shell host: a bare full-screen Window holding the WpeView. The browser chrome is hand-painted
