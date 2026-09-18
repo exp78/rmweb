@@ -769,7 +769,6 @@ public Q_SLOTS:
         });
     }
     // Settings-page toggles — run on the worker thread (decide-policy), mutate + persist + apply live.
-    bool bwFastSetting() const { return m_settings.bwFast; }
     void toggleBwFastSetting() {
         m_settings.bwFast = !m_settings.bwFast;
         rmweb::saveSettings(m_profileDir, m_settings);
@@ -2050,7 +2049,7 @@ public:
         m_kbFlush.setSingleShot(true);
         connect(&m_kbFlush, &QTimer::timeout, this, [this]{
             m_kbPressed = -1;                                // release the flashed key
-            if (m_editing) { markDirty(kbZone()); schedule(/*guardTouch=*/false); }   // flush address+keys without re-arming touch blank
+            if (m_editing) scheduleDirty(kbZone(), /*guardTouch=*/false);   // flush address+keys without re-arming touch blank
         });
         // Content present throttle: heavy SPAs (heavy news SPAs etc.) emit NEW frames every ~300ms forever
         // (ads/tickers). Presenting each to e-ink locks the UI under continuous refresh + touch guard.
@@ -2065,8 +2064,7 @@ public:
         m_noticeTimer.setSingleShot(true);
         connect(&m_noticeTimer, &QTimer::timeout, this, [this]{
             m_notice.clear();
-            markDirty(pillZone());   // erase the toast
-            schedule();
+            scheduleDirty(pillZone());   // erase the toast
         });
     }
     // Call before user-driven actions (page turn, reload, link) so the next WPE frame paints immediately.
@@ -2082,8 +2080,8 @@ public:
     // against frameSwapped. Bounded: a stuck present (no frameSwapped, fallback still pending at
     // 2.5 s) must not stall power-off — log and exit anyway.
     void drainForExit() {
-        if (m_draining) return;   // termPoll re-entry via the processEvents below — already draining
-        m_draining = true;
+        if (g_termDraining) return;   // already draining — poll/⏻ re-entry via the processEvents below
+        g_termDraining = 1;           // also makes a second SIGTERM a force-exit (see termHandler)
         m_exiting = true;         // no new presents from here on (setImage/schedule/presentNext no-op)
         m_settleFlash.stop(); m_contentFlush.stop(); m_noticeTimer.stop();
         if (!m_inFlight) return;
@@ -2218,9 +2216,8 @@ public:
     void pressChrome(Hit h) {
         if (h == None || h == Address || h == AddressClear) return;   // the keyboard opening is feedback enough
         m_pressed = h;
-        markDirty(barZone());
-        schedule(/*guardTouch=*/false);
-        QTimer::singleShot(180, this, [this]{ m_pressed = None; markDirty(barZone()); schedule(/*guardTouch=*/false); });
+        scheduleDirty(barZone(), /*guardTouch=*/false);
+        QTimer::singleShot(180, this, [this]{ m_pressed = None; scheduleDirty(barZone(), /*guardTouch=*/false); });
     }
     // Panel-px rect of a chrome control (same layout as hitChrome via chromeLayout), for painting.
     QRectF chromeHitRect(Hit h) const {
@@ -2270,9 +2267,7 @@ public:
         m_editBuf.clear();   // start blank; m_addr stays as the "old" value until a successful Go
         m_kbShift = false; m_kbSym = false; rebuildKeys();   // always reopen on the plain letters page
         m_kbFlush.stop();
-        markDirty(barZone() | pillZone() | kbZone());
-        if (m_renderFailed) markDirty(noticeZone());   // editing hides/restores the render-failed notice
-        schedule(/*guardTouch=*/false);
+        scheduleDirty(editZones(), /*guardTouch=*/false);
     }
     // Form-field entry (a text field on the page was tapped): the keyboard opens PRE-FILLED with the
     // field's current value; Go commits into the field (fieldTextEntered), Cancel discards.
@@ -2291,9 +2286,7 @@ public:
         if (useSuggest) setNotice("Autofill — edit or press Go");
         m_kbShift = false; m_kbSym = false; rebuildKeys();
         m_kbFlush.stop();
-        markDirty(barZone() | pillZone() | kbZone());
-        if (m_renderFailed) markDirty(noticeZone());   // editing hides/restores the render-failed notice
-        schedule(/*guardTouch=*/false);
+        scheduleDirty(editZones(), /*guardTouch=*/false);
     }
     void endEdit() {
         if (!m_editing) return;
@@ -2304,20 +2297,17 @@ public:
         m_kbPressed = -1;
         g_urlEditing.store(false, std::memory_order_release);
         m_editBuf.clear();
-        markDirty(barZone() | pillZone() | kbZone());
-        if (m_renderFailed) markDirty(noticeZone());   // editing hides/restores the render-failed notice
         // Typing suppressed the settle flash (the lambda skips while editing) — re-arm it now,
         // or a page that went quiet DURING the edit would never get its full-quality develop.
         if (m_settleOn && m_settleFullMs > 0 && !m_bwFast) m_settleFlash.start(m_settleFullMs);
-        schedule(/*guardTouch=*/false);
+        scheduleDirty(editZones(), /*guardTouch=*/false);
     }
     void clearEditBuf() {
         if (!m_editing || m_editBuf.isEmpty()) return;
         m_editBuf.clear();
         m_kbPressed = -1;
         m_kbFlush.stop();
-        markDirty(barZone());
-        schedule(/*guardTouch=*/false);
+        scheduleDirty(barZone(), /*guardTouch=*/false);
     }
     void handleEditTap(int x, int y) {
         // × in the address bar (chrome) while the keyboard is open.
@@ -2331,27 +2321,23 @@ public:
                 // Flash the key NOW (inverted) — on a 200 ms-latency panel immediate feedback is
                 // the difference between "responsive" and "did it register?"; kbFlush restores it.
                 m_kbPressed = i;
-                markDirty(barZone() | kbZone());
-                schedule(/*guardTouch=*/false);
+                scheduleDirty(barZone() | kbZone(), /*guardTouch=*/false);
                 m_kbFlush.start(kKbFlushMs);
                 return;
             case rmweb::KeyKind::Shift:
                 m_kbShift = !m_kbShift;
                 rebuildKeys();
-                markDirty(kbZone());
-                schedule(/*guardTouch=*/false);                  // case labels changed — repaint keys now
+                scheduleDirty(kbZone(), /*guardTouch=*/false);         // case labels changed — repaint keys now
                 return;
             case rmweb::KeyKind::Sym:
                 m_kbSym = !m_kbSym; m_kbShift = false;           // page switch drops an armed Shift
                 rebuildKeys();
-                markDirty(kbZone());
-                schedule(/*guardTouch=*/false);
+                scheduleDirty(kbZone(), /*guardTouch=*/false);
                 return;
             case rmweb::KeyKind::Backspace:
                 m_editBuf.chop(1);
                 m_kbPressed = i;
-                markDirty(barZone() | kbZone());
-                schedule(/*guardTouch=*/false);
+                scheduleDirty(barZone() | kbZone(), /*guardTouch=*/false);
                 m_kbFlush.start(kKbFlushMs);
                 return;
             case rmweb::KeyKind::Cancel:
@@ -2397,7 +2383,7 @@ public Q_SLOTS:
     }
     // Chrome state (fed by engine signals on the GUI thread). Each re-presents the current frame with the
     // new chrome via the SAME serializer — never a bare update() (that would risk an overlapping present).
-    void setChromeOn(bool v)       { if (v != m_chromeOn) { m_chromeOn = v; markDirty(barZone()); schedule(); } }
+    void setChromeOn(bool v)       { if (v != m_chromeOn) { m_chromeOn = v; scheduleDirty(barZone()); } }
     // B&W fast mode (settings page): present grayscale frames — the panel's fast mono waveform develops
     // them fully, while colour content under a fast waveform stays washed out until a slow full pass.
     // And force that fast waveform ourselves per content present (presentFast below).
@@ -2408,26 +2394,25 @@ public Q_SLOTS:
     // needed — it's a panel-side pass; off just stops a pending timer.
     void setSettleFlash(bool v)    { if (v != m_settleOn) { m_settleOn = v; if (!v) m_settleFlash.stop(); } }
     void setEpaperRefresh(EpaperRefresh *e) { m_epd = e; }
-    void setCanBack(bool v)        { if (v != m_canBack)  { m_canBack  = v; markDirty(barZone()); schedule(); } }
-    void setCanFwd(bool v)         { if (v != m_canFwd)   { m_canFwd   = v; markDirty(barZone()); schedule(); } }
-    void setLoading(bool v)        { if (v != m_loading)  { m_loading  = v; if (v) m_loadProgress = 0.0; markDirty(barZone() | pillZone()); schedule(); } }
+    void setCanBack(bool v)        { if (v != m_canBack)  { m_canBack  = v; scheduleDirty(barZone()); } }
+    void setCanFwd(bool v)         { if (v != m_canFwd)   { m_canFwd   = v; scheduleDirty(barZone()); } }
+    void setLoading(bool v)        { if (v != m_loading)  { m_loading  = v; if (v) m_loadProgress = 0.0; scheduleDirty(barZone() | pillZone()); } }
     void setLoadProgress(double p) {                       // throttle repaints to ~10% steps (limit e-ink flicker)
         const bool step = int(p * 10) != int(m_loadProgress * 10);
-        m_loadProgress = p; if (step && m_loading) { markDirty(pillZone()); schedule(); }
+        m_loadProgress = p; if (step && m_loading) scheduleDirty(pillZone());
     }
     void setRenderFailed(bool v)   { if (v != m_renderFailed) { m_renderFailed = v; markDirtyAll(); schedule(); } }   // white-out is full-screen
-    void setTlsState(int s)        { if (s != m_tlsState) { m_tlsState = s; markDirty(barZone()); schedule(); } }   // 0 none, 1 https, 2 https+cert errors
-    void setRendering(bool v)      { if (v != m_rendering)  { m_rendering  = v; markDirty(pillZone()); schedule(); } }
-    void setAddr(const QString &s) { if (s != m_addr)     { m_addr     = s; markDirty(barZone()); schedule(); } }
-    void setReaderMode(bool v)     { if (v != m_readerMode)  { m_readerMode  = v; markDirty(barZone()); schedule(); } }
-    void setReaderable(bool v)     { if (v != m_readerable) { m_readerable = v; markDirty(barZone()); schedule(); } }
-    void setBookmarked(bool v) { if (v != m_bookmarked) { m_bookmarked = v; markDirty(barZone()); schedule(); } }
+    void setTlsState(int s)        { if (s != m_tlsState) { m_tlsState = s; scheduleDirty(barZone()); } }   // 0 none, 1 https, 2 https+cert errors
+    void setRendering(bool v)      { if (v != m_rendering)  { m_rendering  = v; scheduleDirty(pillZone()); } }
+    void setAddr(const QString &s) { if (s != m_addr)     { m_addr     = s; scheduleDirty(barZone()); } }
+    void setReaderMode(bool v)     { if (v != m_readerMode)  { m_readerMode  = v; scheduleDirty(barZone()); } }
+    void setReaderable(bool v)     { if (v != m_readerable) { m_readerable = v; scheduleDirty(barZone()); } }
+    void setBookmarked(bool v) { if (v != m_bookmarked) { m_bookmarked = v; scheduleDirty(barZone()); } }
     void setNotice(const QString &s) {           // transient toast (find results, downloads)
         if (s.isEmpty()) return;
         m_notice = s;
         m_noticeTimer.start(kNoticeMs);          // re-arms if a second notice lands quickly
-        markDirty(pillZone());
-        schedule();
+        scheduleDirty(pillZone());
     }
     void setReadProgress(double f) {             // reading position 0..1; -1 hides the bar.
         if (f != m_readProgress) markDirty(progZone());   // ride the next present (content frame
@@ -2780,6 +2765,15 @@ private:
         m_dirtyAccum = m_dirtyAccum.isNull() ? r : m_dirtyAccum.united(r);
     }
     void markDirtyAll() { m_dirtyAccum = QRect(0, 0, kPanelW, kPanelH); }
+    // markDirty + schedule as one call — the pair every visual-state change wants.
+    void scheduleDirty(const QRect &r, bool guardTouch = true) { markDirty(r); schedule(guardTouch); }
+    // Zones an edit session repaints: bar + pills + keyboard, plus the render-failed notice box
+    // when it is up (editing hides/restores it).
+    QRect editZones() const {
+        QRect r = barZone() | pillZone() | kbZone();
+        if (m_renderFailed) r = r.united(noticeZone());
+        return r;
+    }
     static QRect barZone()    { return QRect(0, 0, kPanelW, kBarH); }                   // chrome bar
     static QRect pillZone()   { return QRect(0, kBarH, kPanelW, 270); }               // badges + notice toast
     static QRect noticeZone() { return QRect(0, int(kPanelH * 0.30), kPanelW, 210); } // render-failed notice (drawRenderNotice)
@@ -2863,7 +2857,6 @@ private:
     int m_contentMinPresentMs = 1200;            // SPA frame-storm throttle (RMWEB_CONTENT_PRESENT_MS)
     bool m_hasPending = false, m_inFlight = false, m_dirty = false;
     bool m_exiting = false;                      // drainForExit ran: setImage/schedule/presentNext no-op
-    bool m_draining = false;                     // drainForExit in progress (termPoll re-entry guard)
     bool m_partial = true;                       // partial present (dirty bbox) — RMWEB_PARTIAL=0 disables
     QRect m_dirtyAccum;                          // damage accumulated since the last presentNext
     QRect m_lastPresentRect;                     // damage rect of the in-flight present (presentFast re-push)
@@ -3344,9 +3337,10 @@ int main(int argc, char **argv) {
             // presentFast (B&W fast mode) is only safe under the single-threaded basic render loop —
             // the fb-mutex-free guarantee at frameSwapped (see the EpaperRefresh class comment).
             // Under any other loop do NOT wire the hook: presents fall back to the QPA's own path.
-            if (qgetenv("QSG_RENDER_LOOP") == "basic" && qgetenv("RMWEB_BW_HOOK") != "0")
+            const bool basicLoop = qgetenv("QSG_RENDER_LOOP") == "basic";
+            if (basicLoop && qgetenv("RMWEB_BW_HOOK") != "0")
                 view->setEpaperRefresh(&epaper);   // B&W fast mode's fast-mono presents (frameSwapped path)
-            else if (qgetenv("QSG_RENDER_LOOP") != "basic")
+            else if (!basicLoop)
                 qWarning("[refresh] fast-mono presents disabled (QSG_RENDER_LOOP is not \"basic\")");
             else
                 qWarning("[refresh] fast-mono presents disabled (RMWEB_BW_HOOK=0)");
@@ -3445,10 +3439,10 @@ int main(int argc, char **argv) {
         g_termDrainOk = 1;
         { auto *termPoll = new QTimer(&app);
           QObject::connect(termPoll, &QTimer::timeout, &app, [&engine, view]{
-              if (!g_termRequested || g_termDraining) return;   // drainForExit pumps processEvents —
-              g_termRequested = 0; g_termDraining = 1;          // a re-dispatched poll must not recurse
+              if (!g_termRequested || g_termDraining) return;
+              g_termRequested = 0;
               qInfo("[exit] SIGTERM — draining panel, flushing profile, leaving");
-              view->drainForExit();
+              view->drainForExit();   // sets g_termDraining — a re-dispatched poll must not recurse
               engine.flushSync();
               std::_Exit(0);
           });
