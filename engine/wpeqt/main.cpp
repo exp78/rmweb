@@ -112,13 +112,21 @@ extern "C" void crashHandler(int sig) {
     raise(sig);
 }
 
-// SIGTERM (the dev runner's timed kill; `systemctl stop rmweb-appload.scope` under AppLoad): exit IMMEDIATELY via _Exit.
+// SIGTERM (the dev runner's timed kill; `systemctl stop rmweb-appload.scope` under AppLoad): the
+// handler only LATCHES A FLAG (async-signal-safe); a 100 ms poll timer on the GUI thread runs the
+// real clean exit (drain the in-flight panel present, flush the profile, _Exit). Immediate _Exit
+// remains for early startup / the headless save mode (g_termDrainOk = 0 — no present can be in
+// flight yet) and for a SECOND SIGTERM (force-exit while a drain is already underway).
 // The orderly Qt/WebKit teardown path intermittently SIGABRTs/SEGVs on this stack, and any
-// fatal signal here costs a DEVICE REBOOT via the watchdog — the ⏻ button and save mode already
-// use the same _Exit escape. Async-signal-safe: _Exit only (no flush — stderr is line-buffered,
-// so at most one partial line is lost; profile writes flush on the ⏻ button (flushSync) and on
-// normal loop exit — a SIGTERM exit skips the flush, losing at most one debounce window (<=1.5 s)).
-extern "C" void termHandler(int) { std::_Exit(0); }
+// fatal signal here costs a DEVICE REBOOT via the watchdog — so even the clean path ends in _Exit.
+// stderr is line-buffered, so at most one partial line is lost; profile writes flush on the clean
+// path — only an immediate _Exit skips that (window <=1.5 s of debounced writes).
+static volatile sig_atomic_t g_termDrainOk = 0;    // display mode, GUI up: TERM may drain first
+static volatile sig_atomic_t g_termRequested = 0;  // SIGTERM latched (termHandler -> GUI poll timer)
+extern "C" void termHandler(int) {
+    if (!g_termDrainOk || g_termRequested) std::_Exit(0);
+    g_termRequested = 1;
+}
 
 // WKContentRuleList (Safari/WebKit content-blocker JSON): drop third-party scripts/media/fonts — i.e. ads,
 // trackers, analytics, and other heavy cross-origin JS — so the interpreter-only JSC isn't swamped. First-
@@ -701,8 +709,10 @@ public Q_SLOTS:
 
     // ⏻-exit profile flush (called from the GUI thread, normal context): marshal flushPendingWrites
     // onto the worker context and wait for it, BOUNDED — a stuck worker must not stall power-off
-    // (the flush itself is tens of ms; the cap only covers a busy queue). The SIGTERM handler does
-    // NOT do this (signal context = async-signal-safe _Exit only; see termHandler).
+    // (the flush itself is tens of ms; the cap only covers a busy queue). The SIGTERM clean path
+    // (the GUI-thread poll) does this too — the signal handler itself only latches a flag
+    // (async-signal-safe; see termHandler); an immediate _Exit (early start / save mode / double
+    // TERM) still skips the flush.
     void flushSync() {
         struct FlushState { std::mutex mtx; std::condition_variable cv; bool done = false; };
         // Shared state: on a timed-out wait the worker-side lambda may still run after we return.
@@ -2023,6 +2033,21 @@ public:
         m_forceContentPresent = true;
         m_contentFlush.stop();
     }
+    // Shutdown drain (⏻ button / SIGTERM clean path): cancel a pending settle flash, then wait out an
+    // in-flight present — the panel must not be abandoned mid-waveform (community report: libqsgepaper
+    // installs signal handlers for exactly this; ours are the effective ones on this build, so the
+    // drain is our job). m_inFlight clears only via releaseGate() (frameSwapped + dwell), delivered
+    // through the GUI event loop — hence processEvents() in the wait; a bare spin would deadlock
+    // against frameSwapped. Bounded: a stuck present (no frameSwapped, fallback still pending at
+    // 2.5 s) must not stall power-off — log and exit anyway.
+    void drainForExit() {
+        m_settleFlash.stop();
+        if (!m_inFlight) return;
+        QElapsedTimer clock; clock.start();
+        while (m_inFlight && clock.elapsed() < 1200)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+        if (m_inFlight) qWarning("[exit] drain timeout — present still in flight, exiting anyway");
+    }
     void paint(QPainter *p) override {
         const qreal w = width(), h = height();
         if (!m_img.isNull()) {
@@ -3006,6 +3031,13 @@ int main(int argc, char **argv) {
     // Prime the libgcc unwinder BEFORE the handler can fire: the first backtrace() allocates, and
     // doing that inside the handler would deadlock a crash-from-malloc (prof_preload.c pattern).
     { void *tmp[4]; backtrace(tmp, 4); }
+    // Handler ORDER (community report: libqsgepaper installs signal handlers so an ACTIVE e-ink
+    // update finishes before exit): these sigactions run BEFORE QGuiApplication below — i.e. before
+    // Qt and the epaper QPA (libqsgepaper) initialise, and before our own dlopen of the scenegraph
+    // plugin. Device logs prove OUR handlers are the effective ones on this build (rmweb crash
+    // backtraces appear in the log; TERM kills follow termHandler), so any drain-on-signal handlers
+    // libqsgepaper may install do not win here — which is why the exit paths drain the panel
+    // themselves (WpeView::drainForExit, ⏻ / the SIGTERM poll below).
     // sigaction, all four fatal signals: SIGBUS (SHM buffers) and SIGILL (llvmpipe JITs code on the
     // CPU) are as real as SEGV/ABRT here. The handler itself restores SIG_DFL + re-raises, so the
     // watchdog still receives the signal exactly as before.
@@ -3016,7 +3048,7 @@ int main(int argc, char **argv) {
     sigaction(SIGABRT, &sa, nullptr);
     sigaction(SIGBUS,  &sa, nullptr);
     sigaction(SIGILL,  &sa, nullptr);
-    // Timed kills (dev runner, systemd) skip the crash-prone WebKit teardown entirely (termHandler).
+    // Timed kills (dev runner, systemd): termHandler latches a flag; the GUI poll drains + exits.
     struct sigaction st = {};
     st.sa_handler = termHandler;
     sigemptyset(&st.sa_mask);
@@ -3189,10 +3221,12 @@ int main(int argc, char **argv) {
                     case WpeView::Address: view->beginEdit();  return;   // open the on-screen URL keyboard
                     case WpeView::Bookmark: engine.toggleBookmark(); return;
                     case WpeView::Power:
-                        // Single tap exits. Flush pending debounced profile writes first (bounded wait
-                        // on the worker — otherwise the last <=1.5 s of history/settings is lost), then
+                        // Single tap exits. Drain the panel first (an active e-ink update must finish —
+                        // drainForExit), then flush pending debounced profile writes (bounded wait on
+                        // the worker — otherwise the last <=1.5 s of history/settings is lost), then
                         // std::_Exit skips WebKit teardown SIGABRT (watchdog-safe).
-                        qInfo("[exit] power — flushing profile, leaving");
+                        qInfo("[exit] power — draining panel, flushing profile, leaving");
+                        view->drainForExit();
                         engine.flushSync();
                         std::_Exit(0);
                     case WpeView::None:    break;             // tap not on the bar
@@ -3238,6 +3272,21 @@ int main(int argc, char **argv) {
                 engine.peekLink(x, y);
             }, Qt::QueuedConnection);
         touchThread.start();
+
+        // SIGTERM clean exit: the handler only latches g_termRequested (async-signal-safe); this poll
+        // runs the real path on the GUI thread, where it is allowed to wait on the panel. From here on
+        // a TERM drains exactly like the ⏻ button; before this point (and in headless save mode) a
+        // TERM is still an immediate _Exit — no present can be in flight yet.
+        g_termDrainOk = 1;
+        { auto *termPoll = new QTimer(&app);
+          QObject::connect(termPoll, &QTimer::timeout, &app, [&engine, view]{
+              if (!g_termRequested) return;
+              qInfo("[exit] SIGTERM — draining panel, flushing profile, leaving");
+              view->drainForExit();
+              engine.flushSync();
+              std::_Exit(0);
+          });
+          termPoll->start(100); }
 
         // DIAG: GUI event-loop heartbeat. If these "[gui] tick" lines stop, the GUI thread is blocked
         // (e.g. inside present()/swapBuffers) and queued frameReady deliveries stall -> content never paints.

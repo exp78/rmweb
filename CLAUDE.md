@@ -442,3 +442,19 @@ load"; downloads flashed an error page under the toast). Frame-dump debug: RMWEB
   defined below the class, or the build fails on the incomplete type.
 - Gotcha recorded earlier but re-confirmed twice today: the epaper present deadlocks if overlapped
   (gate + dwell + fallback release is load-bearing), and WebKit emits failed→finished for one download.
+
+**2026-09-18 — exit-path panel drain (post-release feedback: geloescht, reMarkable Discord):** the
+community flagged that libqsgepaper installs signal handlers to let an ACTIVE e-ink update finish
+before exit, and that rmweb overrides them with a bare `_Exit`. Facts from the code: our sigactions
+install BEFORE `QGuiApplication` (i.e. before Qt / the epaper QPA / our own dlopen of the scenegraph
+plugin), and device logs prove ours are the effective handlers on this build (rmweb crash backtraces
+appear; TERM kills follow termHandler) — so whatever libqsgepaper installs does not win, and the
+drain is ours to do. Fix shipped: ⏻ and SIGTERM now drain first — `WpeView::drainForExit()` stops a
+pending settle flash and waits out an in-flight present (m_inFlight clears via releaseGate =
+frameSwapped + dwell; the wait pumps processEvents — a bare spin would deadlock against frameSwapped;
+1.2 s budget, "drain timeout" logs and exits anyway), then `flushSync()` writes the profile, then
+`_Exit` (Qt/WebKit teardown is still never used — watchdog reboot risk). SIGTERM stays
+async-signal-safe: the handler only latches a flag, a 100 ms GUI poll runs the clean path; TERM
+before the GUI is up / in headless save mode, and a SECOND TERM (force), still `_Exit` immediately.
+Not covered (accepted): a settle flash already issued to hardware mid-flight (its swapBuffers isn't
+gate-tracked) — the controller completes a commanded waveform autonomously.
