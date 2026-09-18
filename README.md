@@ -4,7 +4,7 @@ A native **WPE WebKit** web browser for the **reMarkable Paper Pro** e-ink table
 
 ![start page](docs/screenshots/start-page.png)
 
-> **Status: v0.9.2 — beta.** The primary use case is **reading**; general browsing is basic.
+> **Status: v0.9.3 — beta.** The primary use case is **reading**; general browsing is basic.
 > Implemented and verified on-device: reader mode (Mozilla Readability, light/dark theme), B2 chrome
 > painted into the frame (with C++ hit-test and inverted press feedback on every button and key),
 > touch input via evdev with a phantom-touch guard, on-screen URL keyboard, bookmarks/history/
@@ -23,7 +23,9 @@ A native **WPE WebKit** web browser for the **reMarkable Paper Pro** e-ink table
 > a TLS padlock, a per-host **continue-anyway for certificate errors** (captive portals on
 > hotel/cafe wifi; session-scoped), address-bar search over local bookmarks+history (with a web-search link),
 > long-press link peek, a **B&W fast mode** (grayscale present + the fast mono waveform) and a
-> **mobile/desktop UA toggle** (both in Settings), a KOReader-style reading-progress bar, a coherent **Lucide icon set** drawn
+> **mobile/desktop UA toggle** (both in Settings), a **settle flash** (one full-quality panel develop
+> once the page goes quiet — deep black instead of washed-out ACeP grey) and a **text boost** contrast
+> toggle (Settings; default on), a KOReader-style reading-progress bar, a coherent **Lucide icon set** drawn
 > as vectors (crisp on e-ink, font-independent), a home-screen icon in the stock launcher (XOVI +
 > AppLoad), and a no-brick launcher that stops/restores xochitl. E-ink-safe: CPU-only llvmpipe +
 > Skia, ~120–250 ms page turns, low RAM.
