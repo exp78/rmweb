@@ -423,12 +423,16 @@ NEVER painted content (`m_firstContentLogged`). Before, a single transient white
 `m_lastNonWhite` and the check whited out the whole page under the notice. Also: `Frame load
 interrupted` (WebKit policy error 102 — a superseded/download-converted load, not a failure) is now
 swallowed like CANCELLED instead of showing an error page (double-tapped Go used to fake "site won't
-load"; downloads flashed an error page under the toast). Frame-dump debug: RMWEB_DUMP_FRAMES=/dir.
+load"; downloads flashed an error page under the toast). Frame-dump debug: RMWEB_DUMP_FRAMES=/dir
+(zero-padded names, dir auto-created). Tradeoff of the never-painted gate: a page that whites out
+AFTER its first content no longer earns the notice (accepted: the false-positive white-out was worse).
 **2026-09-16 — e-ink colour quality lessons (device-verified on ixbt + synthetic probes):**
 - **The QPA's auto waveform underdrives black/colour on our frequent small presents** — a pure-#000
   image area looked pale grey on the panel while the engine frame was perfect (verified via the new
   RMWEB_DUMP_FRAMES PNG dump). A forced full-quality pass (RMWEB_FULL_PRESENT=1 diagnostic) develops it
   fully — same depth as xochitl. Env knobs EPFB_NO_AUTO_WF / WEBKIT_FORCE_VBLANK_TIMER=0 change NOTHING.
+  (Related env: RMWEB_BW_HOOK=0 unwires the bwFast fast-mono re-push hook; RMWEB_FULL_PRESENT=1 is
+  suppressed in bwFast — presentFast already re-pushes there, a second re-push would double it.)
 - **Fix shipped: settle flash** — re-armed by every content present, fires one full-quality develop
   after ~1.5 s of quiet (RMWEB_SETTLE_FULL_MS; 0=off). Skipped in bwFast (its own cadence) and while
   typing; retries at 500 ms while a present is in flight. Fast turns stay fast, quality catches up
@@ -452,20 +456,23 @@ appear; TERM kills follow termHandler) — so whatever libqsgepaper installs doe
 drain is ours to do. Fix shipped: ⏻ and SIGTERM now drain first — `WpeView::drainForExit()` stops a
 pending settle flash and waits out an in-flight present (m_inFlight clears via releaseGate =
 frameSwapped + dwell; the wait pumps processEvents — a bare spin would deadlock against frameSwapped;
-1.2 s budget, "drain timeout" logs and exits anyway), then `flushSync()` writes the profile, then
-`_Exit` (Qt/WebKit teardown is still never used — watchdog reboot risk). SIGTERM stays
-async-signal-safe: the handler only latches a flag, a 100 ms GUI poll runs the clean path; TERM
-before the GUI is up / in headless save mode, and a SECOND TERM (force), still `_Exit` immediately.
-Not covered (accepted): a settle flash already issued to hardware mid-flight (its swapBuffers isn't
-gate-tracked) — the controller completes a commanded waveform autonomously.
+2.5 s budget >= the gate's own fallback, "drain timeout" logs and exits anyway), then `flushSync()`
+writes the profile, then `_Exit` (Qt/WebKit teardown is still never used — watchdog reboot risk).
+SIGTERM stays async-signal-safe: the handler only latches a flag, a 100 ms GUI poll runs the clean
+path (guarded against re-entry via the poll's own processEvents); TERM before the GUI is up / in
+headless save mode, and a SECOND TERM (force), still `_Exit` immediately. What the drain actually
+guarantees (honest version): QPA/fb-mutex integrity and that the last present reaches
+frameSwapped + dwell — the final hardware waveform tail is then completed by the controller
+autonomously (same model as the settle flash entry above).
 
 **2026-09-18 — partial present (dirty bbox → update(rect), default ON, RMWEB_PARTIAL=0 disables):**
 every frame used to repaint + push the full 1620x2160. WpeView now accumulates a damage rect:
-content pixel-diff bbox in `setImage` (`frameDiffBBox`: row memcmp, exact edges scanned only on
-differing rows — a few ms/frame) ∪ coarse chrome zones marked by the setters (`barZone`/`pillZone`/
-`kbZone`/`progZone`; `markDirtyAll` for first frame/size change/mode toggles/renderFailed white-out),
-and `presentNext` calls `update(rect)` instead of `update()`. **The QPA honors it (device-verified by
-disassembly, no run):** libqsgepaper's present path (OS 3.28 build) accumulates a damage QRegion and
+content pixel-diff bbox computed lazily in `presentNext` (`frameDiffBBox`: row memcmp, exact edges
+scanned only on differing rows — a few ms/frame; aligned outward to 8 px) ∪ coarse chrome zones
+marked by the setters (`barZone`/`pillZone`/`noticeZone`/`kbZone`/`progZone`; `markDirtyAll` for
+first frame/size change/mode toggles/renderFailed white-out), and `presentNext` calls `update(rect)`
+instead of `update()` — or skips the present entirely when nothing changed (an empty update() would
+be a FULL repaint in Qt). **The QPA honors it (device-verified by disassembly, no run):** libqsgepaper's present path (OS 3.28 build) accumulates a damage QRegion and
 calls `EPFramebuffer::swapBuffers(QRegion, EPScreenModeMap, NoRefresh)`, skipping empty damage; the
 `swapBuffers(QRect, EPScreenMode, QFlags)` we dlopen is a forwarder into it, so `presentFast(rect)`
 in bwFast re-pushes exactly the damage too. Settle flash / fullSwap stay full-screen by design

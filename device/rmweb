@@ -29,6 +29,9 @@ DONE=
 cleanup(){
   [ -n "$DONE" ] && return; DONE=1
   [ -n "${APP:-}" ] && kill "$APP" 2>/dev/null                       # stop the app if still running
+  # rmweb's TERM handler drains the in-flight e-ink present and flushes the profile before exiting
+  # (up to ~2.7 s) — give it that window; the kill -9 sweep below is for what survives it.
+  i=0; while [ -n "${APP:-}" ] && kill -0 "$APP" 2>/dev/null && [ "$i" -lt 6 ]; do sleep 0.5; i=$((i+1)); done
   for n in rmweb-wpeqt WPEWebProcess WPENetworkProc WPEGPUProcess; do # + any lingering WPE subprocesses
     # shellcheck disable=SC2046
     # word-splitting is intentional: pgrep returns space-separated PIDs, one kill per PID
