@@ -1,16 +1,16 @@
 # Installing rmweb on the reMarkable Paper Pro
 
 rmweb installs entirely under `/home/root/rmweb` (the only writable, OTA-surviving location). It makes
-no persistent changes to `/etc` or the rootfs — while it runs, the launcher mounts a temporary overlay
-over `/usr/libexec` (unmounted on exit) — and it never disables xochitl: it only stops it while the
+no persistent changes to `/etc` or the rootfs - while it runs, the launcher mounts a temporary overlay
+over `/usr/libexec` (unmounted on exit) - and it never disables xochitl: it only stops it while the
 browser is on screen and restarts it on exit.
 
 ## Install from a prebuilt archive (no toolchain needed)
 
-`scripts/package.sh` produces a self-contained release tarball (`dist/rmweb-<version>.tar.gz`, ~110 MB —
-it carries everything the stock OS doesn't provide, so no build tools are needed to install it — but
+`scripts/package.sh` produces a self-contained release tarball (`dist/rmweb-<version>.tar.gz`, ~110 MB -
+it carries everything the stock OS doesn't provide, so no build tools are needed to install it - but
 it does need the stock OS with its system Qt 6; verified on OS 3.28.x). Prebuilt
-archives are attached to [GitHub Releases](https://github.com/exp78/rmweb/releases) — install v0.9.3
+archives are attached to [GitHub Releases](https://github.com/exp78/rmweb/releases) - install v0.9.3
 without any toolchain:
 
 ```sh
@@ -30,7 +30,7 @@ kept in the app dir, is lost). To build the archive yourself instead:
 ## Build + deploy from source (dev host)
 
 Prereqs: a `linux/arm64` Docker engine (on macOS: colima + docker-buildx) and the reMarkable Yocto
-SDK — see [toolchain/README.md](../toolchain/README.md). The WPE WebKit + Mesa build takes hours and
+SDK - see [toolchain/README.md](../toolchain/README.md). The WPE WebKit + Mesa build takes hours and
 tens of GB of disk.
 
 ```sh
@@ -50,9 +50,9 @@ ssh root@10.11.99.1 '/home/root/rmweb/install.sh'
 - From the home screen:    tap the **rmweb** icon in the AppLoad launcher (requires XOVI + AppLoad; see below).
 
 The browser takes over the screen (xochitl is stopped). Tap the **⏻** button at the right of the toolbar
-to quit — xochitl (your normal reMarkable UI) comes back automatically, WITH XOVI/AppLoad if they were
+to quit - xochitl (your normal reMarkable UI) comes back automatically, WITH XOVI/AppLoad if they were
 running. xochitl is restored on exit, crash, or a caught signal (the launcher traps EXIT/TERM/INT/HUP).
-The one exception: SIGKILL (`kill -9`) to the launcher itself cannot be trapped — xochitl then stays
+The one exception: SIGKILL (`kill -9`) to the launcher itself cannot be trapped - xochitl then stays
 stopped (screen left black / on the frozen browser frame) until a reboot, which always restores it.
 
 ## Home-screen icon (optional, layer B: XOVI + AppLoad)
@@ -91,13 +91,13 @@ ssh root@10.11.99.1 '/home/root/rmweb/install.sh && /home/root/xovi/start'
 XOVI is **tethered by design**: its systemd drop-in lives on a tmpfs, so a reboot always returns the
 device to the stock shell (this is what makes a bad extension un-brickable). To get XOVI back after a
 reboot, run `/home/root/xovi/start` over SSH again; `/home/root/xovi/stock` returns to stock without a
-reboot. Do NOT wire XOVI into real autostart — that is the one path to a bootloop.
+reboot. Do NOT wire XOVI into real autostart - that is the one path to a bootloop.
 
 ## After a firmware update (OTA)
 
-The bundle under `/home/root/rmweb` survives OTA — and so do XOVI/AppLoad themselves (they live under
+The bundle under `/home/root/rmweb` survives OTA - and so do XOVI/AppLoad themselves (they live under
 `/home/root`; an OTA only rewrites `/etc` + `/usr`). XOVI just has to be re-hooked against the new
-xochitl: rebuild the QML hashtable and start XOVI again (steps 3-4 above — the new OS build's QML hashes
+xochitl: rebuild the QML hashtable and start XOVI again (steps 3-4 above - the new OS build's QML hashes
 differ), then re-run the installer to re-assert the icon hook:
 
 ```sh
