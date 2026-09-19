@@ -11,9 +11,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # run-tests.sh drives clang++ (C++ unit tests), bash (shell tests) and shellcheck
-      # (lint of the shipped device shell); install the compiler + linter explicitly.
+      # Host suites need no reMarkable SDK, device, WPE engine, or live phone.
       - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y clang shellcheck
+        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build qt6-base-dev python3 openssl shellcheck
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tools/passkey-acceptance/package-lock.json
+      - name: Install passkey test dependencies
+        run: npm ci --prefix tools/passkey-acceptance
       - name: Run host tests
         run: bash scripts/run-tests.sh

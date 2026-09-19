@@ -1,0 +1,325 @@
+{
+  "schemaVersion": 1,
+  "firmware": "3.28.0.172",
+  "sdkSha256": "65e5b98f9f7c83d857c5c720f7f6cb2d61fe20f4513dec023ad00aac27c85ae4",
+  "qtVersion": "6.10.3",
+  "files": {
+    "host-packages/bison_2%3a3.8.2+dfsg-1build2_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/b/bison/bison_3.8.2+dfsg-1build2_arm64.deb",
+      "sha256": "eb2edb78bfff22e9eccc568741c8b8265806f320196640b0ce6ea26cd9e67474",
+      "bytes": 740044,
+      "package": "bison",
+      "version": "2:3.8.2+dfsg-1build2"
+    },
+    "host-packages/flex_2.6.4-8.2build1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/f/flex/flex_2.6.4-8.2build1_arm64.deb",
+      "sha256": "133560b3f2ced14e47ebf29b2058d15133a1addbfa9c0f2311d09bf31a290dd6",
+      "bytes": 290818,
+      "package": "flex",
+      "version": "2.6.4-8.2build1"
+    },
+    "host-packages/gettext-base_0.21-14ubuntu2_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/gettext/gettext-base_0.21-14ubuntu2_arm64.deb",
+      "sha256": "7a9412cf78af2f75ceb230a1b32eb54347c75e5b4033e6ef45fd4d9a8651cf16",
+      "bytes": 37592,
+      "package": "gettext-base",
+      "version": "0.21-14ubuntu2"
+    },
+    "host-packages/gettext_0.21-14ubuntu2_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/gettext/gettext_0.21-14ubuntu2_arm64.deb",
+      "sha256": "5a5206b1c2fa340831138e6935846898de2fdf15a38122cb0f157825dc84717f",
+      "bytes": 845058,
+      "package": "gettext",
+      "version": "0.21-14ubuntu2"
+    },
+    "host-packages/gperf_3.1-1build1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/universe/g/gperf/gperf_3.1-1build1_arm64.deb",
+      "sha256": "adb03c0a3cff94bcb987cb5f91e44affa30aabc8f25697ae878fc8d1d624c134",
+      "bytes": 99880,
+      "package": "gperf",
+      "version": "3.1-1build1"
+    },
+    "host-packages/libbsd0_0.12.1-1build1.1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/libb/libbsd/libbsd0_0.12.1-1build1.1_arm64.deb",
+      "sha256": "cdf9ff601244e64482584d9d9b98aa54a573c081ab5956227c737307196c1ce3",
+      "bytes": 40970,
+      "package": "libbsd0",
+      "version": "0.12.1-1build1.1"
+    },
+    "host-packages/libedit2_3.1-20230828-1build1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/libe/libedit/libedit2_3.1-20230828-1build1_arm64.deb",
+      "sha256": "cf642fec16d86517e0e715520c3a7cdaee650e7ae8a4993f82d0e1e7a5883efb",
+      "bytes": 97526,
+      "package": "libedit2",
+      "version": "3.1-20230828-1build1"
+    },
+    "host-packages/libelf1t64_0.190-1.1ubuntu0.1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/e/elfutils/libelf1t64_0.190-1.1ubuntu0.1_arm64.deb",
+      "sha256": "ba200bd93e3a1ade40e2c71540f55e7016c60f11e1b9fe1a76ef975de99b87f5",
+      "bytes": 58420,
+      "package": "libelf1t64",
+      "version": "0.190-1.1ubuntu0.1"
+    },
+    "host-packages/libglib2.0-0t64_2.80.0-6ubuntu3.8_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glib2.0/libglib2.0-0t64_2.80.0-6ubuntu3.8_arm64.deb",
+      "sha256": "cc2685cfd6b8b7b4823b6f863f893bbd81efbfaebcc0bc20aa4879cf825db2ec",
+      "bytes": 1531962,
+      "package": "libglib2.0-0t64",
+      "version": "2.80.0-6ubuntu3.8"
+    },
+    "host-packages/libglib2.0-bin_2.80.0-6ubuntu3.8_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glib2.0/libglib2.0-bin_2.80.0-6ubuntu3.8_arm64.deb",
+      "sha256": "360d5aa45b3cfc163bdc0abd1bb2d385c36b38d82441f90082d5b6f43807b2ae",
+      "bytes": 97066,
+      "package": "libglib2.0-bin",
+      "version": "2.80.0-6ubuntu3.8"
+    },
+    "host-packages/libglib2.0-data_2.80.0-6ubuntu3.8_all.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glib2.0/libglib2.0-data_2.80.0-6ubuntu3.8_all.deb",
+      "sha256": "4f4269f52ac6a933dc53f37a2144a3984abbd4a1a0d44da1e7edbae410ddc1f4",
+      "bytes": 49588,
+      "package": "libglib2.0-data",
+      "version": "2.80.0-6ubuntu3.8"
+    },
+    "host-packages/libglib2.0-dev-bin_2.80.0-6ubuntu3.8_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glib2.0/libglib2.0-dev-bin_2.80.0-6ubuntu3.8_arm64.deb",
+      "sha256": "4d2e73889d63eaa9d00595bd68d74b37ca61034e48c898b7f625562d72b9b79a",
+      "bytes": 138394,
+      "package": "libglib2.0-dev-bin",
+      "version": "2.80.0-6ubuntu3.8"
+    },
+    "host-packages/libncurses6_6.4+20240113-1ubuntu2.2_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/n/ncurses/libncurses6_6.4+20240113-1ubuntu2.2_arm64.deb",
+      "sha256": "46cd7885975573fc669d93f66f2453e014e6ccae4f568659febd49e5011630d4",
+      "bytes": 109620,
+      "package": "libncurses6",
+      "version": "6.4+20240113-1ubuntu2.2"
+    },
+    "host-packages/libpkgconf3_1.8.1-2build1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/p/pkgconf/libpkgconf3_1.8.1-2build1_arm64.deb",
+      "sha256": "f476cb81e1ecec6bf974f21181469cf5edcc749c4ead621469cdbf584dfd3be8",
+      "bytes": 31226,
+      "package": "libpkgconf3",
+      "version": "1.8.1-2build1"
+    },
+    "host-packages/libruby3.2_3.2.3-1ubuntu0.24.04.8_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/r/ruby3.2/libruby3.2_3.2.3-1ubuntu0.24.04.8_arm64.deb",
+      "sha256": "05ba2133bb54b7cd8e909e6a765e1c11f9a6c749c9e39df306eb2ddd8b7bf108",
+      "bytes": 5331424,
+      "package": "libruby3.2",
+      "version": "3.2.3-1ubuntu0.24.04.8"
+    },
+    "host-packages/libruby_1%3a3.2~ubuntu1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/r/ruby-defaults/libruby_3.2~ubuntu1_arm64.deb",
+      "sha256": "c581fd1bd191c99992a5b2f6a6a624c0a9d7bfde19bc43d791ab1baf5f6957bc",
+      "bytes": 4694,
+      "package": "libruby",
+      "version": "1:3.2~ubuntu1"
+    },
+    "host-packages/libyaml-0-2_0.2.5-1build1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/liby/libyaml/libyaml-0-2_0.2.5-1build1_arm64.deb",
+      "sha256": "eb0f14172a5cedb68ccea3be266672c9059893341a82fad185f2548dd99b8371",
+      "bytes": 51548,
+      "package": "libyaml-0-2",
+      "version": "0.2.5-1build1"
+    },
+    "host-packages/m4_1.4.19-4build1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/m/m4/m4_1.4.19-4build1_arm64.deb",
+      "sha256": "89605f10d3b94cf4a171747839d5a411587734f2be715cb8dd17bde923c937ed",
+      "bytes": 240132,
+      "package": "m4",
+      "version": "1.4.19-4build1"
+    },
+    "host-packages/pkg-config_1.8.1-2build1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/p/pkgconf/pkg-config_1.8.1-2build1_arm64.deb",
+      "sha256": "460d166c529651438347548fc1b2731440ce52c2643f678ec993a29dce5a3647",
+      "bytes": 7264,
+      "package": "pkg-config",
+      "version": "1.8.1-2build1"
+    },
+    "host-packages/pkgconf-bin_1.8.1-2build1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/p/pkgconf/pkgconf-bin_1.8.1-2build1_arm64.deb",
+      "sha256": "bcd0d24c48b8b73ed7ba20ffc21a3575d5d9bdd53c3cee5a8051b7bde5fbf638",
+      "bytes": 20458,
+      "package": "pkgconf-bin",
+      "version": "1.8.1-2build1"
+    },
+    "host-packages/pkgconf_1.8.1-2build1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/p/pkgconf/pkgconf_1.8.1-2build1_arm64.deb",
+      "sha256": "818ac3b4ae09f3747098872c7d5a9e387118798155b0107bb1625c2ab675664b",
+      "bytes": 16768,
+      "package": "pkgconf",
+      "version": "1.8.1-2build1"
+    },
+    "host-packages/python3-packaging_24.0-1_all.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/p/python-packaging/python3-packaging_24.0-1_all.deb",
+      "sha256": "decc936e9512c2de78fcf9e8d8459ce58952c40bf8bd1f06e62556d7fe887db6",
+      "bytes": 41094,
+      "package": "python3-packaging",
+      "version": "24.0-1"
+    },
+    "host-packages/rake_13.0.6-3_all.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/r/rake/rake_13.0.6-3_all.deb",
+      "sha256": "2ebe2591a30542c28d6bc6c8be638ab61cc1295875f364385ade895b23f8492d",
+      "bytes": 61584,
+      "package": "rake",
+      "version": "13.0.6-3"
+    },
+    "host-packages/ruby-net-telnet_0.2.0-1_all.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/r/ruby-net-telnet/ruby-net-telnet_0.2.0-1_all.deb",
+      "sha256": "ece1fdca00a6a9565a4e425e13cfb320b247280a71d44e11bfee28fd6a7df2b5",
+      "bytes": 13308,
+      "package": "ruby-net-telnet",
+      "version": "0.2.0-1"
+    },
+    "host-packages/ruby-rubygems_3.4.20-1_all.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/r/rubygems/ruby-rubygems_3.4.20-1_all.deb",
+      "sha256": "9cb6041d902b74fd6e9373b24922e788bc2d1ed4360705ca6b53945d67b32087",
+      "bytes": 238488,
+      "package": "ruby-rubygems",
+      "version": "3.4.20-1"
+    },
+    "host-packages/ruby-sdbm_1.0.0-5build4_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/r/ruby-sdbm/ruby-sdbm_1.0.0-5build4_arm64.deb",
+      "sha256": "82eb8d57e6842f99b8b90446b317ab65bc09d79bdb0c4f41e03f7cebc2648c1b",
+      "bytes": 15712,
+      "package": "ruby-sdbm",
+      "version": "1.0.0-5build4"
+    },
+    "host-packages/ruby-webrick_1.8.1-1ubuntu0.2_all.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/r/ruby-webrick/ruby-webrick_1.8.1-1ubuntu0.2_all.deb",
+      "sha256": "7275a9563e0cd328f6043fc0360886c522b253f280e309a1864549bea8f25d88",
+      "bytes": 52956,
+      "package": "ruby-webrick",
+      "version": "1.8.1-1ubuntu0.2"
+    },
+    "host-packages/ruby-xmlrpc_0.3.2-2_all.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/r/ruby-xmlrpc/ruby-xmlrpc_0.3.2-2_all.deb",
+      "sha256": "9690c5b65b147d22f2b90dbb694c5d2af81ffa68f1a58f094e2afb91f3b20c3c",
+      "bytes": 24750,
+      "package": "ruby-xmlrpc",
+      "version": "0.3.2-2"
+    },
+    "host-packages/ruby3.2_3.2.3-1ubuntu0.24.04.8_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/r/ruby3.2/ruby3.2_3.2.3-1ubuntu0.24.04.8_arm64.deb",
+      "sha256": "33356f218a9897bd09f15cbf20703fcbc53c076fa033bd68635570c4c32fc05e",
+      "bytes": 50750,
+      "package": "ruby3.2",
+      "version": "3.2.3-1ubuntu0.24.04.8"
+    },
+    "host-packages/ruby_1%3a3.2~ubuntu1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/r/ruby-defaults/ruby_3.2~ubuntu1_arm64.deb",
+      "sha256": "0084f83ac04d511929d6ee8269a2353facddb7546c9059082cbf4d64ba02ce9e",
+      "bytes": 3466,
+      "package": "ruby",
+      "version": "1:3.2~ubuntu1"
+    },
+    "host-packages/rubygems-integration_1.18_all.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/r/rubygems-integration/rubygems-integration_1.18_all.deb",
+      "sha256": "67b466d6297adeae37786a123ad029153961c4cbdcdd6cf50a6e6964e2d37342",
+      "bytes": 5336,
+      "package": "rubygems-integration",
+      "version": "1.18"
+    },
+    "host-packages/unifdef_2.12-1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/universe/u/unifdef/unifdef_2.12-1_arm64.deb",
+      "sha256": "864976c34f5ed56b4f20b46a5c8a9e915b95ca15326867b86d739d1bbf5b11e6",
+      "bytes": 23790,
+      "package": "unifdef",
+      "version": "2.12-1"
+    },
+    "inputs/gbm-24.0.9.h": {
+      "sha256": "f80dcf33c961c8d31a9b03e3c807f4c22b4851f2950393e3245a2a19ea7ea513",
+      "bytes": 17461,
+      "url": "https://gitlab.freedesktop.org/mesa/mesa/-/raw/mesa-24.0.9/src/gbm/main/gbm.h"
+    },
+    "inputs/libsoup-3.6.0.tar.xz": {
+      "sha256": "62959f791e8e8442f8c13cedac8c4919d78f9120d5bb5301be67a5e53318b4a3",
+      "bytes": 1543908,
+      "url": "https://download.gnome.org/sources/libsoup/3.6/libsoup-3.6.0.tar.xz"
+    },
+    "inputs/libwpe-1.16.2.tar.xz": {
+      "sha256": "960bdd11c3f2cf5bd91569603ed6d2aa42fd4000ed7cac930a804eac367888d7",
+      "bytes": 63792,
+      "url": "https://wpewebkit.org/releases/libwpe-1.16.2.tar.xz"
+    },
+    "inputs/libxkbcommon-1.7.0.tar.xz": {
+      "sha256": "65782f0a10a4b455af9c6baab7040e2f537520caa2ec2092805cdfd36863b247",
+      "bytes": 534312,
+      "url": "https://xkbcommon.org/download/libxkbcommon-1.7.0.tar.xz"
+    },
+    "inputs/rmweb-0.9.1.tar.gz": {
+      "sha256": "e7d6d169ec73743b9f6a60601eba607b741d2144c5b944bf828915b830aafb6b",
+      "bytes": 106832051,
+      "url": "https://github.com/exp78/rmweb/releases/download/v0.9.1/rmweb-0.9.1.tar.gz"
+    },
+    "inputs/wpewebkit-2.48.5.tar.xz": {
+      "sha256": "01f36010705adb14404c56baf033147f7927cc7c6badec81bb141266fcdd8d0b",
+      "bytes": 42221676,
+      "url": "https://wpewebkit.org/releases/wpewebkit-2.48.5.tar.xz"
+    },
+    "packages/libegl-dev_1.7.0-1build1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/libg/libglvnd/libegl-dev_1.7.0-1build1_arm64.deb",
+      "sha256": "99e364f5b5d5847feeb57bf4bd866331da93f16ba767c25286dd7f65e4b828ec",
+      "bytes": 18200,
+      "package": "libegl-dev",
+      "version": "1.7.0-1build1"
+    },
+    "packages/libepoxy-dev_1.5.10-1build1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/libe/libepoxy/libepoxy-dev_1.5.10-1build1_arm64.deb",
+      "sha256": "976557dd0a474f859db69f092c15ae83c366c7a42400be45ccf7921b314c257f",
+      "bytes": 131570,
+      "package": "libepoxy-dev",
+      "version": "1.5.10-1build1"
+    },
+    "packages/libgl-dev_1.7.0-1build1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/libg/libglvnd/libgl-dev_1.7.0-1build1_arm64.deb",
+      "sha256": "9bc28c1265bb82ff2498c234893cbb891529e43fa6b100c007ba677c0a77bbc1",
+      "bytes": 102444,
+      "package": "libgl-dev",
+      "version": "1.7.0-1build1"
+    },
+    "packages/libgles-dev_1.7.0-1build1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/libg/libglvnd/libgles-dev_1.7.0-1build1_arm64.deb",
+      "sha256": "df742afc0b66f24d80920b419723e072ab59d70726519d5994f50cf09e1f3961",
+      "bytes": 50444,
+      "package": "libgles-dev",
+      "version": "1.7.0-1build1"
+    },
+    "packages/libglx-dev_1.7.0-1build1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/libg/libglvnd/libglx-dev_1.7.0-1build1_arm64.deb",
+      "sha256": "dc75223f01a41118e9ba8a7861ed9c0a01578c85cf303a9fecf48515b82fe352",
+      "bytes": 14168,
+      "package": "libglx-dev",
+      "version": "1.7.0-1build1"
+    },
+    "packages/libharfbuzz-dev_8.3.0-2build2_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/h/harfbuzz/libharfbuzz-dev_8.3.0-2build2_arm64.deb",
+      "sha256": "2897a334893c407502f3787fb1ca10ddfd2e35c05a19637396afcfd55873db8d",
+      "bytes": 142344,
+      "package": "libharfbuzz-dev",
+      "version": "8.3.0-2build2"
+    },
+    "packages/libopengl-dev_1.7.0-1build1_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/libg/libglvnd/libopengl-dev_1.7.0-1build1_arm64.deb",
+      "sha256": "a025844d4d801ad784411101337611f58c11066050d7b882edee1ff47fed5786",
+      "bytes": 3440,
+      "package": "libopengl-dev",
+      "version": "1.7.0-1build1"
+    },
+    "packages/libtasn1-6-dev_4.19.0-3ubuntu0.24.04.2_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/libt/libtasn1-6/libtasn1-6-dev_4.19.0-3ubuntu0.24.04.2_arm64.deb",
+      "sha256": "b0b749613dfa8dc203561910c8e93f648071b89d2ac6a61c613df991e2eb6a99",
+      "bytes": 90904,
+      "package": "libtasn1-6-dev",
+      "version": "4.19.0-3ubuntu0.24.04.2"
+    },
+    "packages/libxslt1-dev_1.1.39-0exp1ubuntu0.24.04.3_arm64.deb": {
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/libx/libxslt/libxslt1-dev_1.1.39-0exp1ubuntu0.24.04.3_arm64.deb",
+      "sha256": "73cbf34973c91cc536da3dcea2b5ef7f8cb0ca01265c349892c6faf6cc43e3a0",
+      "bytes": 91864,
+      "package": "libxslt1-dev",
+      "version": "1.1.39-0exp1ubuntu0.24.04.3"
+    }
+  }
+}

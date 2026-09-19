@@ -1,0 +1,24 @@
+[package]
+name = "rmweb-auth-passkey-helper"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+[workspace]
+[dependencies]
+libwebauthn = { path = "vendor/libwebauthn/libwebauthn" }
+tokio = { version = "1.45", features = ["full"] }
+qrcode = { version = "0.14.1", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_cbor_2 = "0.13"
+serde_bytes = "0.11"
+base64-url = "3"
+publicsuffix = "2.3"
+url = "2.5"
+sha2 = "0.10"
+libc = "0.2"
+bluer = { version = "0.17", features = ["bluetoothd"] }
+tracing = { version = "0.1", features = ["max_level_off", "release_max_level_off"] }
+[profile.release]
+strip = true
+panic = "abort"

@@ -1,0 +1,2 @@
+# Unified-diff context preserves upstream whitespace and pinned patch hashes.
+*.patch -whitespace

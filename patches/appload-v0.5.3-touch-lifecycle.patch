@@ -1,0 +1,34 @@
+--- a/src/qtfb/FBController.cpp
++++ b/src/qtfb/FBController.cpp
+@@ -184,6 +184,22 @@
+ 
+ void FBController::touchEvent(QTouchEvent *me) {
+     if(_framebufferID != -1) {
++        // Qt may cancel a sequence without delivering per-contact releases.
++        // Also reset at TouchBegin so a previously dropped cancellation cannot
++        // leave the client treating every later tap as simultaneous input.
++        if (me->type() == QEvent::TouchBegin || me->type() == QEvent::TouchCancel) {
++            qtfb::UserInputContents reset {
++                .inputType = 0x13, // Optional touch-lifecycle extension.
++                .devId = 0, .x = 0, .y = 0, .d = 0,
++            };
++            qtfb::management::forwardUserInput(_framebufferID, &reset);
++            checkingGestureDragDown = false;
++            refreshedScreenAlready = false;
++        }
++        if (me->type() == QEvent::TouchCancel) {
++            me->accept();
++            return;
++        }
+         int lenPoints = me->points().length();
+         if(lenPoints == 5 && !refreshedScreenAlready) {
+             emit requestFullRefresh();
+@@ -218,7 +234,7 @@
+                 case QEventPoint::State::Updated:
+                     packet.inputType = INPUT_TOUCH_UPDATE;
+                     break;
+-                default: break;
++                default: continue;
+             }
+             qtfb::management::forwardUserInput(_framebufferID, &packet);
+         }

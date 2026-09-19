@@ -1,0 +1,29 @@
+#!/bin/sh
+# AppLoad retains the PID and display; the caller owns this installed directory.
+set -eu
+umask 077
+fail() { echo '[Authentication] Browser is unavailable.' >&2; exit 1; }
+# The qualified tablet's BusyBox ash supports the core-size limit.
+# shellcheck disable=SC3045
+ulimit -c 0 || fail
+[ "$#" -eq 1 ] || [ "$#" -eq 3 ] || fail
+if [ "$#" -eq 3 ]; then
+    [ "$2" = --device-code ] || fail
+fi
+case "${QTFB_KEY:-}" in ''|*[!0-9]*) fail;; esac
+[ ! -L "$0" ] || fail
+auth_root=$(CDPATH='' cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || fail
+auth_runtime=$auth_root/runtime
+[ -d "$auth_root/bin" ] && [ ! -L "$auth_root/bin" ] || fail
+[ -d "$auth_runtime" ] && [ ! -L "$auth_runtime" ] || fail
+[ -f "$auth_root/bin/rmweb-auth-entry" ] && [ ! -L "$auth_root/bin/rmweb-auth-entry" ] \
+    && [ -x "$auth_root/bin/rmweb-auth-entry" ] || fail
+[ -f "$auth_runtime/rmweb-env.sh" ] && [ ! -L "$auth_runtime/rmweb-env.sh" ] || fail
+unset LD_PRELOAD RMWEB_JSC_OPTS RMWEB_JIT RMWEB_SKIA_THREADS
+RMWEB_AUTH_RUNTIME=$auth_runtime
+export RMWEB_AUTH_RUNTIME
+# shellcheck source=/dev/null
+. "$auth_runtime/rmweb-env.sh"
+unset QT_QPA_PLATFORM QT_QUICK_BACKEND QSG_RENDER_LOOP
+unset WEBKIT_INSPECTOR_SERVER WEBKIT_INSPECTOR_HTTP_SERVER WEBKIT_DEBUG SSLKEYLOGFILE
+exec "$auth_root/bin/rmweb-auth-entry" "$@"

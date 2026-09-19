@@ -41,3 +41,20 @@ target_compile_options(rmweb-wpeqt PRIVATE
     $<$<CONFIG:MinSizeRel>:-D_FORTIFY_SOURCE=2>)
 # Full RELRO + bind-now: GOT is read-only after relocation (root process, no lazy-binding window).
 target_link_options(rmweb-wpeqt PRIVATE -Wl,-z,relro,-z,now)
+
+# Optional authentication executables use their own patched WPE runtime. Keep
+# them out of normal browser builds, which use the existing release runtime.
+add_executable(rmweb-auth-entry EXCLUDE_FROM_ALL auth-entry.cpp)
+set_target_properties(rmweb-auth-entry PROPERTIES AUTOMOC OFF)
+target_compile_options(rmweb-auth-entry PRIVATE -Wall -Wextra -Werror -fstack-protector-strong)
+target_link_options(rmweb-auth-entry PRIVATE -Wl,-z,relro,-z,now)
+
+qt_add_executable(rmweb-auth-browser EXCLUDE_FROM_ALL
+    auth-main.cpp auth-policy.cpp auth-surface.cpp auth-passkey.cpp qtfbclient.cpp)
+target_link_libraries(rmweb-auth-browser PRIVATE Qt6::Core Qt6::Gui PkgConfig::WPE)
+target_compile_definitions(rmweb-auth-browser PRIVATE QT_NO_KEYWORDS)
+target_compile_options(rmweb-auth-browser PRIVATE -Wall -Wextra -Werror -fstack-protector-strong)
+target_link_options(rmweb-auth-browser PRIVATE -Wl,-z,relro,-z,now)
+set_target_properties(rmweb-auth-browser PROPERTIES
+    INSTALL_RPATH "$ORIGIN/../runtime/lib"
+    BUILD_WITH_INSTALL_RPATH TRUE)

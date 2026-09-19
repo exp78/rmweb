@@ -89,6 +89,20 @@ docker build -f toolchain/Dockerfile -t rmweb-sdk .   # cross-compile image
 
 Full instructions: [`docs/install.md`](docs/install.md)
 
+## Phone passkeys and application sign-in
+
+The separate `rmweb-auth-browser` provides an ephemeral AppLoad window for
+caller-supplied HTTPS sign-in pages, using AppLoad's keyboard and a native QR
+flow for phone passkeys. The caller owns its callback and credentials. This
+requires a patched WPE runtime and a qualified AppLoad build; it does not change
+the regular browser's stored-profile behavior.
+
+The qualified profile is Paper Pro software **3.28.0.172 / Qt 6.10.3**. A user
+confirmed the disposable test verifier's **PASS** after phone approval;
+arbitrary account sign-in, other firmware and other reMarkable models remain
+unverified. Start with the [authentication build and integration guide](docs/auth-browser.md)
+or the [disposable phone-passkey demo](tools/passkey-acceptance/DEMO.md).
+
 ## Roadmap / Planned
 
 Not implemented yet (earlier docs claimed some of these by mistake - see the review above):
