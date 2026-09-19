@@ -291,6 +291,7 @@ Q_SIGNALS:
     void linkMissed();                             // a content tap hit no link -> GUI falls back to chrome toggle
     void bookmarkedChanged(bool on);               // current page bookmark state changed
     void notice(const QString &text);              // transient toast in the chrome (find results, downloads)
+    void ghostClearRequested();                    // settings-page "Clear ghosting now" -> view does a full develop
     void fieldFocused(const QString &value, bool masked, const QString &suggest); // a text field was tapped -> open the keyboard (suggest = autofill prefill for an empty field, may be empty)
     void tlsStateChanged(int state);                 // 0 = http/none, 1 = https ok, 2 = https with cert errors
     void readProgressChanged(double frac);           // reading position 0..1 of the scrollable page; -1 = hide (page doesn't scroll)
@@ -530,6 +531,12 @@ public Q_SLOTS:
                         self->m_settings.autofillName.clear();
                         rmweb::saveSettings(self->m_profileDir, self->m_settings);
                         qInfo("[form] autofill memory cleared (settings)");
+                        done();
+                    } else if (cmd == "clear-ghosting") {
+                        // Panel maintenance, not a setting: the view (GUI thread) owns m_epd — ask it
+                        // for one full-quality develop. Honoured only from our pages (guard above).
+                        qInfo("[refresh] clear ghosting (settings)");
+                        Q_EMIT self->ghostClearRequested();
                         done();
                     } else {
                         // A command this build doesn't know (e.g. a stale generated page left by a
@@ -857,6 +864,7 @@ public Q_SLOTS:
             const bool on = rmweb::toggleBookmark(m_bookmarks, m_curUrl, m_curTitle);
             rmweb::saveBookmarks(m_profileDir, m_bookmarks);
             Q_EMIT bookmarkedChanged(on);
+            Q_EMIT notice(on ? QStringLiteral("Bookmark added") : QStringLiteral("Bookmark removed"));
         });
     }
     void goBack()    { marshalToCtx([this] { if (m_view && webkit_web_view_can_go_back(m_view))    webkit_web_view_go_back(m_view); }); }
@@ -938,7 +946,11 @@ public Q_SLOTS:
                 "return 'tick\\n'+(s.options[s.selectedIndex]?s.options[s.selectedIndex].text:'');}"
                 "var c=t.closest('input[type=checkbox],input[type=radio]');"
                 "if(c&&!c.disabled){c.click();return 'tick\\n'+(c.checked?'on':'off');}"
-                "if(a){if(a.href){location.href=a.href;return 'link';}"
+                // Tap feedback: outline the tapped link so the hit is visible for the (long) load
+                // ahead — the outline stays on the outgoing page until the navigation commits, which
+                // is exactly its job. Links only (a.href — buttons/fields go their own paths), and
+                // never on peek (PEEK returns earlier).
+                "if(a){if(a.href){a.style.outline='4px solid #000';location.href=a.href;return 'link';}"
                 "try{a.click();return 'link';}catch(ex){}}"
                 "var b=t.closest('[onclick],input[type=submit],input[type=button],input[type=reset],input[type=image]');"
                 "if(b){try{b.click();return 'link';}catch(ex){}}"
@@ -1072,13 +1084,21 @@ public Q_SLOTS:
             if (!m_view) return;
             if (m_readerMode) {
                 // reader column font px — same [14,96] range as loadSettings and RMWEB_READER_FONT
+                const int before = m_readerFont;
                 m_readerFont = std::clamp(m_readerFont + (dir > 0 ? 4 : -4), 14, 96);
                 gchar *js = g_strdup_printf("var r=document.getElementById('rmweb-reader');if(r)r.style.fontSize='%dpx';", m_readerFont);
                 webkit_web_view_evaluate_javascript(m_view, js, -1, nullptr, nullptr, m_cancel, nullptr, nullptr);
                 g_free(js);
+                Q_EMIT notice(m_readerFont == before
+                    ? (dir > 0 ? QStringLiteral("Font max") : QStringLiteral("Font min"))   // at the clamp — say so
+                    : QStringLiteral("Font %1 px").arg(m_readerFont));
             } else {
+                const double before = m_zoom;
                 m_zoom = std::clamp(m_zoom * (dir > 0 ? 1.2 : 1.0 / 1.2), 0.5, 3.0);     // page zoom level
                 webkit_web_view_set_zoom_level(m_view, m_zoom);
+                Q_EMIT notice(m_zoom == before
+                    ? (dir > 0 ? QStringLiteral("Zoom max") : QStringLiteral("Zoom min"))   // at the clamp — say so
+                    : QStringLiteral("Zoom %1%").arg(int(m_zoom * 100 + 0.5)));
             }
             qCDebug(lcEngine, "[zoom] reader=%d zoom=%.2f font=%d", m_readerMode, m_zoom, m_readerFont);
             m_settings.zoom = m_zoom; m_settings.readerFont = m_readerFont;
@@ -2034,15 +2054,7 @@ public:
             if (m_bwFast || m_editing || !m_epd || !m_settleOn || m_exiting) return;   // no flash over fast mono / typing / off / exiting
             if (m_inFlight) { m_settleFlash.start(500); return; }   // present still on the panel — retry
             qCDebug(lcEngine, "[t][gui] settle flash (full develop)");
-            bumpTouchGuard();           // blank touch BEFORE the flash — its waveform induces noise
-            epdFullSwapIfOk(m_epd);
-            bumpTouchGuard();           // ...and re-arm for the waveform tail
-            // A manual swap gets no frameSwapped — arm the present gate by hand so the serializer's
-            // invariant (m_inFlight ⟺ a present is on the panel) survives the flash, and the exit
-            // drain (drainForExit) can wait it out like any other present.
-            m_inFlight = true;
-            m_fallback.start(kFallbackMs);
-            QTimer::singleShot(m_dwellMs, this, [this]{ releaseGate(); });
+            manualFullSwap();
         });
         rebuildKeys();   // URL keyboard, drawn into the frame (B2)
         // Keyboard: buffer keystrokes, paint once after a short idle (e-ink can't keep up with per-key presents).
@@ -2205,6 +2217,19 @@ public:
     }
     bool chromeOn()  const { return m_chromeOn; }
     bool readerAvailable() const { return m_readerable || m_readerMode; }   // a Reader tap is a no-op otherwise
+    bool canGoBack() const { return m_canBack; }
+    bool canGoFwd()  const { return m_canFwd; }
+    // Two-tap power (the tap router's ⏻): the first tap only arms — toast + a 3 s disarm window;
+    // the second tap inside it quits. Any other chrome action disarms (the router calls
+    // disarmPower() for the other buttons).
+    bool armPower() {
+        if (m_powerArmed) return true;
+        m_powerArmed = true;
+        setNotice(QStringLiteral("Tap ⏻ again to quit"));
+        QTimer::singleShot(3000, this, [this]{ m_powerArmed = false; });
+        return false;
+    }
+    void disarmPower() { m_powerArmed = false; }
     bool isLoading() const { return m_loading; }
     bool isEditing() const { return m_editing; }
     // Tap on the X at the right end of the "Loading NN%" pill (rect stashed by drawLoadingBadge).
@@ -2360,6 +2385,15 @@ Q_SIGNALS:
     void urlEntered(const QString &url);   // Go pressed with a non-empty buffer -> load it (wired in main())
     void fieldTextEntered(const QString &text);   // Go in field mode -> commit into the focused page field
 public Q_SLOTS:
+    // "Clear ghosting now" (settings page -> engine signal): one manual full-quality develop, on
+    // demand. Retries once the panel is free (a present in flight gets the gate first); the settle
+    // flash is stopped — a pending one would be redundant right after this.
+    void clearGhosting() {
+        if (!m_epd || m_exiting) return;
+        if (m_inFlight) { QTimer::singleShot(500, this, [this]{ clearGhosting(); }); return; }
+        m_settleFlash.stop();
+        manualFullSwap();
+    }
     void setImage(const QImage &img) {
         if (m_exiting) return;   // draining for exit: no new presents
         // (The partial-present content diff runs lazily in presentNext — new frame vs the shown one.)
@@ -2473,7 +2507,10 @@ private:
     // "Working hard" indicator while a page loads: an hourglass + "Loading NN%" from the real load progress,
     // plus an X at the right end — tap it to abort a load that's going nowhere (see hitLoadingStop).
     void drawLoadingBadge(QPainter *p, qreal w) const {
-        const QString lbl = QStringLiteral("Loading %1%").arg(int(m_loadProgress * 100));
+        // Sub-10% the number is noise (estimated progress starts coarse) — a plain "Loading…" reads better.
+        const int pct = int(m_loadProgress * 100);
+        const QString lbl = pct < 10 ? QStringLiteral("Loading…")
+                                     : QStringLiteral("Loading %1%").arg(pct);
         const qreal iconW = 34, gap = 18, stopW = 34, stopGap = 18;
         QRectF pill = drawTextPill(p, w, lbl, iconW + gap, stopGap + stopW);
         // Hourglass icon (lucide/hourglass, same family as the chrome icons) in the pill's left padding.
@@ -2532,11 +2569,13 @@ private:
     void drawRenderNotice(QPainter *p, qreal w, qreal h) const {
         const QString t1 = QStringLiteral("Couldn't display the page");
         const QString t2 = QStringLiteral("heavy site or web app");
+        const QString t3 = QStringLiteral("tap \xE2\x86\xBB to retry, or \xE2\x8F\xBB Home");   // ⟳ ⏻ — action hint
         QFont f1 = p->font(); f1.setPixelSize(46);
         QFont f2 = p->font(); f2.setPixelSize(34);
         p->setFont(f1); const qreal w1 = p->fontMetrics().horizontalAdvance(t1);
         p->setFont(f2); const qreal w2 = p->fontMetrics().horizontalAdvance(t2);
-        const qreal icon = 64, padX = 44, gap = 30, textW = qMax(w1, w2), bh = 210;
+        const qreal w3 = p->fontMetrics().horizontalAdvance(t3);
+        const qreal icon = 64, padX = 44, gap = 30, textW = qMax(qMax(w1, w2), w3), bh = 258;
         const qreal bw = padX + icon + gap + textW + padX, bx = (w - bw) / 2, by = h * 0.30;
         p->setPen(Qt::black); p->setBrush(Qt::white);
         p->drawRoundedRect(QRectF(bx, by, bw, bh), 20, 20);
@@ -2550,6 +2589,7 @@ private:
         p->drawText(QRectF(tx, by + 44, textW, 60), Qt::AlignLeft | Qt::AlignVCenter, t1);
         p->setFont(f2); p->setPen(QColor(90, 90, 90));
         p->drawText(QRectF(tx, by + 116, textW, 50), Qt::AlignLeft | Qt::AlignVCenter, t2);
+        p->drawText(QRectF(tx, by + 188, textW, 50), Qt::AlignLeft | Qt::AlignVCenter, t3);   // way out
         p->setPen(Qt::black);
     }
     // B2 browser chrome painted into the frame (QtQuick does not composite over WPE; see
@@ -2558,7 +2598,9 @@ private:
     void drawChromeBar(QPainter *p, qreal w) const {
         p->fillRect(QRectF(0, 0, w, kBarH), Qt::white);
         p->fillRect(QRectF(0, kBarH - 3, w, 3), Qt::black);
-        auto pen = [&](bool on) { p->setPen(on ? Qt::black : QColor(170, 170, 170)); p->setBrush(Qt::NoBrush); };
+        // Disabled = dark grey #777: lighter greys read as "faded out" on e-ink, #777 still reads
+        // as "off" next to black but stays legible (form over tone — we do NOT thin/dash the stroke).
+        auto pen = [&](bool on) { p->setPen(on ? Qt::black : QColor(119, 119, 119)); p->setBrush(Qt::NoBrush); };
         pen(m_canBack); drawChromeIcon(p, Back);
         pen(m_canFwd);  drawChromeIcon(p, Fwd);
         pen(true);      drawChromeIcon(p, Reload);
@@ -2712,6 +2754,12 @@ private:
         p->drawRoundedRect(QRectF(cx - bw / 2, by, bw, bh), 4, 4);
         p->setBrush(Qt::NoBrush);                                           // shackle arc above the body
         p->drawArc(QRectF(cx - 8, by - 15, 16, 17), closed ? 0 : 35 * 16, (closed ? 180 : 145) * 16);
+        if (!closed) {   // cert errors: "!" inside the open lock (bar + dot) — readable on e-ink
+            p->drawLine(QPointF(cx, by + 5), QPointF(cx, by + bh - 7));     // bar (caller's pen, 3.5w)
+            p->setBrush(pn.color());
+            p->drawEllipse(QPointF(cx, by + bh - 4), 1.8, 1.8);             // dot
+            p->setBrush(Qt::NoBrush);
+        }
     }
     void iconReader(QPainter *p, qreal cx, qreal cy) const {   // lucide/file-text: page, folded corner, lines
         QPainterPath pp(ig(cx, cy, 6, 2));
@@ -2726,6 +2774,18 @@ private:
     }
     // Rebuild the keyboard layout for the current page (letters/symbols) and Shift state.
     void rebuildKeys() { m_keys = rmweb::buildKeyboard(kPanelW, kPanelH, kKbTopY, m_kbShift, m_kbSym); }
+    // One manual full-quality develop (settle flash; "Clear ghosting now" from the settings page):
+    // blank touch around the waveform (it induces phantom taps), and arm the present gate by hand —
+    // a manual swap gets no frameSwapped, so without this the serializer's invariant (m_inFlight ⟺
+    // a present is on the panel) would break, and the exit drain couldn't wait it out.
+    void manualFullSwap() {
+        bumpTouchGuard();
+        epdFullSwapIfOk(m_epd);
+        bumpTouchGuard();
+        m_inFlight = true;
+        m_fallback.start(kFallbackMs);
+        QTimer::singleShot(m_dwellMs, this, [this]{ releaseGate(); });
+    }
     // On-screen URL keyboard, drawn into the frame (B2). Taps -> handleEditTap() (keyboard.h hitKey) via main().
     void drawKeyboard(QPainter *p, qreal w, qreal h) const {
         p->fillRect(QRectF(0, kKbTopY, w, h - kKbTopY), Qt::white);
@@ -2776,7 +2836,7 @@ private:
     }
     static QRect barZone()    { return QRect(0, 0, kPanelW, kBarH); }                   // chrome bar
     static QRect pillZone()   { return QRect(0, kBarH, kPanelW, 270); }               // badges + notice toast
-    static QRect noticeZone() { return QRect(0, int(kPanelH * 0.30), kPanelW, 210); } // render-failed notice (drawRenderNotice)
+    static QRect noticeZone() { return QRect(0, int(kPanelH * 0.30), kPanelW, 270); } // render-failed notice (drawRenderNotice)
     static QRect kbZone()     { return QRect(0, kKbTopY, kPanelW, kPanelH - kKbTopY); }// on-screen keyboard
     static QRect progZone()   { return QRect(0, kPanelH - 10, kPanelW, 10); }         // read-progress strip
     // Align a bbox OUTWARD to 8 px — cheap insurance for the panel controller's region granularity.
@@ -2886,12 +2946,13 @@ private:
     QString m_notice;                            // toast text ("" = hidden)
     double m_readProgress = -1.0;                // reading position 0..1; <0 = bar hidden
     mutable QRectF m_loadingStopRect;            // X zone of the "Loading NN%" pill (stashed by its painter)
-    static const int kNoticeMs = 4000;           // toast on-screen time
+    static const int kNoticeMs = 5000;           // toast on-screen time
     // chrome state, painted into the frame (reader-first: shown on launch, hidden by a content tap).
     // Chrome layout (panel 1620): left cluster | wide address box | A- A+ ★ Reader Power
     // Give the URL field ~half the bar — previous widths left only ~220px and the box looked "gone".
     static const int kBarH = 104, kBackX = 150, kFwdX = 300, kRelX = 480, kReaderW = 150, kZoomW = 100, kPowerW = 110;
     static const int kHomeW = 120, kStarW = 100;
+    bool m_powerArmed = false;                   // two-tap ⏻: first tap armed (3 s window), second quits
     static const int kClearW = 72;               // × clear-button zone on the right of the address box
     bool m_chromeOn = true, m_canBack = false, m_canFwd = false, m_loading = false;
     Hit m_pressed = None;                // chrome button currently flashing its pressed state
@@ -3313,6 +3374,8 @@ int main(int argc, char **argv) {
         });
         // Engine toasts (find results, downloads) -> the chrome overlay.
         QObject::connect(&engine, &WpeEngine::notice, view, &WpeView::setNotice, Qt::QueuedConnection);
+        QObject::connect(&engine, &WpeEngine::ghostClearRequested, view, &WpeView::clearGhosting,
+                         Qt::QueuedConnection);   // settings-page command (worker) -> GUI thread
         // Form fields: a tapped text field opens the keyboard on its current value (or an autofill
         // prefill when the field is empty); Go commits the typed text into the page field (native
         // setter + input/change events) and learns it for future prefills.
@@ -3364,6 +3427,13 @@ int main(int argc, char **argv) {
             [&engine, view](int x, int y) {
                 if (view->isEditing()) { view->handleEditTap(x, y); return; }   // keyboard captures all taps
                 const WpeView::Hit ch = view->hitChrome(x, y);
+                // Disabled buttons: no press flash — a toast says why instead of a silent no-op.
+                if (ch == WpeView::Back && !view->canGoBack()) { view->setNotice(QStringLiteral("Nothing to go back to")); return; }
+                if (ch == WpeView::Fwd  && !view->canGoFwd())  { view->setNotice(QStringLiteral("Nothing to go forward to")); return; }
+                if (ch == WpeView::Reader && !view->readerAvailable()) {   // greyed out: no article, reader off
+                    view->setNotice(QStringLiteral("No article found on this page")); return;
+                }
+                if (ch != WpeView::Power && ch != WpeView::None) view->disarmPower();   // any other chrome action
                 view->pressChrome(ch);   // instant inverted flash on the tapped button (ignored for None/Address)
                 switch (ch) {
                     case WpeView::Back:    view->forceNextContent(); engine.goBack();    return;
@@ -3371,19 +3441,18 @@ int main(int argc, char **argv) {
                     case WpeView::Reload:  view->forceNextContent();
                         view->isLoading() ? engine.stopLoading() : engine.reload(); return;
                     case WpeView::Home:    view->forceNextContent(); engine.goHome();     return;
-                    case WpeView::Reader:
-                        // Greyed-out button (page has no article and reader mode is off): dead tap.
-                        if (!view->readerAvailable()) return;
-                        view->forceNextContent(); engine.toggleReader(); return;
+                    case WpeView::Reader:  view->forceNextContent(); engine.toggleReader(); return;
                     case WpeView::ZoomOut: view->forceNextContent(); engine.zoomBy(-1);   return;
                     case WpeView::ZoomIn:  view->forceNextContent(); engine.zoomBy(+1);   return;
                     case WpeView::Address: view->beginEdit();  return;   // open the on-screen URL keyboard
                     case WpeView::Bookmark: engine.toggleBookmark(); return;
                     case WpeView::Power:
-                        // Single tap exits. Drain the panel first (an active e-ink update must finish —
-                        // drainForExit), then flush pending debounced profile writes (bounded wait on
+                        // Two-tap exit: the first tap only arms (toast, 3 s window — armPower).
+                        // The second drains the panel (an active e-ink update must finish —
+                        // drainForExit), flushes pending debounced profile writes (bounded wait on
                         // the worker — otherwise the last <=1.5 s of history/settings is lost), then
                         // std::_Exit skips WebKit teardown SIGABRT (watchdog-safe).
+                        if (!view->armPower()) return;
                         qInfo("[exit] power — draining panel, flushing profile, leaving");
                         view->drainForExit();
                         engine.flushSync();

@@ -61,6 +61,10 @@ namespace icon {
     inline const char* trash =
         "<path d='M10 11v6'/><path d='M14 11v6'/><path d='M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6'/>"
         "<path d='M3 6h18'/><path d='M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2'/>";
+    inline const char* type =      // text/contrast row glyph (serif T, stroke only)
+        "<path d='M4 7V4h16v3'/><path d='M9 20h6'/><path d='M12 4v16'/>";
+    inline const char* zap =       // lightning (flash row glyph, stroke only)
+        "<path d='M13 2 3 14h9l-1 8 10-12h-9l1-8z'/>";
 }
 inline std::string svgIcon(const char* inner, int px) {
     return "<svg width='" + std::to_string(px) + "' height='" + std::to_string(px)
@@ -106,10 +110,10 @@ inline std::string buildStartPage(const std::vector<Bookmark>& bookmarks,
         "a.page,a.rowlink{display:flex;align-items:center;flex:1;min-width:0;text-decoration:none;color:#000;}"
         ".ic{flex:none;display:inline-flex;margin-right:22px;}"
         ".t{flex:1;font-size:30px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}"
-        ".u{color:#888;font-size:22px;margin-left:16px;}"
+        ".u{color:#666;font-size:24px;margin-left:16px;}"
         ".chip{flex:none;width:56px;height:56px;line-height:56px;text-align:center;background:#000;"
         "color:#fff;border-radius:12px;font-size:28px;font-weight:700;margin-right:20px;}"
-        ".x{flex:none;color:#666;text-decoration:none;font-size:36px;padding:8px 16px;}"
+        ".x{flex:none;color:#666;text-decoration:none;font-size:36px;padding:22px 26px;}"   // fat-finger target
         ".tiles{display:flex;flex-wrap:wrap;gap:22px;}"
         ".tile{display:block;width:208px;border:3px solid #000;border-radius:16px;padding:22px 16px;"
         "text-decoration:none;color:#000;text-align:center;}"
@@ -197,7 +201,7 @@ inline std::string buildSettingsPage(const Settings& s) {
         ".t{flex:1;font-size:30px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}"
         ".v{color:#000;font-size:26px;font-weight:700;margin-left:16px;padding:6px 18px;"
         "border:2px solid #000;border-radius:10px;}"
-        ".hint{color:#888;font-size:22px;padding:6px 0 0;}"
+        ".hint{color:#666;font-size:24px;padding:6px 0 0;}"
         ".back{display:inline-block;margin-top:40px;font-size:28px;color:#000;text-decoration:none;"
         "border:3px solid #000;border-radius:14px;padding:16px 26px;}"
         "</style></head><body><div class='hero'>" + svgIcon(icon::gear, 56) + "<span>Settings</span></div>"
@@ -213,12 +217,13 @@ inline std::string buildSettingsPage(const Settings& s) {
     row(icon::contrast, "rmweb:toggle-bwfast", "B&amp;W fast mode", onoff[s.bwFast ? 1 : 0]);
     h += "<div class='hint'>Grayscale pages: the panel's fast monochrome update develops them fully "
          "(colour needs the slow full flash). Best for heavy reading sessions.</div>";
-    row(icon::contrast, "rmweb:toggle-textboost", "Darken text (contrast boost)", onoff[s.textBoost ? 1 : 0]);
+    row(icon::type, "rmweb:toggle-textboost", "Darken text (contrast boost)", onoff[s.textBoost ? 1 : 0]);
     h += "<div class='hint'>Colour mode only: pushes pale anti-aliased text toward black (mid-tones of "
          "photos darken a bit too). Off in B&amp;W fast mode (that path boosts on its own).</div>";
-    row(icon::contrast, "rmweb:toggle-settleflash", "Settle flash (deepen blacks)", onoff[s.settleFlash ? 1 : 0]);
+    row(icon::zap, "rmweb:toggle-settleflash", "Settle flash (deepen blacks)", onoff[s.settleFlash ? 1 : 0]);
     h += "<div class='hint'>One full-quality flash after the page goes quiet; deepens blacks that quick "
          "updates underdrive. Off in B&amp;W fast mode.</div>";
+    row(icon::zap, "rmweb:clear-ghosting", "Clear ghosting now", "run");
     h += "<h2>Sites</h2>";
     row(icon::smartphone, "rmweb:toggle-ua", "Site version", s.ua == "mobile" ? "mobile (lighter)" : "desktop");
     row(icon::shield, "rmweb:toggle-block", "Ad &amp; tracker blocking", onoff[s.block ? 1 : 0]);
@@ -250,7 +255,7 @@ inline std::string buildSearchResults(const std::string& query,
         ".row{display:flex;align-items:center;padding:16px 0;border-bottom:1px solid #ddd;}"
         "a.rowlink{display:flex;align-items:center;flex:1;min-width:0;text-decoration:none;color:#000;}"
         ".t{flex:1;font-size:30px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}"
-        ".u{color:#888;font-size:22px;margin-left:16px;}"
+        ".u{color:#666;font-size:24px;margin-left:16px;}"
         ".chip{flex:none;width:56px;height:56px;line-height:56px;text-align:center;background:#000;"
         "color:#fff;border-radius:12px;font-size:28px;font-weight:700;margin-right:20px;}"
         ".web{display:flex;align-items:center;border:3px solid #000;border-radius:16px;padding:22px 26px;"
