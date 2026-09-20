@@ -16,9 +16,26 @@ ssh "$DEVICE_USER@$HOST" 'mkdir -p /home/root/rmweb/bin'
 scp "$BIN" "$DEVICE_USER@$HOST:$REMOTE"
 ssh "$DEVICE_USER@$HOST" "
   set -e
-  trap 'echo \"[device] restarting xochitl…\"; systemctl start xochitl' EXIT   # restore BEFORE stopping
+  cleanup(){
+    trap '' TERM INT HUP   # a repeated signal mid-cleanup must not interrupt the xochitl restore
+    [ -n \"\${DONE:-}\" ] && return; DONE=1
+    [ -n \"\${APP:-}\" ] && kill \"\$APP\" 2>/dev/null
+    # rmweb's TERM handler drains the in-flight e-ink present + flushes the profile first (~2.7 s) —
+    # give it that window (same bounded wait as device/rmweb); the kill -9 sweep is for what survives.
+    i=0; while [ -n \"\${APP:-}\" ] && kill -0 \"\$APP\" 2>/dev/null && [ \"\$i\" -lt 6 ]; do sleep 0.5; i=\$((i+1)); done
+    for n in rmweb-wpeqt WPEWebProcess WPENetworkProc WPEGPUProcess; do
+      for p in \$(pgrep \"\$n\" 2>/dev/null); do kill -9 \"\$p\" 2>/dev/null; done
+    done
+    # StartLimitIntervalSec/Burst: repeated stop/start cycles trip an emergency reboot — clear the counter.
+    echo \"[device] restarting xochitl…\"; systemctl reset-failed xochitl 2>/dev/null; systemctl start xochitl
+  }
+  trap cleanup EXIT
+  trap 'cleanup; exit 143' TERM
+  trap 'cleanup; exit 130' INT
   echo '[device] stopping xochitl…'
   systemctl stop xochitl
   echo '[device] running $NAME via epaper QPA…'
-  QT_QPA_PLATFORM=epaper QT_QUICK_BACKEND=epaper '$REMOTE' $REMOTE_ARGS || echo \"[device] app exited rc=\$?\"
+  QT_QPA_PLATFORM=epaper QT_QUICK_BACKEND=epaper '$REMOTE' $REMOTE_ARGS &
+  APP=\$!
+  wait \$APP || echo \"[device] app exited rc=\$?\"
 "

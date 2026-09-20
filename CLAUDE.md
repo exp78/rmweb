@@ -479,3 +479,32 @@ in bwFast re-pushes exactly the damage too. Settle flash / fullSwap stay full-sc
 (once per quiet period). QPainter clips to the update rect by itself — paint() needed no clip logic.
 Over-inclusive zones are safe; a MISSED zone would leave stale pixels — if smearing shows up on
 device, RMWEB_PARTIAL=0 first, then audit the zone list against paint().
+
+**2026-09-19 — UI revision round (379ad29):** disabled chrome buttons toast instead of silently
+flashing ("Nothing to go back to" / "No article found…"); ⏻ is two-tap now (first tap arms a 3 s
+window, any other chrome action disarms); zoom/font toasts with level ("Zoom 120%", "Font max" at
+the clamp); TLS lock draws "!" on cert errors; settings rows got distinct icons (contrast/type/zap)
+and a "Clear ghosting now" action (`rmweb:clear-ghosting` → `WpeView::clearGhosting` → shared
+`manualFullSwap` with the settle flash); link taps outline the tapped element (1.5 s JS timeout —
+fragment navs never leave the page); bookmark/zoom/toast feedback everywhere; kNoticeMs 5 s;
+Loading badge hides sub-10% progress.
+
+**2026-09-20 — six-critic audit round:** the auto-refresh guard's in-flight exemption is now BOUNDED
+(first 3 same-URL navs per load, counter reset at LOAD_STARTED — an unbounded one blessed
+reload-loops); scroll persistence is gated on `sm>40` so an error page can't stamp pos=0 over the
+reading position; the detached library-import thread no longer touches `self` (post to the ref'd
+GMainContext directly, destroy-notify frees an undispatched toast); taps are ignored mid-drain
+(`isExiting()` in the router); addHistory keeps the earned title on a title-less revisit; downloads
+avoid in-flight destination names, not just disk files (race → WebKit would delete the winner);
+the cancelled/102 swallow bumps m_loadGen (false "couldn't render" after download conversion);
+probe-tap leaks of m_expectUserNav cleared on None/Tick; recovery reload skipped when the user
+navigated on (m_loadGen snapshot); RMWEB_FULL_EVERY now also retunes the bwFast anti-ghost cadence
+(was a dead lever); flushSync posts at G_PRIORITY_HIGH and warns on timeout; close-tab matches raw
+AND decoded URLs; UTF-8 visibleName cap fixed for the exact-boundary case (a complete trailing char
+was chopped to an orphaned lead — library_test pins it); the sweeper no longer deletes user
+zero-byte files; device/rmweb lock records the owner pid (takeover only when the owner is dead,
+cleanup only when it's ours) and cleanup ignores repeated TERM/INT/HUP; dev runners got the same
+bounded-wait + systemctl reset-failed treatment.
+Deferred (accepted TODO): password store must not overwrite a saved login on a mistyped attempt —
+needs a deferred-commit design (confirm before replacing), its own feature. Reader-mode residual
+races (minor, agent-43 #11) — parked.

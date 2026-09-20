@@ -204,7 +204,7 @@ int main() {
     // visibleName cap must not split a UTF-8 sequence: 119 ASCII + a 2-byte 'é' = 121 bytes
     // -> capped to 119, leaving the 'é' whole-but-dropped rather than a dangling lead byte
     CHECK(importDocument(xo, dl + "/paper.pdf", std::string(119, 'a') + "\xC3\xA9", &err));
-    {
+    {   // the long-named document exists somewhere among the stems
         bool found = false;
         for (const auto &n : listDir(xo)) {
             if (n.size() < 10 || n.substr(n.size() - 9) != ".metadata") continue;
@@ -216,6 +216,31 @@ int main() {
             if (n.size() < 10 || n.substr(n.size() - 9) != ".metadata") continue;
             CHECK(slurp(xo + "/" + n).find('\xC3') == std::string::npos);   // no truncated lead byte anywhere
         }
+    }
+
+    // UTF-8 cap, multi-byte heavy names: import must SUCCEED (no silent failure) and keep whole chars
+    auto metaWithVisible = [&](const std::string &needle) -> bool {
+        for (const auto &n : listDir(xo)) {
+            if (n.size() < 10 || n.substr(n.size() - 9) != ".metadata") continue;
+            if (slurp(xo + "/" + n).find(needle) != std::string::npos) return true;
+        }
+        return false;
+    };
+    // 61 × 'é' (122 bytes) -> exactly 60 whole 'é' (120 bytes) survive, nothing truncated
+    err.clear();
+    std::string e61; for (int i = 0; i < 61; ++i) e61 += "\xC3\xA9";   // é = C3 A9 interleaved
+    CHECK(importDocument(xo, dl + "/paper.pdf", e61, &err));
+    CHECK(err.empty());
+    CHECK(metaWithVisible(e61.substr(0, 120) + "\""));   // 60 whole é = 120 bytes, then the closing quote
+    // 118 ASCII + a 4-byte emoji straddling the cut -> back off to 118, no dangling F0 lead byte
+    err.clear();
+    CHECK(importDocument(xo, dl + "/paper.pdf",
+                         std::string(118, 'b') + "\xF0\x9F\x98\x80", &err));
+    CHECK(err.empty());
+    CHECK(metaWithVisible(std::string(118, 'b') + "\""));
+    for (const auto &n : listDir(xo)) {
+        if (n.size() < 10 || n.substr(n.size() - 9) != ".metadata") continue;
+        CHECK(slurp(xo + "/" + n).find('\xF0') == std::string::npos);       // no cut 4-byte lead anywhere
     }
 
     // uniqueDownloadName: no clobber, -1/-2/... before the extension
@@ -231,6 +256,10 @@ int main() {
     CHECK(uniqueDownloadName(ud, "noext") == "noext-1");
     CHECK(detail::atomicWrite(ud + "/.pdf", "x"));
     CHECK(uniqueDownloadName(ud, ".pdf") == ".pdf-1");   // dot at 0: whole name is the stem
+    // ...and names taken only by an in-flight download (not yet on disk) are avoided too
+    CHECK(uniqueDownloadName(ud, "race.pdf", {"race.pdf"}) == "race-1.pdf");
+    CHECK(uniqueDownloadName(ud, "race.pdf", {"race.pdf", "race-1.pdf"}) == "race-2.pdf");
+    CHECK(uniqueDownloadName(ud, "free.pdf", {"other.pdf"}) == "free.pdf");   // unrelated inflight: no effect
 
     // uuid fuzz: 10k ids are all well-formed v4 and unique
     {

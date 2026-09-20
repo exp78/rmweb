@@ -14,6 +14,18 @@ Runtime libraries (linked, not modified)
 * Mesa (https://mesa3d.org) — MIT. llvmpipe software rasterizer.
 * glib-networking / OpenSSL — LGPL-2.1+ / Apache-2.0 (TLS backend).
 
+Bundled binaries (redistributed inside build/bundle, not modified)
+------------------------------------------------------------------
+The install bundle ships these libraries so the app runs without device-side
+dependencies (see scripts/bundle.sh):
+* libsoup3 (https://libsoup.gnome.org) — LGPL-2.0+ (HTTP stack).
+* glib-networking (https://gitlab.gnome.org/GNOME/glib-networking) — LGPL-2.1+ (TLS).
+* libtasn1 (https://www.gnu.org/software/libtasn1) — LGPL-2.1+ (ASN.1 for TLS).
+* libpsl (https://github.com/rockdaboot/libpsl) — MIT (Public Suffix List).
+* libwebp (https://chromium.googlesource.com/webm/libwebp) — BSD-3-Clause.
+* libxkbcommon (https://xkbcommon.org) — MIT/X11.
+* LLVM / libLLVM (https://llvm.org) — Apache-2.0 with LLVM-exception (llvmpipe JIT).
+
 Vendored components (source shipped in this repo)
 -------------------------------------------------
 * Mozilla Readability.js (engine/wpeqt/reader/) — Apache-2.0,

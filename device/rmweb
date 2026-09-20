@@ -27,6 +27,7 @@ rotate_log(){
 
 DONE=
 cleanup(){
+  trap '' TERM INT HUP   # a repeated signal mid-cleanup must not interrupt the xochitl restore
   [ -n "$DONE" ] && return; DONE=1
   [ -n "${APP:-}" ] && kill "$APP" 2>/dev/null                       # stop the app if still running
   # rmweb's TERM handler drains the in-flight e-ink present and flushes the profile before exiting
@@ -53,27 +54,29 @@ cleanup(){
     systemctl is-active --quiet xochitl || log "WARN: xochitl still not active after restart"
   fi
   [ -n "${MOUNTED:-}" ] && umount /usr/libexec 2>/dev/null
-  rmdir "$LOCK" 2>/dev/null
+  # Release the lock ONLY if it's still ours (a takeover run replaced it with its own pid).
+  [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCK"
 }
 trap 'cleanup' EXIT
 trap 'cleanup; exit 143' TERM
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 129' HUP   # dropped ssh must not strand the device with xochitl stopped + lock held
 
-# Single instance (mkdir is atomic on BusyBox). The lock dir survives reboots (e.g. an emergency-reboot
-# while rmweb ran): if no rmweb-wpeqt is alive the lock is stale — take it over instead of refusing every
-# future start. With a LIVE process behind the lock, bail without touching xochitl (DONE=1 so the EXIT
-# trap's cleanup is a no-op and won't restart xochitl under the other run).
+# Single instance (mkdir is atomic on BusyBox), with the owner's PID recorded: the lock survives
+# reboots (e.g. an emergency-reboot while rmweb ran) — take it over only when the recorded owner
+# is actually DEAD (kill -0). With a LIVE owner, bail without touching xochitl (DONE=1 so the
+# EXIT trap's cleanup is a no-op and won't restart xochitl under the other run).
 if ! mkdir "$LOCK" 2>/dev/null; then
-  if ! pgrep rmweb-wpeqt >/dev/null 2>&1; then
-    echo "[rmweb] stale $LOCK (no rmweb-wpeqt running) — taking over" >&2
-    rmdir "$LOCK" 2>/dev/null || rm -rf "$LOCK"
-    mkdir "$LOCK" 2>/dev/null || { echo "[rmweb] could not acquire $LOCK" >&2; DONE=1; exit 1; }
-  else
-    echo "[rmweb] already running (lock $LOCK held by a live rmweb-wpeqt)" >&2
+  owner=$(cat "$LOCK/pid" 2>/dev/null || true)
+  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+    echo "[rmweb] already running (lock $LOCK held by pid $owner)" >&2
     DONE=1; exit 1
   fi
+  echo "[rmweb] stale $LOCK (owner pid '${owner:-?}' not alive) — taking over" >&2
+  rm -rf "$LOCK"
+  mkdir "$LOCK" 2>/dev/null || { echo "[rmweb] could not acquire $LOCK" >&2; DONE=1; exit 1; }
 fi
+echo $$ > "$LOCK/pid"
 
 rotate_log   # bound the persistent log before this run's appends
 log "start"

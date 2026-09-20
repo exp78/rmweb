@@ -7,6 +7,7 @@
 // RMWEB_XOCHITL_DIR (tests). Pure std/POSIX (no Qt/WebKit/glib) -> host-unit-testable
 // (tests/library_test.cpp); reuses profile.h's sanitizeField + detail::atomicWrite.
 #include <string>
+#include <set>
 #include <cstdio>
 #include <cerrno>
 #include <cctype>
@@ -44,9 +45,15 @@ inline bool isDocumentFile(const std::string &path) {
 // A download destination that never clobbers an existing file: "name.ext" -> "name-1.ext",
 // "name-2.ext", ... WebKit's EEXIST failure path DELETES the pre-existing file (WebKitDownload.cpp
 // cleanDownloadFiles), so uniqueness matters — overwrite is not an option. Pure POSIX (access F_OK)
-// -> host-unit-testable.
-inline std::string uniqueDownloadName(const std::string &dir, const std::string &name) {
-    if (access((dir + "/" + name).c_str(), F_OK) != 0) return name;
+// -> host-unit-testable. `inflight` (optional) = destination filenames already taken by downloads
+// still in flight: two same-name downloads started back-to-back must not race onto one path
+// (the first to finish wins the file; the second's EEXIST failure would then DELETE it).
+inline std::string uniqueDownloadName(const std::string &dir, const std::string &name,
+                                      const std::set<std::string> &inflight = {}) {
+    auto taken = [&](const std::string &n) {
+        return inflight.count(n) || access((dir + "/" + n).c_str(), F_OK) == 0;
+    };
+    if (!taken(name)) return name;
     std::string stem = name, ext;
     const size_t dot = name.find_last_of('.');
     if (dot != std::string::npos && dot > 0) {   // no dot, or dot==0 (".pdf") -> whole name is the stem
@@ -54,7 +61,7 @@ inline std::string uniqueDownloadName(const std::string &dir, const std::string 
     }
     for (int i = 1; i < 1000; ++i) {
         const std::string cand = stem + "-" + std::to_string(i) + ext;
-        if (access((dir + "/" + cand).c_str(), F_OK) != 0) return cand;
+        if (!taken(cand)) return cand;
     }
     // Saturated (>=1000 collisions): last-resort timestamp suffix.
     return stem + "-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -210,16 +217,17 @@ inline bool importDocument(const std::string &xochitlDir, const std::string &src
     std::string name = sanitizeField(visibleName);
     if (name.size() > 120) {
         name.resize(120);
-        // Back off to a UTF-8 boundary: skip continuation bytes, then if the byte before them is a
-        // lead byte whose sequence was cut by the cap, drop that lead byte too. (Continuation bytes
-        // of a COMPLETE trailing sequence are never touched: that sequence's lead sits before them
-        // with its full length available.)
+        // Back off to a UTF-8 boundary: skip continuation bytes to the last char's lead. A lead
+        // whose sequence the cap CUT gets dropped with it; a lead whose sequence is whole gets
+        // KEPT whole (k advances past it — otherwise its continuation bytes would be chopped off,
+        // leaving an orphaned lead: the "61 é" case = cap exactly on a char boundary).
         size_t k = name.size();
         while (k > 0 && (static_cast<unsigned char>(name[k - 1]) & 0xC0) == 0x80) --k;
         if (k > 0) {
             const unsigned char lead = static_cast<unsigned char>(name[k - 1]);
             const size_t need = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
             if (name.size() - (k - 1) < need) --k;
+            else k = (k - 1) + need;
         }
         name.resize(k);
     }

@@ -49,8 +49,11 @@ fi
 # DONE makes cleanup idempotent (EXIT re-runs after the TERM/INT/HUP traps).
 DONE=
 cleanup(){
+  trap '' TERM INT HUP   # a repeated signal mid-cleanup must not interrupt the xochitl restore
   [ -n "$DONE" ] && return; DONE=1
-  [ -n "${STOPPED:-}" ] && systemctl start xochitl
+  # xochitl has StartLimitIntervalSec/Burst: several stop/start cycles (verify loops) trip an
+  # EMERGENCY REBOOT — clear the burst counter so this legitimate restore start can't be the one.
+  [ -n "${STOPPED:-}" ] && systemctl reset-failed xochitl 2>/dev/null; systemctl start xochitl
   [ -n "${MOUNTED:-}" ] && umount /usr/libexec 2>/dev/null   # umount only what WE mounted (flag)
   rmdir "$R/.lock" 2>/dev/null
 }
@@ -106,7 +109,9 @@ if [ "$MODE" = show ]; then
     # app AND its WPE subprocess children (a stuck WebProcess holds the binary + DRM). The EXIT trap restores
     # xochitl. BusyBox has no pkill/timeout, so loop pgrep+kill.
     kill "$APP" 2>/dev/null || true
-    for i in 1 2 3; do kill -0 "$APP" 2>/dev/null || break; sleep 1; done
+    # rmweb's TERM handler drains the in-flight e-ink present + flushes the profile first (~2.7 s) —
+    # give it that window (same bounded wait as device/rmweb); the kill -9 sweep is for what survives.
+    i=0; while kill -0 "$APP" 2>/dev/null && [ "$i" -lt 6 ]; do sleep 0.5; i=$((i+1)); done
     for n in rmweb-wpeqt WPEWebProcess WPENetworkProc WPEGPUProcess; do
       for p in $(pgrep "$n" 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
     done

@@ -43,6 +43,10 @@ int main() {
     addHistory(h, "http://1", "one-again", 300);          // revisit -> front, title/ts updated
     CHECK(h.size() == 2);
     CHECK(h[0].url == "http://1"); CHECK(h[0].title == "one-again"); CHECK(h[0].ts == 300);
+    addHistory(h, "http://1", "", 400);                     // title-less revisit (error page):
+    CHECK(h[0].title == "one-again"); CHECK(h[0].ts == 400); // the earned title survives, ts moves
+    addHistory(h, "http://1", "one-more", 500);              // a real title still wins
+    CHECK(h[0].title == "one-more");
     for (int i = 0; i < 400; ++i) addHistory(h, "http://x" + std::to_string(i), "t", i);
     CHECK(h.size() == 300);                                // capped
 

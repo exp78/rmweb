@@ -46,6 +46,7 @@
 #include <condition_variable>
 #include <functional>
 #include <memory>
+#include <utility>
 #include <mutex>
 #include <set>
 #include <string>
@@ -475,9 +476,11 @@ public Q_SLOTS:
                         done();
                     } else if (cmd.rfind("close-tab:", 0) == 0) {
                         // The tab URL rides inside the command; WebKit percent-encodes non-ASCII
-                        // when resolving the link, so decode before matching the store.
-                        const std::string u = rmweb::urlDecode(cmd.substr(10));
-                        if (rmweb::removeTab(self->m_tabs, u))
+                        // when resolving the link, so try BOTH forms against the store (a %-URL
+                        // tab would otherwise be unclosable).
+                        const std::string raw = cmd.substr(10);
+                        if (rmweb::removeTab(self->m_tabs, raw)
+                                || rmweb::removeTab(self->m_tabs, rmweb::urlDecode(raw)))
                             rmweb::saveTabs(self->m_profileDir, self->m_tabs);
                         done();
                     } else if (cmd == "toggle-dark") {
@@ -555,6 +558,13 @@ public Q_SLOTS:
             // only point that knows the FUTURE uri (at LOAD_STARTED get_uri still shows the old
             // page). restoreTlsPolicy() returns FAIL when that load settles, so the window covers
             // exactly one load; m_tlsBypass itself lives for the session.
+            // Frame granularity: WPE 2.48.5 has NO webkit_navigation_action_get_frame_info (verified
+            // in headers), so we cannot tell main-frame from subframe decisions. That is acceptable
+            // here: the flip needs a bypassed host anyway (a subframe to the same approved origin is
+            // the same trust decision), and we deliberately do NOT restore on a non-bypass-host
+            // decision — a captive portal hijacks ALL hosts, and closing the window on the sign-on
+            // page's third-party subresources would cert-fail them mid-flow. The flag-based restore
+            // at settle (finished/failed/cancelled/terminated) is the bounded, correct close.
             if (uri && self->m_view && !self->m_tlsIgnoreOn) {
                 const std::string h = rmweb::hostFromUrl(uri);
                 if (!h.empty() && self->m_tlsBypass.count(h)) {
@@ -574,6 +584,13 @@ public Q_SLOTS:
             // A tls-continue reload passes too: the dispatcher's expectUserNav covers its decision,
             // and the kick flag (set until that load's FINISHED) also lets the captive portal's own
             // same-URL meta-refresh through while the sign-on page settles.
+            // NB: while the FIRST load of a page is still in flight, a same-URL JS nav (heavy news
+            // sites canonicalize via location.replace right after the redirect) is part of that
+            // load, not an auto-refresh — but the exemption is BOUNDED (m_loadNavPasses, reset at
+            // LOAD_STARTED): an unbounded one would bless a reload-loop forever and leave a
+            // never-finishing page unguarded (the earlier open-ended m_loadInProgress exemption
+            // did exactly that). Beyond the budget the nav is throttled like a settled page's.
+            // Reader-mode and sec<0 blocks below apply ALWAYS — they sit before the counter.
             if (uri && self->m_view && !expectUserNav && !self->m_tlsContinueKick) {
                 const WebKitNavigationType nt = webkit_navigation_action_get_navigation_type(act);
                 if (nt == WEBKIT_NAVIGATION_TYPE_OTHER || nt == WEBKIT_NAVIGATION_TYPE_RELOAD) {
@@ -586,12 +603,14 @@ public Q_SLOTS:
                             webkit_policy_decision_ignore(dec);
                             return TRUE;
                         }
+                        if (self->m_loadInProgress && ++self->m_loadNavPasses <= 3)
+                            return FALSE;   // in-flight canonicalization — part of this load
                         if (sec > 0) {
                             const gint64 minUs = sec * (gint64)1000000;
                             const gint64 dt = g_get_monotonic_time() - self->m_lastLoadFinishedUs;
                             if (self->m_lastLoadFinishedUs > 0 && dt < minUs) {
-                                qInfo("[guard] auto-refresh throttled (%.1fs < %ds since load finished)",
-                                      dt / 1e6, sec);
+                                qInfo("[guard] auto-refresh throttled (%.1fs < %ds since load finished)%s",
+                                      dt / 1e6, sec, self->m_loadInProgress ? " (budget spent)" : "");
                                 webkit_policy_decision_ignore(dec);
                                 return TRUE;
                             }
@@ -653,8 +672,8 @@ public Q_SLOTS:
                              G_CALLBACK(&WpeEngine::onDownloadStarted), this);
         }
         // Downloads-dir sweep: drop interrupted-download leftovers from a previous _Exit'd session —
-        // WebKit's *.wkdownload temp files and zero-byte files (a stray empty file would otherwise
-        // collide with a re-download of the same name). ONLY those two classes, ONLY this dir.
+        // WebKit's *.wkdownload temp files. ONLY that class, ONLY this dir (zero-byte files are the
+        // user's own — a same-name re-download is already handled by uniqueDownloadName).
         {
             const char *dirEnv = getenv("RMWEB_DOWNLOADS");
             const std::string dir = (dirEnv && *dirEnv && g_path_is_absolute(dirEnv))
@@ -668,7 +687,7 @@ public Q_SLOTS:
                     struct stat st {};
                     if (stat(p.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
                     const bool wkTemp = n.size() > 11 && n.compare(n.size() - 11, 11, ".wkdownload") == 0;
-                    if ((wkTemp || st.st_size == 0) && unlink(p.c_str()) == 0) ++swept;
+                    if (wkTemp && unlink(p.c_str()) == 0) ++swept;
                 }
                 closedir(dd);
             }
@@ -734,13 +753,18 @@ public Q_SLOTS:
         struct FlushState { std::mutex mtx; std::condition_variable cv; bool done = false; };
         // Shared state: on a timed-out wait the worker-side lambda may still run after we return.
         auto st = std::make_shared<FlushState>();
-        marshalToCtx([this, st] {
+        // HIGH priority: on the exit path this flush must beat any queued paint/scroll sources.
+        auto *f = new std::function<void()>([this, st] {
             flushPendingWrites();
             { std::lock_guard<std::mutex> lk(st->mtx); st->done = true; }
             st->cv.notify_one();
         });
+        g_main_context_invoke_full(m_ctx, G_PRIORITY_HIGH,
+            [](gpointer d) -> gboolean { (*static_cast<std::function<void()>*>(d))(); return G_SOURCE_REMOVE; },
+            f, [](gpointer d) { delete static_cast<std::function<void()>*>(d); });
         std::unique_lock<std::mutex> lk(st->mtx);
-        st->cv.wait_for(lk, std::chrono::milliseconds(250), [&st] { return st->done; });
+        if (!st->cv.wait_for(lk, std::chrono::milliseconds(250), [&st] { return st->done; }))
+            qWarning("[profile] flushSync timeout — debounced profile writes may be lost (window <=1.5 s)");
     }
 
     // Scroll one page in dy's direction (the page-turn JS picks the step; called from the GUI thread
@@ -947,10 +971,11 @@ public Q_SLOTS:
                 "var c=t.closest('input[type=checkbox],input[type=radio]');"
                 "if(c&&!c.disabled){c.click();return 'tick\\n'+(c.checked?'on':'off');}"
                 // Tap feedback: outline the tapped link so the hit is visible for the (long) load
-                // ahead — the outline stays on the outgoing page until the navigation commits, which
-                // is exactly its job. Links only (a.href — buttons/fields go their own paths), and
-                // never on peek (PEEK returns earlier).
-                "if(a){if(a.href){a.style.outline='4px solid #000';location.href=a.href;return 'link';}"
+                // ahead. Links only (a.href — buttons/fields go their own paths), and never on peek
+                // (PEEK returns earlier). The timeout clears it again: a FRAGMENT navigation never
+                // leaves the page, and a permanent outline there would be a smudge, not feedback.
+                "if(a){if(a.href){a.style.outline='4px solid #000';"
+                "setTimeout(function(){a.style.outline='';},1500);location.href=a.href;return 'link';}"
                 "try{a.click();return 'link';}catch(ex){}}"
                 "var b=t.closest('[onclick],input[type=submit],input[type=button],input[type=reset],input[type=image]');"
                 "if(b){try{b.click();return 'link';}catch(ex){}}"
@@ -1193,18 +1218,20 @@ private:
             // completes AFTER a navigation committed (m_curUrl cleared at LOAD_COMMITTED) must not
             // stamp the old page's position/progress onto the new one.
             if (!self->m_curUrl.empty()) {
-                self->m_curScroll = pos;
-                rmweb::upsertScroll(self->m_scroll, self->m_curUrl, pos);
-                self->queueSave(&self->m_scrollSaveSrc, 2);
-                // Reading-progress bar: sm = max scroll of the USED scroller (pageBy/restore answer
-                // it); <=40 px of scroll range = the page doesn't really scroll -> hide the bar (-1).
+                // sm = max scroll of the USED scroller; <=40 px of range = the page doesn't really
+                // scroll -> hide the bar (-1). A zero/short scroller (e.g. our JS-free error page,
+                // committed under the failing URI) must also NOT stamp pos=0 over the remembered
+                // reading position — persist only when there is something worth resuming.
                 const size_t sm = dbg.find(" sm=");
-                if (sm != std::string::npos) {
-                    const int maxY = atoi(dbg.c_str() + sm + 4);
-                    double frac = -1.0;
-                    if (maxY > 40) frac = std::min(1.0, std::max(0.0, double(pos) / maxY));
-                    Q_EMIT self->readProgressChanged(frac);
+                const int maxY = (sm != std::string::npos) ? atoi(dbg.c_str() + sm + 4) : 0;
+                if (pos > 0 || maxY > 40) {
+                    self->m_curScroll = pos;
+                    rmweb::upsertScroll(self->m_scroll, self->m_curUrl, pos);
+                    self->queueSave(&self->m_scrollSaveSrc, 2);
                 }
+                double frac = -1.0;
+                if (maxY > 40) frac = std::min(1.0, std::max(0.0, double(pos) / maxY));
+                Q_EMIT self->readProgressChanged(frac);
             }
         }
     }
@@ -1219,7 +1246,9 @@ private:
         qCDebug(lcEngine, "[link] probe hit=%d", static_cast<int>(pr.hit));
         switch (pr.hit) {
             case rmweb::TapHit::None:                       // peek mode: long-press on empty space = no-op
-                if (!self->m_lastProbePeek) Q_EMIT self->linkMissed();
+                // A non-navigating tap must not leak the user-nav exemption probeWith armed onto
+                // the site's NEXT auto-refresh — it would sail through as if user-initiated.
+                if (!self->m_lastProbePeek) { self->m_expectUserNav = false; Q_EMIT self->linkMissed(); }
                 break;
             case rmweb::TapHit::Link:  break;   // the navigation proceeds on its own
             case rmweb::TapHit::Peek: {          // long-press on a link -> toast its target (truncated)
@@ -1230,6 +1259,7 @@ private:
                 break;
             }
             case rmweb::TapHit::Tick:            // checkbox/select changed -> toast the new state
+                self->m_expectUserNav = false;   // no navigation — same leak guard as TapHit::None
                 if (!pr.value.empty()) Q_EMIT self->notice(QString::fromStdString(pr.value));
                 break;
             case rmweb::TapHit::Field: {         // text field focused -> open the keyboard on its value
@@ -1522,10 +1552,14 @@ private:
             const size_t slash = name.find_last_of('/');
             if (slash != std::string::npos) name = name.substr(slash + 1);
             if (name.empty() || name == "." || name == "..") name = "download.bin";
-            name = rmweb::uniqueDownloadName(dir, name);   // never clobber an earlier download
+            name = rmweb::uniqueDownloadName(dir, name, self->m_downloadNames);   // never clobber an
+            // earlier download — nor an in-flight one (two same-name downloads started back-to-back
+            // would race onto one path; the second's EEXIST failure deletes the first's file).
+            const std::string dest = dir + "/" + name;
+            self->m_downloadNames.insert(dest);
             // 2022 API: set_destination takes an absolute PATH (the old GTK API took a file:// URI).
             webkit_download_set_allow_overwrite(d, FALSE);
-            webkit_download_set_destination(d, (dir + "/" + name).c_str());
+            webkit_download_set_destination(d, dest.c_str());
             qInfo("[dl] -> %s/%s", dir.c_str(), name.c_str());
             // Immediate feedback — on a slow e-ink panel the user would otherwise re-tap the link.
             Q_EMIT self->notice(QString::fromStdString("Downloading " + name + " …"));
@@ -1535,6 +1569,8 @@ private:
         // — the rmweb-failed data flag makes "finished" a no-op for those.
         g_signal_connect(dl, "finished", G_CALLBACK(+[](WebKitDownload *d, gpointer data) {
             auto *self = static_cast<WpeEngine*>(data);
+            if (const gchar *dest = webkit_download_get_destination(d))
+                self->m_downloadNames.erase(dest);   // free the destination name for a re-download
             if (g_object_get_data(G_OBJECT(d), "rmweb-failed")) return;   // already reported as failed
             std::string shown = "Download complete";
             std::string destPath;
@@ -1573,11 +1609,13 @@ private:
                 const size_t dot = name.find_last_of('.');
                 if (dot != std::string::npos) name.resize(dot);   // visibleName = no extension
                 // Blocking flash I/O (copy + fsync of tens of MB) must not stall the worker context
-                // (project rule: no blocking I/O on the WebKit worker) — import on a detached thread
-                // and marshal the result toast back. Lifetime: the thread holds a ref on m_ctx, so
-                // the marshal target stays valid even mid-shutdown; a source posted after the loop
-                // exited is simply never dispatched (destroy-notify frees it), and ~WpeEngine runs
-                // only after the worker thread joined — the dispatched lambda never sees a dead self.
+                // (project rule: no blocking I/O on the WebKit worker) — import on a detached thread.
+                // LIFETIME: the thread body never touches `self` (a copy can take seconds; the engine
+                // may be gone by then). It posts the toast into the context it holds a ref on; a
+                // source posted after the loop exited is never dispatched (destroy-notify frees the
+                // message), and a dispatch only runs while the loop lives — i.e. while the engine
+                // (which outlives its loop) is alive. So the raw pointer inside the message is only
+                // ever dereferenced on the worker thread, in-engine-lifetime.
                 const std::string xo = rmweb::xochitlDir();
                 GMainContext *ctx = static_cast<GMainContext*>(g_main_context_ref(self->m_ctx));
                 std::thread([xo, destPath, name, docExt, ctx, self] {
@@ -1586,9 +1624,16 @@ private:
                         qWarning("[library] import failed for %s: %s", destPath.c_str(), ierr.c_str());
                     } else {
                         qInfo("[library] imported %s", destPath.c_str());
-                        self->marshalToCtx([self, msg = "Added to your library: " + name] {
-                            Q_EMIT self->notice(QString::fromStdString(msg));
-                        });
+                        auto *msg = new std::pair<WpeEngine*, std::string>(
+                            self, "Added to your library: " + name);
+                        g_main_context_invoke_full(ctx, G_PRIORITY_DEFAULT,
+                            [](gpointer p) -> gboolean {
+                                auto *m = static_cast<std::pair<WpeEngine*, std::string>*>(p);
+                                Q_EMIT m->first->notice(QString::fromStdString(m->second));
+                                return G_SOURCE_REMOVE;
+                            }, msg, [](gpointer p) {
+                                delete static_cast<std::pair<WpeEngine*, std::string>*>(p);
+                            });
                     }
                     g_main_context_unref(ctx);
                 }).detach();
@@ -1598,6 +1643,8 @@ private:
             auto *self = static_cast<WpeEngine*>(data);
             // WebKit still emits "finished" after this — flag it so that handler no-ops.
             g_object_set_data(G_OBJECT(d), "rmweb-failed", GINT_TO_POINTER(1));
+            if (const gchar *dest = webkit_download_get_destination(d))
+                self->m_downloadNames.erase(dest);   // free the destination name for a re-download
             qWarning("[dl] failed: %s", err ? err->message : "?");
             Q_EMIT self->notice(QString::fromStdString(
                 std::string("Download failed: ") + (err && err->message ? err->message : "unknown error")));
@@ -1609,6 +1656,7 @@ private:
         if (ev == WEBKIT_LOAD_STARTED) {
             self->m_loadGen++;                          // invalidate any pending render-check from a prior load
             self->m_loadInProgress = true;              // the blank-check re-arms while this is true
+            self->m_loadNavPasses = 0;                  // bounded in-flight nav budget (see the guard)
             self->m_renderFailedState = false;
             self->m_lastNonWhite = 0;                   // no frames yet => blank until onBuffer proves otherwise
             self->m_userScrolled = false;               // re-arm scroll-restore suppression for the new load
@@ -1784,6 +1832,9 @@ private:
             // ENDS the tls-continue IGNORE window it interrupted (and its repaint kick).
             self->restoreTlsPolicy("cancelled");
             self->m_tlsContinueKick = false;
+            self->m_loadGen++;   // no LOAD_STARTED follows a download conversion: invalidate the
+                                 // render-check armed by the interrupted load, or it flags a false
+                                 // "couldn't render" over the page that stayed on screen (device-hit)
             // If NOTHING is loading now (e.g. a download-converted link tap — WebKit cancels the
             // navigation with no superseding load), the "Loading…" badge + Stop would otherwise stay
             // forever (no LOAD_FINISHED ever comes). Only when the pipeline is truly idle, though:
@@ -1836,6 +1887,7 @@ private:
             "<a class='retry' href='" + rmweb::htmlEscape(uri) + "'>Try again</a>"
             "</body></html>";
     }
+    struct ReloadMsg { WpeEngine *self; WebKitWebView *view; guint gen; };   // stale-recovery guard (timer below)
     static void onWebProcessTerminated(WebKitWebView *view, WebKitWebProcessTerminationReason reason, gpointer data) {
         auto *self = static_cast<WpeEngine*>(data);
         qWarning("[crash] WebProcess terminated (reason=%d, Phase2-hardened recovery), attempts=%d", reason, self->m_reloadAttempts);
@@ -1854,10 +1906,18 @@ private:
             // is ref'd for the wait; the destroy-notify drops the ref whether the timer fires or
             // is discarded with the context at teardown.
             GSource *s = g_timeout_source_new(static_cast<guint>(backoffMs));
-            g_source_set_callback(s, [](gpointer v) -> gboolean {
-                webkit_web_view_reload(WEBKIT_WEB_VIEW(v));
+            // Fire only if the user hasn't navigated on since the crash (a stale reload would
+            // otherwise yank them back to the crashed page): m_loadGen bumps on every LOAD_STARTED.
+            auto *msg = new ReloadMsg{ self, WEBKIT_WEB_VIEW(g_object_ref(view)), self->m_loadGen };
+            g_source_set_callback(s, [](gpointer d) -> gboolean {
+                auto *m = static_cast<ReloadMsg*>(d);
+                if (m->self->m_loadGen == m->gen) webkit_web_view_reload(m->view);
+                else qInfo("[recovery] reload skipped — user navigated on since the crash");
                 return G_SOURCE_REMOVE;
-            }, g_object_ref(view), [](gpointer v) { g_object_unref(v); });
+            }, msg, [](gpointer d) {
+                auto *m = static_cast<ReloadMsg*>(d);
+                g_object_unref(m->view); delete m;
+            });
             g_source_attach(s, self->m_ctx);
             g_source_unref(s);
         } else {
@@ -1956,6 +2016,7 @@ private:
     bool m_renderFailedState = false; // currently flagged blank (so a later content frame can auto-clear it)
     int m_reloadAttempts = 0; // WebProcess-crash auto-reload budget (reset on a successful load)
     bool m_loadInProgress = false;   // LOAD_STARTED..FINISHED/failed — the blank-check re-arms while true
+    int m_loadNavPasses = 0;         // same-URL navs allowed while a load is in flight (bounded guard)
     bool m_expectUserNav = false;    // UI-initiated navigation (reload/Go) — exempt from the auto-refresh guard
     std::set<std::string> m_tlsBypass;   // hosts whose cert errors the user chose to ignore (session-only,
                                          // worker thread only; populated by rmweb:tls-continue)
@@ -1989,6 +2050,8 @@ private:
     bool m_siteCssOn = false;          // kSiteCss currently in the UCM (mirrors settings after a toggle)
     std::vector<rmweb::ScrollEntry> m_scroll;       // per-URL reading positions (scroll.txt)
     std::vector<rmweb::Tab> m_tabs;                 // open pages, MRU first (tabs.txt — tabs-lite)
+    std::set<std::string> m_downloadNames;          // destination paths of downloads in flight
+                                                    // (worker thread; two same-name downloads must not race)
     GSource *m_historySaveSrc = nullptr;            // pending debounced history write (worker ctx)
     GSource *m_settingsSaveSrc = nullptr;           // pending debounced settings write (worker ctx)
     GSource *m_scrollSaveSrc = nullptr;             // pending debounced scroll-position write
@@ -2216,6 +2279,7 @@ public:
         return Address;
     }
     bool chromeOn()  const { return m_chromeOn; }
+    bool isExiting() const { return m_exiting; }   // drainForExit ran — the router must ignore taps
     bool readerAvailable() const { return m_readerable || m_readerMode; }   // a Reader tap is a no-op otherwise
     bool canGoBack() const { return m_canBack; }
     bool canGoFwd()  const { return m_canFwd; }
@@ -2569,7 +2633,7 @@ private:
     void drawRenderNotice(QPainter *p, qreal w, qreal h) const {
         const QString t1 = QStringLiteral("Couldn't display the page");
         const QString t2 = QStringLiteral("heavy site or web app");
-        const QString t3 = QStringLiteral("tap \xE2\x86\xBB to retry, or \xE2\x8F\xBB Home");   // ⟳ ⏻ — action hint
+        const QString t3 = QStringLiteral("Reload to retry, Home for start page");   // way out (words — the device font is thin on glyphs)
         QFont f1 = p->font(); f1.setPixelSize(46);
         QFont f2 = p->font(); f2.setPixelSize(34);
         p->setFont(f1); const qreal w1 = p->fontMetrics().horizontalAdvance(t1);
@@ -2780,6 +2844,7 @@ private:
     // a present is on the panel) would break, and the exit drain couldn't wait it out.
     void manualFullSwap() {
         bumpTouchGuard();
+        m_clock.restart();   // honest dwell accounting if a real frameSwapped follows the flash
         epdFullSwapIfOk(m_epd);
         bumpTouchGuard();
         m_inFlight = true;
@@ -3146,10 +3211,14 @@ public:
         // Full colour anti-ghost flash every N page-turns. Gallery 3 needs a full-screen flash to change
         // colour (= visible flicker), so for text reading we make N large (mostly grayscale, no flash).
         // Tunable live via RMWEB_FULL_EVERY (0/unset -> default). 0 disables the colour flash entirely.
-        if (qEnvironmentVariableIsSet("RMWEB_FULL_EVERY"))
+        // The SAME env also retunes the bwFast anti-ghost cadence (m_fastFullEvery; a positive N maps
+        // 1:1 — no dead lever).
+        if (qEnvironmentVariableIsSet("RMWEB_FULL_EVERY")) {
             m_fullEvery = qEnvironmentVariableIntValue("RMWEB_FULL_EVERY");
-        qInfo("[refresh] EPFramebuffer ready (instance=%p) fullEvery=%d abi=%s",
-              m_fb, m_fullEvery, m_swap ? "new" : "legacy");
+            if (m_fullEvery > 0) m_fastFullEvery = m_fullEvery;
+        }
+        qInfo("[refresh] EPFramebuffer ready (instance=%p) fullEvery=%d fastFullEvery=%d abi=%s",
+              m_fb, m_fullEvery, m_fastFullEvery, m_swap ? "new" : "legacy");
         return m_fb != nullptr;
     }
     bool ok() const { return m_fb != nullptr; }
@@ -3157,11 +3226,12 @@ public:
     // WpeView's frameSwapped +0 ms — the render loop's fb mutex is released by then (calling this from
     // afterRendering instead self-deadlocks; see class comment). The fast mono waveform leaves residue
     // with each present, so ghosting builds up over successive turns — standard e-ink practice (xochitl
-    // does the same) is a periodic full flash to clear it: every kFastFullEvery content presents here.
+    // does the same) is a periodic full flash to clear it: every m_fastFullEvery content presents here
+    // (default 100; RMWEB_FULL_EVERY>0 retunes it).
     // r = the present's damage rect (partial present): the re-push covers exactly it.
     void presentFast(const QRect &r) {
         if (!m_fb) return;
-        if (++m_fastFrames >= kFastFullEvery) {
+        if (++m_fastFrames >= m_fastFullEvery) {
             m_fastFrames = 0;
             fullSwap();                                       // anti-ghost full flash (always full-screen)
         } else {
@@ -3203,7 +3273,7 @@ private:
     typedef void (*SwapFn)(void *self, QRect, int, int);
     typedef void (*SwapLegacyFn)(void *self, QRect, int, int, int);
     int m_fullEvery = 6;   // full colour flash every N presents (env RMWEB_FULL_EVERY; <=0 = grayscale only)
-    static const int kFastFullEvery = 100;   // fast-mono (bwFast) content presents between anti-ghost full flashes
+    int m_fastFullEvery = 100;   // bwFast anti-ghost cadence (same env, positive N; default 100)
     int m_fastFrames = 0;                    // bwFast content presents since the last anti-ghost flash
     InstanceFn m_instance = nullptr;
     SwapFn m_swap = nullptr;
@@ -3425,6 +3495,7 @@ int main(int argc, char **argv) {
         // pages at the edges. tap(x,y) is in panel px.
         QObject::connect(&touchReader, &TouchReader::tap, win ? win : qobject_cast<QObject*>(&app),
             [&engine, view](int x, int y) {
+                if (view->isExiting()) return;   // mid-drain (waveform/exit): no taps, no power-confirm
                 if (view->isEditing()) { view->handleEditTap(x, y); return; }   // keyboard captures all taps
                 const WpeView::Hit ch = view->hitChrome(x, y);
                 // Disabled buttons: no press flash — a toast says why instead of a silent no-op.

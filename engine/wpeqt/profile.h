@@ -72,7 +72,16 @@ inline bool toggleBookmark(std::vector<Bookmark>& bm, const std::string& url, co
     return true;                                                     // now bookmarked
 }
 inline void addHistory(std::vector<HistoryEntry>& h, const std::string& url, const std::string& title, long ts) {
-    for (auto it = h.begin(); it != h.end(); ++it) if (it->url == url) { h.erase(it); break; }  // dedupe
+    for (auto it = h.begin(); it != h.end(); ++it) if (it->url == url) {
+        // A revisit that reports NO title (e.g. our alternate error page, committed under the
+        // failing URI, whose meta title comes back empty) must not zap the title the original
+        // load earned. tabs' upsertTab already guards the same way.
+        const std::string keep = (title.empty() && !it->title.empty()) ? it->title : sanitizeField(title);
+        h.erase(it);
+        h.insert(h.begin(), HistoryEntry{url, keep, ts});                                        // move to front
+        if (h.size() > 300) h.resize(300);                                                       // cap
+        return;
+    }
     h.insert(h.begin(), HistoryEntry{url, sanitizeField(title), ts});                            // move to front
     if (h.size() > 300) h.resize(300);                                                           // cap
 }

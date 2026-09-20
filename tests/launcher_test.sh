@@ -42,8 +42,9 @@ nowant "systemctl stop xochitl"; nowant "systemctl start xochitl"
 
 echo "case 4: lock contention with a LIVE rmweb-wpeqt refuses to start (no xochitl touch)"
 setup; mkdir "$R/.lock"
-make_stub pgrep 'echo 999999; exit 0'   # a live process holds the lock (high PID: kill must not hit a real proc)
+sleep 60 & OWNER_PID=$!; echo "$OWNER_PID" > "$R/.lock/pid"   # a REAL live pid behind the lock
 APP_MODE=clean PATH="$STUBS:$PATH" RMWEB_ROOT="$R" XOCHITL_ACTIVE=1 sh "$LAUNCHER"; rc=$?
+kill -9 "$OWNER_PID" 2>/dev/null   # stop the fake owner before the next case
 [ "$rc" = 1 ] || { echo "  FAIL: expected rc=1, got $rc"; fails=$((fails+1)); }
 nowant "systemctl stop xochitl"; nowant "systemctl start xochitl"
 [ -d "$R/.lock" ] || { echo "  FAIL: pre-existing lock was removed"; fails=$((fails+1)); }
@@ -80,6 +81,14 @@ grep -q "log rotated" "$R/rmweb.log" || { echo "  FAIL: no rotation note in log"
 
 echo "case 9: stale lock (no live rmweb-wpeqt) is taken over"
 setup; mkdir "$R/.lock"   # default pgrep stub exits 1 -> no live process -> stale
+out=$(APP_MODE=clean PATH="$STUBS:$PATH" RMWEB_ROOT="$R" XOCHITL_ACTIVE=1 sh "$LAUNCHER" 2>&1); rc=$?
+[ "$rc" = 0 ] || { echo "  FAIL: expected rc=0, got $rc"; fails=$((fails+1)); }
+echo "$out" | grep -q "stale" || { echo "  FAIL: expected a stale-lock notice"; fails=$((fails+1)); }
+want "systemctl stop xochitl"; want "systemctl start xochitl"
+[ -d "$R/.lock" ] && { echo "  FAIL: lock not released"; fails=$((fails+1)); }
+
+echo "case 10: stale pid file (dead owner pid) is taken over"
+setup; mkdir "$R/.lock"; echo 999999 > "$R/.lock/pid"   # nothing runs at pid 999999 on the host
 out=$(APP_MODE=clean PATH="$STUBS:$PATH" RMWEB_ROOT="$R" XOCHITL_ACTIVE=1 sh "$LAUNCHER" 2>&1); rc=$?
 [ "$rc" = 0 ] || { echo "  FAIL: expected rc=0, got $rc"; fails=$((fails+1)); }
 echo "$out" | grep -q "stale" || { echo "  FAIL: expected a stale-lock notice"; fails=$((fails+1)); }
