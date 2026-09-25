@@ -126,12 +126,20 @@ extern "C" void crashHandler(int sig) {
 static volatile sig_atomic_t g_termDrainOk = 0;    // display mode, GUI up: TERM may drain first
 static volatile sig_atomic_t g_termRequested = 0;  // SIGTERM latched (termHandler -> GUI poll timer)
 static volatile sig_atomic_t g_termDraining = 0;   // the clean exit is underway (poll re-entry guard:
-                                                   // drainForExit pumps processEvents, which would
-                                                   // dispatch the poll timer again with a fresh budget)
+                                                   // drainForExit runs on the GUI thread and can be
+                                                   // re-entered only via a second event source)
 extern "C" void termHandler(int) {
     // Second TERM (or TERM with no GUI to drain on, or TERM mid-drain) = force-exit NOW.
     if (!g_termDrainOk || g_termRequested || g_termDraining) std::_Exit(0);
     g_termRequested = 1;
+}
+
+// SIGTERM is blocked while a panel present is in flight (the vendor EPDC path crashes if a signal
+// interrupts the update ioctl) and on the worker/touch threads entirely — so a TERM is only ever
+// delivered to the GUI thread BETWEEN presents. pthread_sigmask, same-thread, cheap.
+static void blockSigterm(bool on) {
+    sigset_t s; sigemptyset(&s); sigaddset(&s, SIGTERM);
+    pthread_sigmask(on ? SIG_BLOCK : SIG_UNBLOCK, &s, nullptr);
 }
 
 // WKContentRuleList (Safari/WebKit content-blocker JSON): drop third-party scripts/media/fonts — i.e. ads,
@@ -300,6 +308,7 @@ Q_SIGNALS:
 public Q_SLOTS:
     void start() {
         g_main_context_push_thread_default(m_ctx);
+        blockSigterm(true);   // worker never takes TERM — it is for the GUI thread between presents
         m_startUs = g_get_monotonic_time();
 
         // Load persistent profile (bookmarks, history, settings) before any WebKit activity.
@@ -2175,7 +2184,9 @@ public:
         }
         for (int i = 0; i < 256; ++i)   // factor by luma: darken mid-grey, keep black/white pinned
             m_toneLut[i] = i == 0 ? 1.0f : std::pow(i / 255.0f, m_textGamma) * 255.0f / i;
-        m_partial = qgetenv("RMWEB_PARTIAL") != "0";   // partial present (dirty bbox) on by default
+        m_partial = qgetenv("RMWEB_PARTIAL") == "1";   // partial present is OPT-IN: the vendor
+        // EPRenderLoop still crashes intermittently on region presents under storms even with the
+        // idempotent gate (device-verified 2026-09-25); full-screen presents are the safe default.
         connect(&m_settleFlash, &QTimer::timeout, this, [this]{
             if (m_bwFast || m_editing || !m_epd || !m_settleOn || m_exiting) return;   // no flash over fast mono / typing / off / exiting
             if (m_inFlight) { m_settleFlash.start(500); return; }   // present still on the panel — retry
@@ -2218,17 +2229,19 @@ public:
     // against frameSwapped. Bounded: a stuck present (no frameSwapped, fallback still pending at
     // 2.5 s) must not stall power-off — log and exit anyway.
     void drainForExit() {
-        if (g_termDraining) return;   // already draining — poll/⏻ re-entry via the processEvents below
+        if (g_termDraining) return;   // already draining (double ⏻ / repeat TERM = force-exit path)
         g_termDraining = 1;           // also makes a second SIGTERM a force-exit (see termHandler)
         m_exiting = true;         // no new presents from here on (setImage/schedule/presentNext no-op)
         m_settleFlash.stop(); m_contentFlush.stop(); m_noticeTimer.stop();
         if (!m_inFlight) return;
-        QElapsedTimer clock; clock.start();
-        // >= kFallbackMs: outlast the gate's own fallback release, so a present whose frameSwapped
-        // never arrives still "finishes" here instead of tripping the timeout log spuriously.
-        while (m_inFlight && clock.elapsed() < 2500)
-            QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
-        if (m_inFlight) qWarning("[exit] drain timeout — present still in flight, exiting anyway");
+        // Do NOT pump the event loop here (an earlier processEvents-based drain did): a queued QPA
+        // update then runs handleUpdateRequest -> paint/present WHILE the panel is mid-waveform,
+        // and the vendor EPFramebuffer crashes on the overlapped present (device-verified SIGSEGV,
+        // three stacks). Under the single-threaded basic loop a TERM can only be polled BETWEEN
+        // presents, so the panel is never mid-swapBuffers at this point; all that remains is the
+        // physical waveform tail after the last present returned — plain sleep covers it, and the
+        // EPDC finishes a commanded waveform autonomously regardless.
+        g_usleep((guint)m_dwellMs * 1000 + 300000);   // dwell + physical tail margin
     }
     void paint(QPainter *p) override {
         const qreal w = width(), h = height();
@@ -3021,6 +3034,7 @@ private:
         if (m_partial && m_dirtyAccum.isNull()) { m_dirty = false; return; }
         m_lastPresentHadContent = hadContent;
         m_dirty = false; m_inFlight = true;
+        blockSigterm(true);   // the vendor EPDC path crashes if SIGTERM interrupts a present (EINTR)
         m_clock.restart();
         if (hadContent) m_lastContentPresentUs = g_get_monotonic_time();
         m_lastPresentGuarded = m_nextGuardTouch;
@@ -3040,6 +3054,11 @@ private:
         m_fallback.start(kFallbackMs);
     }
     void releaseGate() {
+        if (!m_inFlight) return;   // idempotent: frameSwapped + fallback + the dwell single-shot can
+        // all fire for ONE present (and the settle flash arms its own); a second release used to
+        // start an OVERLAPPING present (presentNext while in flight) -> vendor EPDC/raster SIGSEGV
+        // storm, worst on slow paints (device-verified crash combo: settle flash + text boost).
+        blockSigterm(false);   // present window closed — a pending SIGTERM may be delivered now
         m_fallback.stop(); m_inFlight = false;
         if (m_exiting) return;                            // draining for exit: no re-present
         if (m_hasPending || m_dirty) presentNext();   // newer frame or a chrome change queued -> present it
@@ -3125,6 +3144,7 @@ Q_SIGNALS:
     void longPress(int x, int y);  // stationary hold (> tapMaxDwellMs) -> link peek
 public Q_SLOTS:
     void run() {
+        blockSigterm(true);   // TERM belongs to the GUI thread between presents, not here
         int fd = openByName("Elan touch input");
         if (fd < 0) { qWarning("[touch] 'Elan touch input' node not found"); return; }
         // The grab is NOT optional: without it the epaper QPA's broken touch dispatch reaches
@@ -3332,8 +3352,10 @@ private:
     // swap dispatch: current ABI (QRect, mode, flags) vs legacy (QRect, contentType, mode, flags).
     // The legacy ABI takes the content type — pass it through (a full flash is Color, not Mono).
     void swap(const QRect &r, int contentType, int mode, int flags) {
+        blockSigterm(true);   // vendor ioctl must not take a signal mid-update
         if (m_swap) m_swap(m_fb, r, mode, flags);
         else m_swapLegacy(m_fb, r, contentType, mode, flags);
+        blockSigterm(false);
     }
     typedef void *(*InstanceFn)();
     // ABI of EPFramebuffer::swapBuffers(...): the implicit `this` is the 1st arg; the enums and the
@@ -3394,8 +3416,13 @@ int main(int argc, char **argv) {
     sigaction(SIGBUS,  &sa, nullptr);
     sigaction(SIGILL,  &sa, nullptr);
     // Timed kills (dev runner, systemd): termHandler latches a flag; the GUI poll drains + exits.
+    // SA_RESTART is load-bearing: without it a TERM landing mid-present interrupts the EPDC ioctl
+    // with EINTR and the vendor epaper code crashes out of the half-completed update (device-verified
+    // SIGSEGV storm on TERM during heavy renders). With SA_RESTART the syscall resumes and the
+    // handler's flag is the only effect.
     struct sigaction st = {};
     st.sa_handler = termHandler;
+    st.sa_flags = SA_RESTART;
     sigemptyset(&st.sa_mask);
     sigaction(SIGTERM, &st, nullptr);
     QGuiApplication app(argc, argv);

@@ -524,3 +524,13 @@ strips into a local canvas; RMWEB_DUMP_FRAMES dumps the MERGED canvas (view->con
 Expected: chrome/toast/progress frames now copy + convert a few hundred rows instead of 14 MB;
 page turns pay diff(~ms) instead of a full copy; full navigations pay one extra m_prevFrame copy
 (rare). dup-filter (sig) unchanged; m_prevFrame updates only for emitted frames.
+**2026-09-25 — the exit-crash saga (device-bisected, ~40 storm runs):** a SIGSEGV family in the present
+path (vendor swapBuffers mutex / QRasterPaintEngine::fillRect / qsgepaper internals) turned out to be
+TWO roots: (1) releaseGate was not idempotent — frameSwapped + fallback + the settle-flash's manual
+dwell release could all fire for one present, and the second release started an OVERLAPPING present
+(presentNext while in flight) → vendor/Qt crash; fixed with `if (!m_inFlight) return;` at the top.
+Widened by slow paints (text boost) and exposed by the settle flash's extra manual gate. (2) The
+vendor EPRenderLoop still crashes intermittently on PARTIAL (region) presents under frame storms even
+with the gate fixed — partial presents are now opt-in (RMWEB_PARTIAL=1), default full-screen. Wrong
+theories ruled out on device: EINTR (SA_RESTART changed nothing), SIGTERM routing (masked on worker/
+touch, blocked during presents — kept as cheap insurance, harmless), strips (clean in isolation).
