@@ -10,22 +10,22 @@ browser is on screen and restarts it on exit.
 `scripts/package.sh` produces a self-contained release tarball (`dist/rmweb-<version>.tar.gz`, ~110 MB -
 it carries everything the stock OS doesn't provide, so no build tools are needed to install it - but
 it does need the stock OS with its system Qt 6; verified on OS 3.28.x). Prebuilt
-archives are attached to [GitHub Releases](https://github.com/exp78/rmweb/releases) - install v0.9.5
+archives are attached to [GitHub Releases](https://github.com/exp78/rmweb/releases) - install v0.9.6
 without any toolchain:
 
 ```sh
 # 1. Download the archive from Releases and copy it to the tablet over USB:
-scp rmweb-0.9.5.tar.gz root@10.11.99.1:/home/root/
+scp rmweb-0.9.6.tar.gz root@10.11.99.1:/home/root/
 # 2. Extract + wire up on the device (no toolchain here):
 ssh root@10.11.99.1 'mkdir -p /home/root/rmweb \
-  && gunzip -c /home/root/rmweb-0.9.5.tar.gz | tar -C /home/root/rmweb -xf - \
+  && gunzip -c /home/root/rmweb-0.9.6.tar.gz | tar -C /home/root/rmweb -xf - \
   && /home/root/rmweb/install.sh'
 ```
 
 Upgrading: quit rmweb, remove the old tree (`rm -rf /home/root/rmweb`), then repeat the two steps
 above. The user profile lives in `/home/root/.rmweb` and survives the reinstall (only `rmweb.log`,
 kept in the app dir, is lost). To build the archive yourself instead:
-`./scripts/build-wpeqt.sh && ./scripts/package.sh`, then the same two steps with `dist/rmweb-0.9.5.tar.gz`.
+`./scripts/build-wpeqt.sh && ./scripts/package.sh`, then the same two steps with `dist/rmweb-0.9.6.tar.gz`.
 
 ## Build + deploy from source (dev host)
 
