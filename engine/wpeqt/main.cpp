@@ -2032,7 +2032,15 @@ private:
         const gint64 tDiff = g_get_monotonic_time();
         int rowsChanged = 0;
         QRect dirty = bufferDiffBBox(pix, stride, w, h, self->m_prevFrame, &rowsChanged);
-        if (dirty.isEmpty() || dirty == QRect(0, 0, w, h)) dirty = QRect();   // no damage / all of it
+        // Big damage (real page turns) ships FULL frames, not strips: WebKit's tiled renderer can
+        // paint the same viewport in passes seconds apart, so a turn arrives as several strips at
+        // different scroll positions. Full replacement self-heals that every frame; strips would
+        // leave rows from older turns on the panel until they happen to change again (seen on
+        // device: layer-cake of mixed turns). Strips are for small, coherent updates (toasts,
+        // caret, find, SPA ticks) where they save a full 14 MB copy.
+        static const int kStripMaxRows = int(2160 * 0.6);
+        if (dirty.isEmpty() || dirty == QRect(0, 0, w, h) || dirty.height() > kStripMaxRows)
+            dirty = QRect();   // no damage / most of the screen — full frame
         QImage img(pix, w, h, stride, QImage::Format_ARGB32);   // SHM wrap (B,G,R,A == ARGB32)
         if (dirty.isNull()) {
             // WPE SHM memory order is B,G,R,A (ARGB8888 little-endian) == QImage::Format_ARGB32.
@@ -2524,19 +2532,28 @@ public Q_SLOTS:
         if (m_exiting) return;   // draining for exit: no new presents
         // The engine row-diffs every frame on the worker and ships only the damage strip (a
         // dirty-sized QImage); a null/full dirty means a full frame. Merge strips into the canvas
-        // IN PLACE: m_img is sole-owned between presents (presentNext drops m_pending after the swap).
+        // IN PLACE. The freshest full canvas is m_pending while a full frame awaits its present —
+        // merge there (a strip arriving before the first present would otherwise REPLACE the pending
+        // full frame and shrink the canvas to strip size for the whole session).
         const QRect full(0, 0, kPanelW, kPanelH);
-        if (!dirty.isNull() && dirty != full && !m_img.isNull() && m_img.size() == full.size()
-                && m_img.format() == QImage::Format_ARGB32 && img.size() == dirty.size()
+        QImage &canvas = m_pending.isNull() ? m_img : m_pending;   // sole-owned between presents
+        if (!dirty.isNull() && dirty != full && !canvas.isNull() && canvas.size() == full.size()
+                && canvas.format() == QImage::Format_ARGB32 && img.size() == dirty.size()
                 && img.format() == QImage::Format_ARGB32) {
-            m_img.detach();   // no-op when sole-owned (the steady state); belt for a shared remnant
+            canvas.detach();   // no-op when sole-owned (the steady state); belt for a shared remnant
             for (int y = 0; y < dirty.height(); ++y)
-                std::memcpy(m_img.scanLine(dirty.top() + y) + size_t(dirty.x()) * 4,
+                std::memcpy(canvas.scanLine(dirty.top() + y) + size_t(dirty.x()) * 4,
                             img.constScanLine(y), size_t(dirty.width()) * 4);
             if (m_partial) markDirty(dirty);
-        } else {
+        } else if (img.size() == full.size() || dirty.isNull() || dirty == full) {
             m_pending = img;   // full frame — swapped into m_img by presentNext
             if (m_partial) markDirty(dirty.isNull() ? full : dirty);
+        } else {
+            // A strip with no full canvas anywhere (shouldn't happen — the engine always emits a
+            // full frame first): drop it, mark everything dirty so the next present repaints all.
+            qWarning("[gui] strip frame with no full canvas yet — dropped");
+            if (m_partial) markDirtyAll();
+            m_pending = QImage();   // keep the present honest: full repaint of whatever we have
         }
         m_hasPending = true;
         // Always keep the latest frame. Only schedule an e-ink present if forced (user action) or
