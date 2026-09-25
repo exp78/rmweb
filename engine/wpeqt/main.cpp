@@ -8,6 +8,7 @@
 //
 // See: CLAUDE.md, docs/research/*.md, docs/superpowers/specs/2026-06-30-rmweb-phase5-packaging-design.md
 #include <QGuiApplication>
+#include <QScreen>
 #include <QThread>
 #include <QImage>
 #include <QTimer>
@@ -55,6 +56,7 @@
 #include <cstdio>
 #include <cerrno>
 #include <cstring>
+#include <vector>
 #include <csignal>
 #include <execinfo.h>
 #include <dlfcn.h>
@@ -73,8 +75,12 @@ using rmweb::classifyGesture;
 
 Q_LOGGING_CATEGORY(lcEngine, "rmweb.engine", QtWarningMsg)  // per-frame/tap traces go to qCDebug(lcEngine), off by default; enable with QT_LOGGING_RULES=rmweb.engine.debug=true
 
-// Finger digitizer raw range (Elan, verified on device) -> 1620x2160 panel; swipe thresholds in panel px.
-static const int kPanelW = 1620, kPanelH = 2160, kTouchRawW = 2064, kTouchRawH = 2832;
+// Finger digitizer raw range (Elan) -> panel px; swipe thresholds in panel px.
+// PANEL GEOMETRY IS RUNTIME (Paper Pro Move 7.3" ~1696x954 native differs from the Paper Pro's
+// 1620x2160): kPanelW/kPanelH are set from primaryScreen()->size() in main() (after
+// QGuiApplication — the epaper QPA reports the real panel); kTouchRawW/H from EVIOCGABS in
+// TouchReader::run. Fallbacks = Paper Pro. Everything panel-px below goes through these.
+static int kPanelW = 1620, kPanelH = 2160, kTouchRawW = 2064, kTouchRawH = 2832;
 // (swipe/tap thresholds live in gesture.h GestureParams — single source of truth; the page-turn
 //  step itself is innerHeight*0.92, computed in the pageBy JS — callers pass only a direction)
 
@@ -2047,8 +2053,10 @@ private:
         // leave rows from older turns on the panel until they happen to change again (seen on
         // device: layer-cake of mixed turns). Strips are for small, coherent updates (toasts,
         // caret, find, SPA ticks) where they save a full 14 MB copy.
-        static const int kStripMaxRows = int(2160 * 0.6);
-        if (dirty.isEmpty() || dirty == QRect(0, 0, w, h) || dirty.height() > kStripMaxRows)
+        int stripMaxRows = int(kPanelH * 0.6);   // runtime panel height (Move differs)
+        if (const int v = qEnvironmentVariableIntValue("RMWEB_STRIP_MAX_ROWS"); v >= 0
+                && qEnvironmentVariableIsSet("RMWEB_STRIP_MAX_ROWS")) stripMaxRows = v;   // 0 = strips off
+        if (dirty.isEmpty() || dirty == QRect(0, 0, w, h) || dirty.height() > stripMaxRows)
             dirty = QRect();   // no damage / most of the screen — full frame
         QImage img(pix, w, h, stride, QImage::Format_ARGB32);   // SHM wrap (B,G,R,A == ARGB32)
         if (dirty.isNull()) {
@@ -2541,25 +2549,40 @@ public Q_SLOTS:
     }
     // Content canvas for RMWEB_DUMP_FRAMES (merged full frame — strips included), read-only shared.
     QImage contentImage() const { return m_img; }
+    // Copy one damage strip's rows into the canvas at the strip's origin. Caller guarantees: canvas
+    // is full-panel ARGB32, img is dirty-sized ARGB32, and no present is in flight (the QPA reads the
+    // canvas during the render tick).
+    static void mergeStrip(QImage &canvas, const QImage &img, const QRect &dirty) {
+        canvas.detach();   // no-op when sole-owned (the steady state); belt for a shared remnant
+        for (int y = 0; y < dirty.height(); ++y)
+            std::memcpy(canvas.scanLine(dirty.top() + y) + size_t(dirty.x()) * 4,
+                        img.constScanLine(y), size_t(dirty.width()) * 4);
+    }
     void setImage(const QImage &img, const QRect &dirty) {
         if (m_exiting) return;   // draining for exit: no new presents
         // The engine row-diffs every frame on the worker and ships only the damage strip (a
         // dirty-sized QImage); a null/full dirty means a full frame. Merge strips into the canvas
-        // IN PLACE. The freshest full canvas is m_pending while a full frame awaits its present —
-        // merge there (a strip arriving before the first present would otherwise REPLACE the pending
-        // full frame and shrink the canvas to strip size for the whole session).
+        // IN PLACE — but ONLY while no present is in flight: the QPA reads m_img during the render
+        // tick, and writing it mid-present crashes the vendor stack (device-verified). While the
+        // panel is busy, strips queue and merge at releaseGate.
         const QRect full(0, 0, kPanelW, kPanelH);
         QImage &canvas = m_pending.isNull() ? m_img : m_pending;   // sole-owned between presents
-        if (!dirty.isNull() && dirty != full && !canvas.isNull() && canvas.size() == full.size()
-                && canvas.format() == QImage::Format_ARGB32 && img.size() == dirty.size()
-                && img.format() == QImage::Format_ARGB32) {
-            canvas.detach();   // no-op when sole-owned (the steady state); belt for a shared remnant
-            for (int y = 0; y < dirty.height(); ++y)
-                std::memcpy(canvas.scanLine(dirty.top() + y) + size_t(dirty.x()) * 4,
-                            img.constScanLine(y), size_t(dirty.width()) * 4);
+        const bool isStrip = !dirty.isNull() && dirty != full && img.size() == dirty.size()
+                             && img.format() == QImage::Format_ARGB32;
+        if (isStrip && m_inFlight) {
+            m_stripQueue.emplace_back(img, dirty);   // newest strips only; capped — a full frame
+            if (m_stripQueue.size() > 16) m_stripQueue.erase(m_stripQueue.begin());   // heals anyway
+            if (m_partial) markDirty(dirty);
+            m_hasPending = true;
+            return;   // releaseGate drains the queue
+        }
+        if (isStrip && !canvas.isNull() && canvas.size() == full.size()
+                && canvas.format() == QImage::Format_ARGB32) {
+            mergeStrip(canvas, img, dirty);
             if (m_partial) markDirty(dirty);
         } else if (img.size() == full.size() || dirty.isNull() || dirty == full) {
             m_pending = img;   // full frame — swapped into m_img by presentNext
+            m_stripQueue.clear();   // queued strips are older than this full frame — superseded
             if (m_partial) markDirty(dirty.isNull() ? full : dirty);
         } else {
             // A strip with no full canvas anywhere (shouldn't happen — the engine always emits a
@@ -2943,7 +2966,7 @@ private:
         strokeIcon(p, pp);
     }
     // Rebuild the keyboard layout for the current page (letters/symbols) and Shift state.
-    void rebuildKeys() { m_keys = rmweb::buildKeyboard(kPanelW, kPanelH, kKbTopY, m_kbShift, m_kbSym); }
+    void rebuildKeys() { m_keys = rmweb::buildKeyboard(kPanelW, kPanelH, kbTopY(), m_kbShift, m_kbSym); }
     // One manual full-quality develop (settle flash; "Clear ghosting now" from the settings page):
     // blank touch around the waveform (it induces phantom taps), and arm the present gate by hand —
     // a manual swap gets no frameSwapped, so without this the serializer's invariant (m_inFlight ⟺
@@ -2959,8 +2982,8 @@ private:
     }
     // On-screen URL keyboard, drawn into the frame (B2). Taps -> handleEditTap() (keyboard.h hitKey) via main().
     void drawKeyboard(QPainter *p, qreal w, qreal h) const {
-        p->fillRect(QRectF(0, kKbTopY, w, h - kKbTopY), Qt::white);
-        p->fillRect(QRectF(0, kKbTopY, w, 2), Qt::black);
+        p->fillRect(QRectF(0, kbTopY(), w, h - kbTopY()), Qt::white);
+        p->fillRect(QRectF(0, kbTopY(), w, 2), Qt::black);
         QFont kf = p->font(); kf.setPixelSize(44); p->setFont(kf);
         for (size_t ki = 0; ki < m_keys.size(); ++ki) {
             const rmweb::Key &k = m_keys[ki];
@@ -3008,7 +3031,7 @@ private:
     static QRect barZone()    { return QRect(0, 0, kPanelW, kBarH); }                   // chrome bar
     static QRect pillZone()   { return QRect(0, kBarH, kPanelW, 270); }               // badges + notice toast
     static QRect noticeZone() { return QRect(0, int(kPanelH * 0.30), kPanelW, 270); } // render-failed notice (drawRenderNotice)
-    static QRect kbZone()     { return QRect(0, kKbTopY, kPanelW, kPanelH - kKbTopY); }// on-screen keyboard
+    static QRect kbZone()     { return QRect(0, kbTopY(), kPanelW, kPanelH - kbTopY()); }// on-screen keyboard
     static QRect progZone()   { return QRect(0, kPanelH - 10, kPanelW, 10); }         // read-progress strip
     // Align a bbox OUTWARD to 8 px — cheap insurance for the panel controller's region granularity.
     static QRect alignOut8(const QRect &r) {
@@ -3060,6 +3083,15 @@ private:
         // storm, worst on slow paints (device-verified crash combo: settle flash + text boost).
         blockSigterm(false);   // present window closed — a pending SIGTERM may be delivered now
         m_fallback.stop(); m_inFlight = false;
+        // The panel is idle now — drain strips queued while it was busy (writing m_img mid-present
+        // crashes the vendor render, see setImage).
+        for (const auto &s : m_stripQueue) {
+            QImage &canvas = m_pending.isNull() ? m_img : m_pending;
+            if (!canvas.isNull() && canvas.size() == QSize(kPanelW, kPanelH)
+                    && canvas.format() == QImage::Format_ARGB32)
+                mergeStrip(canvas, s.first, s.second);
+        }
+        m_stripQueue.clear();
         if (m_exiting) return;                            // draining for exit: no re-present
         if (m_hasPending || m_dirty) presentNext();   // newer frame or a chrome change queued -> present it
     }
@@ -3087,6 +3119,7 @@ private:
     bool m_lastPresentHadContent = false;        // last present carried a new page frame (vs chrome-only)
     gint64 m_lastContentPresentUs = 0;            // last e-ink present that carried a new WPE frame
     QImage m_img, m_pending;
+    std::vector<std::pair<QImage, QRect>> m_stripQueue;   // strips that arrived mid-present (merged at releaseGate)
     QElapsedTimer m_clock;
     QTimer m_fallback;
     QTimer m_settleFlash;                        // one full-quality develop once the page goes quiet
@@ -3124,7 +3157,8 @@ private:
     bool m_kbShift = false;             // one-shot Shift armed (letters page)
     bool m_kbSym = false;               // symbols page ("?123") is showing
     int m_kbPressed = -1;               // key index flashing its pressed state (kbFlush releases it)
-    static const int kKbTopY = 1340;    // keyboard occupies [kKbTopY, kPanelH) in panel px
+    static int kbTopY() { return kPanelH * 1340 / 2160; }   // keyboard occupies [kbTopY, kPanelH);
+                                                            // 1340 was designed under 2160 — scale it
 };
 
 // ---------------------------------------------------------------------------
@@ -3165,6 +3199,14 @@ public Q_SLOTS:
             std::_Exit(1);   // clean exit code, no WebKit teardown (watchdog-safe)
         }
         qInfo("[touch] grabbed 'Elan touch input' — reading finger touch directly");
+        // Digitizer raw range from the device itself (Paper Pro Move's differs from the Paper
+        // Pro's 2064x2832): EVIOCGABS maximums; the fallback keeps the Paper Pro values.
+        struct input_absinfo ai;
+        if (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &ai) == 0 && ai.maximum > 0) kTouchRawW = ai.maximum + 1;
+        else qWarning("[touch] EVIOCGABS X failed — keeping fallback raw width %d", kTouchRawW);
+        if (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &ai) == 0 && ai.maximum > 0) kTouchRawH = ai.maximum + 1;
+        else qWarning("[touch] EVIOCGABS Y failed — keeping fallback raw height %d", kTouchRawH);
+        qInfo("[touch] raw range %dx%d", kTouchRawW, kTouchRawH);
 
         // Protocol-B, first finger. ABS_MT_TRACKING_ID (contact start / -1 lift) arrives BEFORE the
         // POSITION_X/Y of the same SYN frame, so latching the swipe-start at TRACKING_ID time would capture
@@ -3426,11 +3468,18 @@ int main(int argc, char **argv) {
     sigemptyset(&st.sa_mask);
     sigaction(SIGTERM, &st, nullptr);
     QGuiApplication app(argc, argv);
+    // Panel geometry from the QPA (epaper reports the real panel: 1620x2160 on the Paper Pro; the
+    // Paper Pro Move differs) — BEFORE anything below uses kPanelW/kPanelH (engine ctor included).
+    if (QScreen *scr = QGuiApplication::primaryScreen()) {
+        const QSize s = scr->size();
+        if (s.width() > 200 && s.height() > 200) { kPanelW = s.width(); kPanelH = s.height(); }
+    }
+    qInfo("[panel] %dx%d", kPanelW, kPanelH);   // touch raw range is logged by TouchReader (EVIOCGABS)
     const QString url      = (argc > 1) ? QString::fromUtf8(argv[1]) : QString();
     const QString savePath = (argc > 2) ? QString::fromUtf8(argv[2]) : QString();
 
     QThread thread;
-    WpeEngine engine(url, 1620, 2160);
+    WpeEngine engine(url, kPanelW, kPanelH);
     engine.moveToThread(&thread);
     QObject::connect(&thread, &QThread::started, &engine, &WpeEngine::start);
 

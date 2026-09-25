@@ -534,3 +534,22 @@ vendor EPRenderLoop still crashes intermittently on PARTIAL (region) presents un
 with the gate fixed — partial presents are now opt-in (RMWEB_PARTIAL=1), default full-screen. Wrong
 theories ruled out on device: EINTR (SA_RESTART changed nothing), SIGTERM routing (masked on worker/
 touch, blocked during presents — kept as cheap insurance, harmless), strips (clean in isolation).
+
+**2026-09-25 — Paper Pro Move port (geometry, untested — no device):** the Move (7.3", ~1696x954
+native, same aarch64/Gallery 3/OS 3.x/xochitl/epaper-QPA family) differs from the Paper Pro only in
+panel + digitizer geometry, so rmweb is geometry-constant-free now: `kPanelW/kPanelH` are set from
+`QGuiApplication::primaryScreen()->size()` right after QGuiApplication starts (epaper QPA reports
+the real panel; fallback = Paper Pro 1620x2160, logged as `[panel] WxH`), and the touch digitizer's
+raw range comes from `EVIOCGABS(ABS_MT_POSITION_X/Y).maximum` in TouchReader (fallback 2064/2832 +
+warning). The keyboard's top edge scales with panel height (`kbTopY() = kPanelH * 1340 / 2160` —
+1340 was designed under 2160). Everything else panel-px (chrome zones, partial-present strips,
+EPFramebuffer swap rects, save/dump) already went through the globals. DPR stays env/default (2.0,
+RMWEB_DPR). Orientation/resolution assumptions: NONE — whatever the QPA reports is used. NOT tested
+on the Move (no device) — testers via issues.
+**2026-09-25 (later) — strip-merge race root-caused:** writing m_img IN PLACE while the vendor QPA was
+reading it during a present crashed the render (3 stack shapes; bisected: strips off = 0/8, on = storm
+crash). Fix: strips that arrive mid-present now queue and merge at releaseGate; m_img is only ever
+written while the panel is idle. The "vendor region-render crash" from partial presents is REAL and
+INDEPENDENT (0/10 with partial off vs 8/8 with it on, all other races closed) — partial stays opt-in
+(RMWEB_PARTIAL=1). Paper Pro Move port verified safe on Paper Pro: `[panel] 1620x2160`, touch probe
+reads 2065x2833 via EVIOCGABS (max+1 — sub-pixel shift vs the old 2064/2832 constants, harmless).
