@@ -508,3 +508,19 @@ bounded-wait + systemctl reset-failed treatment.
 Deferred (accepted TODO): password store must not overwrite a saved login on a mistyped attempt —
 needs a deferred-commit design (confirm before replacing), its own feature. Reader-mode residual
 races (minor, agent-43 #11) — parked.
+
+**2026-09-25 — deep partial render (row-diff on the worker, damage strip over the wire):** WPE
+2.48.5 exposes NO public damage API (verified by grepping WPEView.h / WebKitWebView.h / WPEBuffer.h
+in the build tree — nothing; a real WPE-side damage would mean a custom WPEView backend — parked as
+its own epic). Instead the pipeline row-diffs itself: `onBuffer` memcmp's each new SHM frame against
+`m_prevFrame` (a WORKER-OWNED deep copy of the last emitted frame — never shared, strips write into
+it in place) and emits `frameReady(img, frame, dirtyRect)` where img is a bbox-sized STRIP for
+partial damage (full frame + null rect on first/size-change/full damage). WpeView::setImage merges a
+strip into the canvas in place (m_img is sole-owned between presents — presentNext drops m_pending
+after swapping) and marks the engine bbox directly; the GUI-side lazy diff (frameDiffBBox) is gone.
+The tone passes (bwFast LUT + textBoost toner) convert only rows under the paint clip and stay dirty
+until a full-height paint (idempotent per row — dst rebuilt from m_img each time). Save mode merges
+strips into a local canvas; RMWEB_DUMP_FRAMES dumps the MERGED canvas (view->contentImage()).
+Expected: chrome/toast/progress frames now copy + convert a few hundred rows instead of 14 MB;
+page turns pay diff(~ms) instead of a full copy; full navigations pay one extra m_prevFrame copy
+(rare). dup-filter (sig) unchanged; m_prevFrame updates only for emitted frames.

@@ -276,7 +276,7 @@ public:
     }
 
 Q_SIGNALS:
-    void frameReady(const QImage &img, int frame);
+    void frameReady(const QImage &img, int frame, const QRect &dirty);   // img = full frame, or just the damage strip (dirty-sized) when dirty is a real sub-rect; null dirty = full/unknown
     void urlChanged(const QString &url);   // current page URI (toolbar address field)
     void canGoBack(bool ok);               // toolbar Back button enabled-state
     void canGoForward(bool ok);            // toolbar Forward button enabled-state
@@ -1925,6 +1925,34 @@ private:
         }
     }
 
+    // Row-diff a fresh SHM buffer against the last EMITTED frame (worker-local m_prevFrame): memcmp
+    // per row (stride-safe on both sides — the SHM row stride and QImage's bytesPerLine differ),
+    // exact left/right edges scanned only on rows that differ. Returns the damage bbox, or a NULL
+    // rect for "unknown/full" (no previous frame, size/format mismatch). A sig-changed frame always
+    // yields a non-empty bbox (the changed sample's row differs); an empty one is treated as full
+    // by the caller anyway.
+    static QRect bufferDiffBBox(const uchar *pix, int stride, int w, int h, const QImage &prev,
+                                int *rowsChanged) {
+        if (prev.isNull() || prev.width() != w || prev.height() != h
+                || prev.format() != QImage::Format_ARGB32) return QRect();
+        int top = h, bot = -1, left = w, right = -1, rows = 0;
+        for (int y = 0; y < h; ++y) {
+            const uchar *ra = pix + static_cast<gsize>(y) * stride;
+            const uchar *rb = prev.constScanLine(y);
+            if (std::memcmp(ra, rb, size_t(w) * 4) == 0) continue;
+            ++rows;
+            if (y < top) top = y;
+            bot = y;
+            const QRgb *pa = reinterpret_cast<const QRgb*>(ra);
+            const QRgb *pb = reinterpret_cast<const QRgb*>(rb);
+            int x = 0;      while (x < w && pa[x] == pb[x]) ++x;
+            int xe = w - 1; while (xe > x && pa[xe] == pb[xe]) --xe;
+            if (x < left) left = x;
+            if (xe > right) right = xe;
+        }
+        *rowsChanged = rows;
+        return bot < 0 ? QRect() : QRect(left, top, right - left + 1, bot - top + 1);
+    }
     static void onBuffer(WPEView *, WPEBuffer *buffer, gpointer data) {
         auto *self = static_cast<WpeEngine*>(data);
         const gint64 tIn = g_get_monotonic_time();
@@ -1996,9 +2024,34 @@ private:
         if (!changed) return;   // nothing visually new — do not repaint the panel
         if (flip >= 0) self->m_pageUs = 0;   // count this changed frame as the page-turn's result
 
-        // WPE SHM memory order is B,G,R,A (ARGB8888 little-endian) == QImage::Format_ARGB32.
-        QImage img(pix, w, h, stride, QImage::Format_ARGB32);
-        Q_EMIT self->frameReady(img.copy(), self->m_frames);
+        // Deep partial render: WPE 2.48.5 exposes NO public damage API (checked WPEView.h/
+        // WebKitWebView.h/WPEBuffer.h), so we row-diff ourselves against the last emitted frame
+        // (m_prevFrame, worker-only) and ship just the damage strip. Full frame on first/size-change/
+        // unknown; a strip is exactly the bbox (bbox-sized QImage) and the GUI merges it in place.
+        // m_prevFrame is a WORKER-OWNED deep copy (never shared — strip merges write in place).
+        const gint64 tDiff = g_get_monotonic_time();
+        int rowsChanged = 0;
+        QRect dirty = bufferDiffBBox(pix, stride, w, h, self->m_prevFrame, &rowsChanged);
+        if (dirty.isEmpty() || dirty == QRect(0, 0, w, h)) dirty = QRect();   // no damage / all of it
+        QImage img(pix, w, h, stride, QImage::Format_ARGB32);   // SHM wrap (B,G,R,A == ARGB32)
+        if (dirty.isNull()) {
+            // WPE SHM memory order is B,G,R,A (ARGB8888 little-endian) == QImage::Format_ARGB32.
+            QImage out = img.copy();
+            self->m_prevFrame = img.copy();   // worker's own base — deep, never shared with the emit
+            Q_EMIT self->frameReady(out, self->m_frames, QRect());
+        } else {
+            QImage strip(dirty.size(), QImage::Format_ARGB32);
+            for (int y = 0; y < dirty.height(); ++y) {
+                const uchar *src = pix + static_cast<gsize>(dirty.top() + y) * stride
+                                       + static_cast<size_t>(dirty.x()) * 4;
+                std::memcpy(strip.scanLine(y), src, size_t(dirty.width()) * 4);
+                std::memcpy(self->m_prevFrame.scanLine(dirty.top() + y) + static_cast<size_t>(dirty.x()) * 4,
+                            strip.scanLine(y), size_t(dirty.width()) * 4);
+            }
+            Q_EMIT self->frameReady(strip, self->m_frames, dirty);
+        }
+        qCDebug(lcEngine, "[t] row-diff: %d/%d rows changed, strip-copy %.1fms",
+                rowsChanged, h, (g_get_monotonic_time() - tDiff) / 1000.0);
     }
 
     QString m_url;
@@ -2012,6 +2065,8 @@ private:
     gint64 m_lastBufUs = 0;   // previous buffer-rendered time — gives the inter-frame interval
     gint64 m_pageUs = 0;      // last page-flip dispatch time — gives swipe -> rendered-frame latency
     unsigned m_lastSig = 0;   // fingerprint of the last emitted frame — to drop identical (dup) frames
+    QImage m_prevFrame;       // WORKER-ONLY: deep copy of the last emitted frame — the row-diff base
+                              // (never shared with an emitted image; strip merges write it in place)
     int m_lastNonWhite = 9999; // non-white grid samples in the latest frame (low => ~blank => render failed)
     bool m_renderFailedState = false; // currently flagged blank (so a later content frame can auto-clear it)
     int m_reloadAttempts = 0; // WebProcess-crash auto-reload budget (reset on a successful load)
@@ -2185,12 +2240,17 @@ public:
                     if (m_imgGray.size() != m_img.size())
                         m_imgGray = QImage(m_img.size(), QImage::Format_Grayscale8);
                     const int rows = m_img.height(), cols = m_img.width();
-                    for (int y = 0; y < rows; ++y) {
+                    // Convert only rows under the paint clip (a partial present clips to its damage
+                    // bbox); the cache stays dirty until a full-height paint completes it —
+                    // re-converting a row is idempotent (dst is always rebuilt from m_img).
+                    const QRect clip = p->clipBoundingRect().toAlignedRect();
+                    const int y0 = qBound(0, clip.top(), rows - 1), y1 = qBound(0, clip.bottom(), rows - 1);
+                    for (int y = y0; y <= y1; ++y) {
                         const QRgb *src = reinterpret_cast<const QRgb*>(m_img.constScanLine(y));
                         uchar *dst = m_imgGray.scanLine(y);
                         for (int x = 0; x < cols; ++x) dst[x] = lut[qGray(src[x])];
                     }
-                    m_grayDirty = false;
+                    if (y0 <= 0 && y1 >= rows - 1) m_grayDirty = false;   // full-height paint = complete cache
                 }
                 p->drawImage(QRectF(0, 0, w, h), m_imgGray);
             } else if (m_textBoost) {
@@ -2458,10 +2518,26 @@ public Q_SLOTS:
         m_settleFlash.stop();
         manualFullSwap();
     }
-    void setImage(const QImage &img) {
+    // Content canvas for RMWEB_DUMP_FRAMES (merged full frame — strips included), read-only shared.
+    QImage contentImage() const { return m_img; }
+    void setImage(const QImage &img, const QRect &dirty) {
         if (m_exiting) return;   // draining for exit: no new presents
-        // (The partial-present content diff runs lazily in presentNext — new frame vs the shown one.)
-        m_pending = img;
+        // The engine row-diffs every frame on the worker and ships only the damage strip (a
+        // dirty-sized QImage); a null/full dirty means a full frame. Merge strips into the canvas
+        // IN PLACE: m_img is sole-owned between presents (presentNext drops m_pending after the swap).
+        const QRect full(0, 0, kPanelW, kPanelH);
+        if (!dirty.isNull() && dirty != full && !m_img.isNull() && m_img.size() == full.size()
+                && m_img.format() == QImage::Format_ARGB32 && img.size() == dirty.size()
+                && img.format() == QImage::Format_ARGB32) {
+            m_img.detach();   // no-op when sole-owned (the steady state); belt for a shared remnant
+            for (int y = 0; y < dirty.height(); ++y)
+                std::memcpy(m_img.scanLine(dirty.top() + y) + size_t(dirty.x()) * 4,
+                            img.constScanLine(y), size_t(dirty.width()) * 4);
+            if (m_partial) markDirty(dirty);
+        } else {
+            m_pending = img;   // full frame — swapped into m_img by presentNext
+            if (m_partial) markDirty(dirty.isNull() ? full : dirty);
+        }
         m_hasPending = true;
         // Always keep the latest frame. Only schedule an e-ink present if forced (user action) or
         // the min interval since the last *content* present has elapsed (anti-frame-storm for SPAs).
@@ -2911,41 +2987,16 @@ private:
         const int y1 = qMin(kPanelH, (r.top() + r.height() + 7) & ~7);
         return QRect(x0, y0, x1 - x0, y1 - y0);
     }
-    // Bounding box of pixel diffs between two same-size ARGB32 frames: rows memcmp'd first, exact
-    // left/right edges scanned only on rows that differ (a few ms for 1620x2160 on this CPU).
-    static QRect frameDiffBBox(const QImage &a, const QImage &b) {
-        const int w = a.width(), h = a.height();
-        int top = h, bot = -1, left = w, right = -1;
-        for (int y = 0; y < h; ++y) {
-            const QRgb *ra = reinterpret_cast<const QRgb*>(a.constScanLine(y));
-            const QRgb *rb = reinterpret_cast<const QRgb*>(b.constScanLine(y));
-            if (std::memcmp(ra, rb, size_t(w) * 4) == 0) continue;
-            if (y < top) top = y;
-            bot = y;
-            int x = 0;      while (x < w && ra[x] == rb[x]) ++x;
-            int xe = w - 1; while (xe > x && ra[xe] == rb[xe]) --xe;
-            if (x < left) left = x;
-            if (xe > right) right = xe;
-        }
-        return bot < 0 ? QRect() : QRect(left, top, right - left + 1, bot - top + 1);
-    }
     void presentNext() {
         if (m_exiting) { m_dirty = false; return; }   // draining for exit: no new presents
         // Apply newest WPE frame if any; always present so chrome-only updates (URL bar, keyboard,
         // badges) still refresh when m_img is still null (before the first buffer).
         const bool hadContent = m_hasPending;
         if (m_hasPending) {
-            // Lazy content diff (partial present): the new frame vs the one on screen. BOTH formats
-            // are checked — a non-ARGB32 side would misread as QRgb rows inside frameDiffBBox.
-            if (m_partial) {
-                if (m_img.isNull() || m_img.size() != m_pending.size()
-                        || m_img.format() != QImage::Format_ARGB32
-                        || m_pending.format() != QImage::Format_ARGB32)
-                    markDirtyAll();
-                else
-                    markDirty(frameDiffBBox(m_img, m_pending));
-            }
-            m_img = m_pending; m_hasPending = false; m_grayDirty = true; m_tonedDirty = true;
+            // The engine ships full frames or damage strips (its bbox is already marked into
+            // m_dirtyAccum by setImage). A full frame swaps in; a strip was merged in place there.
+            if (!m_pending.isNull()) { m_img = m_pending; m_pending = QImage(); }   // m_img sole-owned now
+            m_hasPending = false; m_grayDirty = true; m_tonedDirty = true;
         }
         // No damage at all (identical frame + no chrome change): skip the present instead of arming
         // the gate for a no-op — an empty update() is a FULL repaint in Qt, and a no-render one
@@ -3345,12 +3396,23 @@ int main(int argc, char **argv) {
     if (!savePath.isEmpty()) {
         // --- save mode (headless proof): write the 2nd painted frame, then exit ---
         QObject::connect(&engine, &WpeEngine::frameReady, &app,
-                         [savePath, saved = false](const QImage &img, int frame) mutable {
+                         [savePath, saved = false, canvas = QImage()](const QImage &img, int frame,
+                                                                      const QRect &dirty) mutable {
             qInfo() << "[qt] frameReady" << frame << img.size();
+            // Partial frames arrive as damage strips: merge into the local canvas (same rules as
+            // WpeView::setImage — a strip is exactly dirty-sized; a full frame replaces the canvas).
+            if (!dirty.isNull() && img.size() == dirty.size() && !canvas.isNull()
+                    && canvas.format() == QImage::Format_ARGB32 && img.format() == QImage::Format_ARGB32) {
+                for (int y = 0; y < dirty.height(); ++y)
+                    std::memcpy(canvas.scanLine(dirty.top() + y) + size_t(dirty.x()) * 4,
+                                img.constScanLine(y), size_t(dirty.width()) * 4);
+            } else {
+                canvas = img;
+            }
             if (frame >= 2 && !saved) {
                 saved = true;
-                if (img.save(savePath)) qInfo() << "[qt] saved" << savePath;
-                else                    qWarning() << "[qt] QImage::save FAILED" << savePath;
+                if (canvas.save(savePath)) qInfo() << "[qt] saved" << savePath;
+                else                       qWarning() << "[qt] QImage::save FAILED" << savePath;
                 // std::_Exit skips the WebKit teardown SIGABRT (watchdog-safe) — same as the ⏻ path.
                 fflush(nullptr);
                 std::_Exit(0);
@@ -3373,24 +3435,25 @@ int main(int argc, char **argv) {
         root->setParent(qmlEngine);   // engine owns the QML tree -> well-defined teardown order
         auto *win = qobject_cast<QQuickWindow*>(root);
         QObject::connect(&engine, &WpeEngine::frameReady, view,
-                         [view](const QImage &img, int frame) {
+                         [view](const QImage &img, int frame, const QRect &dirty) {
             const gint64 t = g_get_monotonic_time();
-            // Debug: RMWEB_DUMP_FRAMES=/dir saves every incoming frame as PNG (engine-side view,
-            // pre-throttle) so rendering bugs can be inspected off-device. Off by default.
+            view->setImage(img, dirty);
+            // Debug: RMWEB_DUMP_FRAMES=/dir saves every incoming frame as PNG — the MERGED canvas
+            // (partial frames arrive as damage strips; engine-side content view, pre-throttle).
             static const QByteArray dumpDir = qgetenv("RMWEB_DUMP_FRAMES");
             if (!dumpDir.isEmpty()) {
                 static const bool dumpReady = QDir().mkpath(QString::fromUtf8(dumpDir));   // once
                 static bool dumpWarned = false;
                 const QString out = QString::fromUtf8(dumpDir)
                                   + QStringLiteral("/frame-%1.png").arg(frame, 5, 10, QLatin1Char('0'));
-                if (!(dumpReady && img.save(out)) && !dumpWarned) {
+                if (!(dumpReady && view->contentImage().save(out)) && !dumpWarned) {
                     dumpWarned = true;   // once is enough — don't spam the persistent log per frame
                     qWarning("[dbg] RMWEB_DUMP_FRAMES: cannot save %s", qPrintable(out));
                 }
             }
-            view->setImage(img);
-            qCDebug(lcEngine, "[t][gui] frame %d -> setImage %.1fms  %dx%d", frame,
-                  (g_get_monotonic_time() - t) / 1000.0, img.width(), img.height());
+            qCDebug(lcEngine, "[t][gui] frame %d -> setImage %.1fms  %dx%d  dirty=%dx%d@%d,%d", frame,
+                  (g_get_monotonic_time() - t) / 1000.0, img.width(), img.height(),
+                  dirty.width(), dirty.height(), dirty.x(), dirty.y());
         });
         // Engine state -> the C++ chrome painted into the frame (queued worker->GUI).
         QObject::connect(&engine, &WpeEngine::canGoBack,      view, &WpeView::setCanBack);
