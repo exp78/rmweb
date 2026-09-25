@@ -104,6 +104,11 @@ differ), then re-run the installer to re-assert the icon hook:
 ssh root@10.11.99.1 '/home/root/rmweb/install.sh'
 ```
 
+An OTA also restores the stock sleep/power-off images under `/usr/share/remarkable/` and leaves the
+rootfs mounted read-only. If you customized `suspended.png`, keep a copy under `/home/root` (it
+survives OTA) and restore it with `mount -o remount,rw /`, copy the file over, then
+`mount -o remount,ro /`.
+
 ## Logs
 
 Runtime output goes to `/home/root/rmweb/rmweb.log` (kept under `/home` so it survives a watchdog reboot).
