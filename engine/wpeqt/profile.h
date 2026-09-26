@@ -15,7 +15,7 @@ namespace rmweb {
 
 struct Bookmark { std::string url, title; };
 struct HistoryEntry { std::string url, title; long ts = 0; };
-struct Settings { double zoom = 0.85; int readerFont = 30; std::string ua; bool readerDark = false;
+struct Settings { double zoom = 0.5; int readerFont = 30; std::string ua; bool readerDark = false;
                   std::string autofillEmail, autofillUser, autofillName;   // learn-as-you-type autofill
                   bool block = true;        // content blocker (3rd-party scripts/media/fonts + cosmetic)
                   bool siteCss = true;      // kSiteCss fit-to-width + e-ink calm-down user stylesheet
@@ -312,7 +312,7 @@ inline Settings loadSettings(const std::string& dir) {
         else if (k == "settleFlash") s.settleFlash = (v != "0");   // default ON: same rule
         else if (k == "autoRefreshSec") s.autoRefreshSec = std::atoi(v.c_str());
     }
-    if (!(s.zoom >= 0.5 && s.zoom <= 3.0)) s.zoom = 0.85;                // clamp corrupt values (0.85 = the default)
+    if (!(s.zoom >= 0.5 && s.zoom <= 3.0)) s.zoom = 0.5;                 // clamp corrupt values (0.5 = the default)
     if (!(s.readerFont >= 14 && s.readerFont <= 96)) s.readerFont = 30;
     // autoRefreshSec has a fixed valid set (the settings page cycles through it); snap anything else.
     if (s.autoRefreshSec != -1 && s.autoRefreshSec != 0 && s.autoRefreshSec != 15 &&

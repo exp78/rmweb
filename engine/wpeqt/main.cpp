@@ -81,6 +81,7 @@ Q_LOGGING_CATEGORY(lcEngine, "rmweb.engine", QtWarningMsg)  // per-frame/tap tra
 // QGuiApplication — the epaper QPA reports the real panel); kTouchRawW/H from EVIOCGABS in
 // TouchReader::run. Fallbacks = Paper Pro. Everything panel-px below goes through these.
 static int kPanelW = 1620, kPanelH = 2160, kTouchRawW = 2064, kTouchRawH = 2832;
+static int kPhysW = 1620, kPhysH = 2160;   // real QPA panel; kPanel* may be faked (RMWEB_PANEL)
 // (swipe/tap thresholds live in gesture.h GestureParams — single source of truth; the page-turn
 //  step itself is innerHeight*0.92, computed in the pageBy JS — callers pass only a direction)
 
@@ -3240,8 +3241,10 @@ public Q_SLOTS:
                 if (p.type != EV_ABS) continue;
                 if (p.code == ABS_MT_SLOT) { curSlot = p.value; continue; }
                 if (curSlot != 0) continue;                                  // first finger only
-                if (p.code == ABS_MT_POSITION_X)      x = std::min(p.value * kPanelW / kTouchRawW, kPanelW - 1);
-                else if (p.code == ABS_MT_POSITION_Y) y = std::min(p.value * kPanelH / kTouchRawH, kPanelH - 1);
+                // Map raw to the REAL panel (kPhys*), then clamp into the (maybe faked) viewport:
+                // under RMWEB_PANEL the UI sits 1:1 in the top-left, so taps hit what they touch.
+                if (p.code == ABS_MT_POSITION_X)      x = std::min(p.value * kPhysW / kTouchRawW, kPanelW - 1);
+                else if (p.code == ABS_MT_POSITION_Y) y = std::min(p.value * kPhysH / kTouchRawH, kPanelH - 1);
                 else if (p.code == ABS_MT_TRACKING_ID) {
                     if (p.value >= 0) pendingDown = true;                     // new contact -> latch pos at SYN
                     else              pendingLift = true;                     // -1 -> lifted -> emit at SYN
@@ -3483,6 +3486,7 @@ int main(int argc, char **argv) {
         const QSize s = scr->size();
         if (s.width() > 200 && s.height() > 200) { kPanelW = s.width(); kPanelH = s.height(); }
     }
+    kPhysW = kPanelW; kPhysH = kPanelH;   // RMWEB_PANEL below fakes the UI size, not the hardware
     // Dev override: RMWEB_PANEL=WxH fakes the panel geometry (e.g. 954x1696 to dry-run the
     // Paper Pro Move UI on a Paper Pro). Applied AFTER the QPA probe so it always wins;
     // the touch raw range stays the real digitizer's, so taps scale into the fake viewport.

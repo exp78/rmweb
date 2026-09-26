@@ -562,3 +562,6 @@ verified by grab). New dev knob RMWEB_PANEL=WxH fakes the panel geometry AFTER t
 inline QML — Screen bindings/anchors.fill are real bindings and revert any C++-side setSize
 (verified on device). A 954x1696 dry-run on the Paper Pro renders the whole UI in the top-left
 region and is what caught the chrome overlap.
+Addendum to the RMWEB_PANEL dry-run: touch maps raw -> the REAL panel (kPhysW/H) and clamps into the
+faked viewport, so taps land 1:1 inside the top-left fake screen (mapping raw -> faked size stretched
+the touch field over the whole glass, off from every button). Default zoom is now 0.5 (was 0.85).
