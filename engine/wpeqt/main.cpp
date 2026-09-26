@@ -135,6 +135,7 @@ static volatile sig_atomic_t g_termRequested = 0;  // SIGTERM latched (termHandl
 static volatile sig_atomic_t g_termDraining = 0;   // the clean exit is underway (poll re-entry guard:
                                                    // drainForExit runs on the GUI thread and can be
                                                    // re-entered only via a second event source)
+static std::atomic<gint64> g_guiBeat{0};           // last GUI-loop heartbeat (watchdog food)
 extern "C" void termHandler(int) {
     // Second TERM (or TERM with no GUI to drain on, or TERM mid-drain) = force-exit NOW.
     if (!g_termDrainOk || g_termRequested || g_termDraining) std::_Exit(0);
@@ -3780,10 +3781,33 @@ int main(int argc, char **argv) {
         // DIAG: GUI event-loop heartbeat. If these "[gui] tick" lines stop, the GUI thread is blocked
         // (e.g. inside present()/swapBuffers) and queued frameReady deliveries stall -> content never paints.
         // Debug-category (off by default — 2 s writes forever would wear the flash log): enable with
-        // QT_LOGGING_RULES=rmweb.engine.debug=true when chasing a stall.
+        // QT_LOGGING_RULES=rmweb.engine.debug=true when chasing a stall. ALSO feeds the GUI watchdog below.
         { auto *hb = new QTimer(&app);
-          QObject::connect(hb, &QTimer::timeout, &app, []{ qCDebug(lcEngine, "[gui] tick"); });
+          QObject::connect(hb, &QTimer::timeout, &app, []{
+              g_guiBeat.store(g_get_monotonic_time(), std::memory_order_release);
+              qCDebug(lcEngine, "[gui] tick"); });
           hb->start(2000); }
+
+        // GUI watchdog: vendor presents have a rare HANG class (device-verified 2026-09-26: GUI thread
+        // blocked mid-EPDC; taps and even the SIGTERM poll starve — the user is stranded on a frozen
+        // frame until a reboot). The heartbeat proves the loop is alive; a watcher thread hard-_Exits
+        // after 12 s of silence so the launcher/runner can restore xochitl. 12 s >> the worst legit
+        // present (~2-3 s full waveform + dwell) and the drainForExit nap, so no false positives.
+        g_guiBeat.store(g_get_monotonic_time(), std::memory_order_release);
+        std::thread([]{
+            for (;;) {
+                g_usleep(2000000);
+                if (g_get_monotonic_time() - g_guiBeat.load(std::memory_order_acquire) > 12000000) {
+                    qWarning("[watchdog] GUI loop silent >12 s — hard exit so the launcher can recover");
+                    std::_Exit(63);
+                }
+            }
+        }).detach();
+
+        // DIAG (RMWEB_DEBUG_BLOCKGUI=ms): block the GUI thread for ms once at 4 s — watchdog proof
+        // (a block >12 s must end in "[watchdog] ... hard exit", exit code 63).
+        if (const int bg = qEnvironmentVariableIntValue("RMWEB_DEBUG_BLOCKGUI"); bg > 0)
+            QTimer::singleShot(4000, &app, [bg]{ qInfo("[dbg] blocking GUI for %d ms", bg); g_usleep(guint(bg) * 1000); });
 
         // DIAG (RMWEB_GRAB_MS): grab the composited window to a PNG after N ms — captures exactly what Qt
         // presents (= what's on the e-ink), so we can SEE the result without catching the live screen.
@@ -3870,6 +3894,16 @@ int main(int argc, char **argv) {
             if (c1 > 0) QTimer::singleShot(5000, &app, [&touchReader, px, py]{
                 qInfo("[uitap][dbg] tap @ %d,%d", px, py);
                 Q_EMIT touchReader.tap(px, py);
+            });
+        }
+
+        // DIAG (RMWEB_DEBUG_UITAP2="x,y,ms"): a SECOND synthetic router tap with a custom delay —
+        // pairs with UITAP for two-tap flows (e.g. ⏻ arm at 5 s + quit at 7 s).
+        if (qEnvironmentVariableIsSet("RMWEB_DEBUG_UITAP2")) {
+            const QStringList f = qEnvironmentVariable("RMWEB_DEBUG_UITAP2").split(QLatin1Char(','));
+            if (f.size() == 3) QTimer::singleShot(f[2].toInt(), &app, [&touchReader, x = f[0].toInt(), y = f[1].toInt()]{
+                qInfo("[uitap][dbg] tap2 @ %d,%d", x, y);
+                Q_EMIT touchReader.tap(x, y);
             });
         }
 

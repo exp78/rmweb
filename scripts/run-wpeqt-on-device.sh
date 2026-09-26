@@ -30,6 +30,7 @@ REMOTE_ENV="$(printf '%q ' \
   "RMWEB_DEBUG_FIND=${RMWEB_DEBUG_FIND:-}" "RMWEB_DEBUG_PROBE=${RMWEB_DEBUG_PROBE:-}" \
   "RMWEB_DEBUG_FORM=${RMWEB_DEBUG_FORM:-}" "RMWEB_DEBUG_SEARCH=${RMWEB_DEBUG_SEARCH:-}" \
   "RMWEB_NOJS=${RMWEB_NOJS:-}" "RMWEB_DEBUG_UITAP=${RMWEB_DEBUG_UITAP:-}" \
+  "RMWEB_DEBUG_UITAP2=${RMWEB_DEBUG_UITAP2:-}" "RMWEB_DEBUG_BLOCKGUI=${RMWEB_DEBUG_BLOCKGUI:-}" \
   "RMWEB_AUTOREFRESH_MS=${RMWEB_AUTOREFRESH_MS:-}" \
   "RMWEB_PANEL=${RMWEB_PANEL:-}" \
   "QT_LOGGING_RULES=${QT_LOGGING_RULES:-}")"
@@ -94,6 +95,8 @@ if [ "$MODE" = show ]; then
   export RMWEB_DEBUG_SEARCH  # diagnostic: run the address-bar search for these words once after 4 s
   export RMWEB_NOJS          # diagnostic: disable JavaScript entirely (split JS vs CSS/network cost)
   export RMWEB_DEBUG_UITAP   # diagnostic: synthetic ROUTER tap at panel "x,y" once after 5 s (chrome/badge paths)
+  export RMWEB_DEBUG_UITAP2  # diagnostic: second synthetic router tap "x,y,ms" (two-tap flows like ⏻)
+  export RMWEB_DEBUG_BLOCKGUI # diagnostic: block the GUI thread N ms at 4 s (watchdog proof; >12 s => exit 63)
   export RMWEB_AUTOREFRESH_MS  # auto-refresh guard: min ms between same-URL auto-navigations (default 15000)
   export RMWEB_PANEL           # dev: fake panel geometry WxH (e.g. 954x1696 = Paper Pro Move UI dry-run)
   export QT_LOGGING_RULES    # e.g. rmweb.engine.debug=true enables the qCDebug [t]/[perf] traces

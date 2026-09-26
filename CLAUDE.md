@@ -565,3 +565,9 @@ region and is what caught the chrome overlap.
 Addendum to the RMWEB_PANEL dry-run: touch maps raw -> the REAL panel (kPhysW/H) and clamps into the
 faked viewport, so taps land 1:1 inside the top-left fake screen (mapping raw -> faked size stretched
 the touch field over the whole glass, off from every button). Default zoom is now 0.5 (was 0.85).
+GUI watchdog (2026-09-26): vendor presents have a rare HANG class (user report: ⏻ two-tap did nothing,
+TERM at timeout went unprocessed = GUI thread blocked mid-EPDC; 7/7 synthetic two-tap exits were clean,
+so the exit path itself is fine). A detached thread now hard-_Exits (code 63) after 12 s of heartbeat
+silence so the launcher can restore xochitl instead of stranding the user until reboot. Threshold >>
+worst legit present; proven both ways on device (RMWEB_DEBUG_BLOCKGUI=15000 fires it; normal runs stay
+quiet). New diag: RMWEB_DEBUG_UITAP2="x,y,ms" (second synthetic router tap, two-tap flows).
