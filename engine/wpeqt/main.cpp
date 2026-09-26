@@ -1186,18 +1186,33 @@ private:
                 "(function(dy){"
                 "var step=dy>0?Math.round(innerHeight*0.92):-Math.round(innerHeight*0.92);"
                 "var se=document.scrollingElement||document.documentElement||document.body;"
-                "var y0=se.scrollTop;se.scrollTop+=step;var sc=null,used='doc';"
-                "if(se.scrollTop===y0){sc=window.__rmwebSc;"
+                "var y0=se.scrollTop;se.scrollTop+=step;var used='doc';"
+                // The document refused to scroll: a fixed-height inner container holds the content
+                // (mobile-UA skins). Scrolling THAT container never repaints on this WPE build
+                // (device-verified 2026-09-26: DOM scrollTop moves, pixels stay, frames hash "dup"),
+                // and forcing damage (full-viewport veil) does NOT help — the render just doesn't
+                // sample the container's scroll offset. So UNTRAP instead: reset the overflow/height
+                // styles that cage the content, let it flow back into the document, and scroll the
+                // document (the path that repaints correctly). Layout can shift on trap pages —
+                // acceptable: they were unreadable before.
+                "if(se.scrollTop===y0){var sc=window.__rmwebSc;"
                 "if(!sc||!sc.isConnected||sc.scrollHeight-sc.clientHeight<=40){sc=null;var bh=0,a=document.querySelectorAll('div,main,article,section,ul,ol');"
                 "for(var i=0;i<a.length;i++){var n=a[i],o=getComputedStyle(n).overflowY;"
                 "if((o==='auto'||o==='scroll')&&n.scrollHeight-n.clientHeight>40&&n.scrollHeight>bh){bh=n.scrollHeight;sc=n;}}"
                 "window.__rmwebSc=sc;}"
-                "if(sc){sc.scrollTop+=step;used='el';}}"
+                "if(sc){try{document.documentElement.style.setProperty('overflow','auto','important');"
+                "document.body.style.setProperty('overflow','auto','important');"
+                "document.documentElement.style.setProperty('height','auto','important');"
+                "document.body.style.setProperty('height','auto','important');"
+                "sc.style.setProperty('overflow','visible','important');"
+                "sc.style.setProperty('height','auto','important');"
+                "sc.style.setProperty('max-height','none','important');}catch(e){}"
+                "used='untrap';se.scrollTop=y0+step;}}"
                 "var m=document.getElementById('__r');if(!m){m=document.createElement('span');m.id='__r';"
                 "m.style.cssText='position:fixed;left:-9999px;top:0';document.body.appendChild(m);}"
                 "m.textContent=((+m.textContent||0)+1);"
-                "return 'sy='+(sc?sc.scrollTop:se.scrollTop)+' ih='+innerHeight+' sh='+se.scrollHeight"
-                "+' sm='+Math.round(sc?(sc.scrollHeight-sc.clientHeight):Math.max(0,se.scrollHeight-innerHeight))+' used='+used;"
+                "return 'sy='+se.scrollTop+' ih='+innerHeight+' sh='+se.scrollHeight"
+                "+' sm='+Math.round(Math.max(0,se.scrollHeight-innerHeight))+' used='+used;"
                 "})(%d)",
                 static_cast<int>(m->dy));
             webkit_web_view_evaluate_javascript(self->m_view, js, -1, nullptr, nullptr, self->m_cancel,
@@ -2492,6 +2507,8 @@ public:
     void handleEditTap(int x, int y) {
         // × in the address bar (chrome) while the keyboard is open.
         if (y < kBarH() && hitChrome(x, y) == AddressClear) { clearEditBuf(); return; }
+        // × in the echo field above the keys.
+        if (editClearRect().contains(x, y)) { clearEditBuf(); return; }
         const int i = rmweb::hitKey(m_keys, x, y);
         if (i < 0) return;                                       // tap outside the keys (page area) -> ignore
         switch (m_keys[i].kind) {
@@ -2501,7 +2518,7 @@ public:
                 // Flash the key NOW (inverted) — on a 200 ms-latency panel immediate feedback is
                 // the difference between "responsive" and "did it register?"; kbFlush restores it.
                 m_kbPressed = i;
-                scheduleDirty(barZone() | kbZone(), /*guardTouch=*/false);
+                scheduleDirty(kbZone(), /*guardTouch=*/false);   // echo field + keys only — never the top bar
                 m_kbFlush.start(kKbFlushMs);
                 return;
             case rmweb::KeyKind::Shift:
@@ -2517,7 +2534,7 @@ public:
             case rmweb::KeyKind::Backspace:
                 m_editBuf.chop(1);
                 m_kbPressed = i;
-                scheduleDirty(barZone() | kbZone(), /*guardTouch=*/false);
+                scheduleDirty(kbZone(), /*guardTouch=*/false);   // echo field + keys only
                 m_kbFlush.start(kKbFlushMs);
                 return;
             case rmweb::KeyKind::Cancel:
@@ -2984,8 +3001,40 @@ private:
     }
     // On-screen URL keyboard, drawn into the frame (B2). Taps -> handleEditTap() (keyboard.h hitKey) via main().
     void drawKeyboard(QPainter *p, qreal w, qreal h) const {
-        p->fillRect(QRectF(0, kbTopY(), w, h - kbTopY()), Qt::white);
-        p->fillRect(QRectF(0, kbTopY(), w, 2), Qt::black);
+        const qreal top = editTopY();
+        p->fillRect(QRectF(0, top, w, h - top), Qt::white);
+        p->fillRect(QRectF(0, top, w, 2), Qt::black);
+        // Edit echo field directly above the keys: the typed text lives HERE while editing (not in
+        // the top bar), so a keypress dirties only the edit zone — a human-paced region present of
+        // the bottom strip instead of a full-screen repaint per keystroke (user report 2026-09-26:
+        // "typing redraws everything"). The top bar keeps showing the pre-edit address until Go.
+        const qreal m = 10 * uiScale();
+        const QRectF fld(m, top + m, w - 2 * m, editStripH() - 2 * m);
+        p->setPen(QPen(Qt::black, 3));
+        p->setBrush(QColor(245, 245, 245));
+        p->drawRoundedRect(fld, 12, 12);
+        QFont ef = p->font(); ef.setPixelSize(qMax(18, int(36 * uiScale()))); p->setFont(ef);
+        const qreal clrD = editStripH() - 3 * m;                     // clear-x square at the field right
+        const QRectF clr(fld.right() - clrD - m, fld.top() + m / 2, clrD, clrD);
+        QString txt; bool grey = false;
+        if (m_editBuf.isEmpty()) {
+            grey = true;
+            txt = m_editField ? QStringLiteral("type text…")
+                : m_addr.isEmpty() ? QStringLiteral("type URL…") : m_addr;
+        } else {
+            txt = (m_editMasked ? QString(m_editBuf.size(), QLatin1Char('*')) : m_editBuf) + QLatin1Char('|');
+        }
+        p->setPen(grey ? QColor(120, 120, 120) : Qt::black);
+        const qreal textPad = 8 * uiScale();
+        const QString el = p->fontMetrics().elidedText(txt, Qt::ElideLeft, int(clr.left() - fld.left() - 2 * textPad));
+        p->drawText(QRectF(fld.left() + textPad, fld.top(), clr.left() - fld.left() - 2 * textPad, fld.height()),
+                    Qt::AlignVCenter | Qt::AlignLeft, el);
+        p->setPen(QPen(Qt::black, 3)); p->setBrush(Qt::white);
+        p->drawEllipse(clr);
+        p->setPen(QPen(Qt::black, 4, Qt::SolidLine, Qt::RoundCap));
+        const qreal d = clrD * 0.22, cx = clr.center().x(), cy = clr.center().y();
+        p->drawLine(QPointF(cx - d, cy - d), QPointF(cx + d, cy + d));
+        p->drawLine(QPointF(cx + d, cy - d), QPointF(cx - d, cy + d));
         QFont kf = p->font(); kf.setPixelSize(44); p->setFont(kf);
         for (size_t ki = 0; ki < m_keys.size(); ++ki) {
             const rmweb::Key &k = m_keys[ki];
@@ -3009,7 +3058,7 @@ private:
         if (m_inFlight) m_dirty = true;
         else presentNext();
     }
-    // --- Partial present (RMWEB_PARTIAL=0 disables) ---------------------------------------------
+    // --- Partial present (opt-in for content: RMWEB_PARTIAL=1; always on while editing) -----------
     // The epaper scenegraph accumulates a damage QRegion and pushes exactly it to the panel
     // (verified on device: EPRenderLoop's present calls swapBuffers(QRegion, EPScreenModeMap,
     // NoRefresh) and skips an empty region), so update(rect) keeps both the raster work AND the
@@ -3033,7 +3082,7 @@ private:
     static QRect barZone()    { return QRect(0, 0, kPanelW, kBarH()); }                   // chrome bar
     static QRect pillZone()   { return QRect(0, kBarH(), kPanelW, 270); }               // badges + notice toast
     static QRect noticeZone() { return QRect(0, int(kPanelH * 0.30), kPanelW, 270); } // render-failed notice (drawRenderNotice)
-    static QRect kbZone()     { return QRect(0, kbTopY(), kPanelW, kPanelH - kbTopY()); }// on-screen keyboard
+    static QRect kbZone()     { return QRect(0, editTopY(), kPanelW, kPanelH - editTopY()); } // echo field + keyboard
     static QRect progZone()   { return QRect(0, kPanelH - 10, kPanelW, 10); }         // read-progress strip
     // Align a bbox OUTWARD to 8 px — cheap insurance for the panel controller's region granularity.
     static QRect alignOut8(const QRect &r) {
@@ -3056,7 +3105,12 @@ private:
         // No damage at all (identical frame + no chrome change): skip the present instead of arming
         // the gate for a no-op — an empty update() is a FULL repaint in Qt, and a no-render one
         // would sit on the fallback timer.
-        if (m_partial && m_dirtyAccum.isNull()) { m_dirty = false; return; }
+        // Region presents are opt-in for CONTENT (RMWEB_PARTIAL=1 — the vendor region path crashed
+        // under frame storms) but always on while EDITING: keyboard/echo updates are human-paced
+        // (>=120 ms coalesced, gate-serialized), and full-screen repaints per keystroke are exactly
+        // the "typing redraws everything" bug (user report 2026-09-26).
+        const bool regional = m_partial || m_editing;
+        if (regional && m_dirtyAccum.isNull()) { m_dirty = false; return; }
         m_lastPresentHadContent = hadContent;
         m_dirty = false; m_inFlight = true;
         blockSigterm(true);   // the vendor EPDC path crashes if SIGTERM interrupts a present (EINTR)
@@ -3067,7 +3121,7 @@ private:
         m_nextGuardTouch = false;
         const QRect dirty = alignOut8(m_dirtyAccum);
         m_dirtyAccum = QRect();
-        if (m_partial && dirty != QRect(0, 0, kPanelW, kPanelH)) {
+        if (regional && dirty != QRect(0, 0, kPanelW, kPanelH)) {
             m_lastPresentRect = dirty;
             qCDebug(lcEngine, "[t][gui] present dirty=%dx%d@%d,%d", dirty.width(), dirty.height(),
                     dirty.x(), dirty.y());
@@ -3103,7 +3157,7 @@ private:
     int m_contentMinPresentMs = 1200;            // SPA frame-storm throttle (RMWEB_CONTENT_PRESENT_MS)
     bool m_hasPending = false, m_inFlight = false, m_dirty = false;
     bool m_exiting = false;                      // drainForExit ran: setImage/schedule/presentNext no-op
-    bool m_partial = true;                       // partial present (dirty bbox) — RMWEB_PARTIAL=0 disables
+    bool m_partial = false;                      // content region presents — opt-in RMWEB_PARTIAL=1 (vendor storms); editing is always regional
     QRect m_dirtyAccum;                          // damage accumulated since the last presentNext
     QRect m_lastPresentRect;                     // damage rect of the in-flight present (presentFast re-push)
     bool m_nextGuardTouch = true;                // whether the next present arms the phantom-touch guard
@@ -3170,6 +3224,14 @@ private:
     int m_kbPressed = -1;               // key index flashing its pressed state (kbFlush releases it)
     static int kbTopY() { return kPanelH * 1340 / 2160; }   // keyboard occupies [kbTopY, kPanelH);
                                                             // 1340 was designed under 2160 — scale it
+    static int editStripH() { return int(96 * uiScale()); } // edit echo field height above the keys
+    static int editTopY() { return kbTopY() - editStripH(); }  // edit UI occupies [editTopY, kPanelH)
+    // The clear-x circle rect inside the echo field (hit-tested by handleEditTap).
+    static QRectF editClearRect() {
+        const qreal m = 10 * uiScale(), top = editTopY();
+        const qreal clrD = editStripH() - 3 * m;
+        return QRectF(kPanelW - m - clrD - m, top + m + m / 2, clrD, clrD);
+    }
 };
 
 // ---------------------------------------------------------------------------

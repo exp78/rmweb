@@ -2,12 +2,12 @@
 
 A native **WPE WebKit** web browser for the **reMarkable Paper Pro** e-ink tablet.
 
-Compatibility: reMarkable Paper Pro (verified on-device); reMarkable Paper Pro Move (untested —
+Compatibility: reMarkable Paper Pro (verified on-device); reMarkable Paper Pro Move (untested -
 should work: panel geometry is runtime-derived, testers welcome, see issues).
 
 ![start page](docs/screenshots/start-page.png)
 
-> **Status: v0.9.6 - beta.** The primary use case is **reading**; general browsing is basic.
+> **Status: v0.9.7 - beta.** The primary use case is **reading**; general browsing is basic.
 > Implemented and verified on-device: reader mode (Mozilla Readability, light/dark theme), B2 chrome
 > painted into the frame (with C++ hit-test and inverted press feedback on every button and key),
 > touch input via evdev with a phantom-touch guard, on-screen URL keyboard, bookmarks/history/

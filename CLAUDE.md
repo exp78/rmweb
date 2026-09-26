@@ -447,7 +447,7 @@ AFTER its first content no longer earns the notice (accepted: the false-positive
 - Gotcha recorded earlier but re-confirmed twice today: the epaper present deadlocks if overlapped
   (gate + dwell + fallback release is load-bearing), and WebKit emits failed→finished for one download.
 
-**2026-09-18 — exit-path panel drain (post-release feedback: geloescht, reMarkable Discord):** the
+**2026-09-18 — exit-path panel drain (post-release feedback from the reMarkable Discord community):** the
 community flagged that libqsgepaper installs signal handlers to let an ACTIVE e-ink update finish
 before exit, and that rmweb overrides them with a bare `_Exit`. Facts from the code: our sigactions
 install BEFORE `QGuiApplication` (i.e. before Qt / the epaper QPA / our own dlopen of the scenegraph
@@ -571,3 +571,17 @@ so the exit path itself is fine). A detached thread now hard-_Exits (code 63) af
 silence so the launcher can restore xochitl instead of stranding the user until reboot. Threshold >>
 worst legit present; proven both ways on device (RMWEB_DEBUG_BLOCKGUI=15000 fires it; normal runs stay
 quiet). New diag: RMWEB_DEBUG_UITAP2="x,y,ms" (second synthetic router tap, two-tap flows).
+**2026-09-26 (release 0.9.7) — scroll-untrap + edit echo field (user-reported):** (1) Page turns on
+container-scrolled pages (mobile-UA skins cage content in an overflow div) silently did nothing: DOM
+scrollTop moved but this WPE build never repaints container scrolls — post-turn frames hashed "dup"
+and were dropped. Fix: UNTRAP (reset overflow/height on html/body/container so content flows back to
+the document) + scroll the document. 23/23 turns clean on a trap test page. The full-viewport veil
+trick does NOT fix container scroll (the composite still samples the stale offset) and its
+2-composites-per-turn cadence crashed qsgepaper's raster fillRect on the GUI thread — abandoned.
+(2) Typing repainted the whole screen per keystroke (bar|kbZone union bbox ~= full screen, partial
+off). Fix: typed text echoes in a field directly above the keys (better UX too), per-key dirty = the
+edit zone only, region presents always on while editing (content stays opt-in RMWEB_PARTIAL=1).
+0/8 typing stress. NOTE: RMWEB_DUMP_FRAMES is a crash suspect (PNG-encode per frame on the GUI
+thread) — diag only, keep runs short. (3) makeUuidV4 seeded mt19937 with ONE 32-bit word -> 2^32 id
+space (flaky fuzz test + a real collision would overwrite a xochitl library document); bytes now
+come straight from random_device.

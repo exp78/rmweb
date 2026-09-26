@@ -91,17 +91,19 @@ inline std::string jsonEscape(const std::string &s) {
 
 // RFC 4122 UUIDv4 (8-4-4-4-12, lowercase hex, version/variant bits set) — the xochitl document id.
 inline std::string makeUuidV4() {
+    // Bytes straight from random_device: seeding mt19937 with ONE 32-bit word (the old code) collapses
+    // the id space to 2^32 — birthday collisions at ~65k ids (flaky library_test fuzz) AND a colliding
+    // document id would overwrite someone else's file in the xochitl library.
     std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<unsigned> nib(0, 15);
+    unsigned char b[16];
+    for (auto &x : b) x = static_cast<unsigned char>(rd());
+    b[6] = (b[6] & 0x0f) | 0x40;   // version 4
+    b[8] = (b[8] & 0x3f) | 0x80;   // variant 10xx
     static const char *hex = "0123456789abcdef";
     std::string u; u.reserve(36);
-    for (int i = 0; i < 36; ++i) {
-        if (i == 8 || i == 13 || i == 18 || i == 23) { u += '-'; continue; }
-        unsigned n = nib(gen);
-        if (i == 14)      n = 4;                  // version 4
-        else if (i == 19) n = (n & 0x3) | 0x8;    // variant 10xx
-        u += hex[n];
+    for (int i = 0; i < 16; ++i) {
+        if (i == 4 || i == 6 || i == 8 || i == 10) u += '-';
+        u += hex[b[i] >> 4]; u += hex[b[i] & 15];
     }
     return u;
 }
