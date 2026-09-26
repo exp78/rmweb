@@ -2341,20 +2341,20 @@ public:
     struct ChromeX { int powerX, readerX, starX, zInX, zOutX; };
     ChromeX chromeLayout() const {
         ChromeX c;
-        c.powerX  = int(width()) - kPowerW;         // right: A- | A+ | ★ | Reader | Power
-        c.readerX = c.powerX - kReaderW;
-        c.starX   = c.readerX - kStarW;
-        c.zInX    = c.starX - kZoomW;
-        c.zOutX   = c.zInX - kZoomW;
+        c.powerX  = int(width()) - kPowerW();         // right: A- | A+ | ★ | Reader | Power
+        c.readerX = c.powerX - kReaderW();
+        c.starX   = c.readerX - kStarW();
+        c.zInX    = c.starX - kZoomW();
+        c.zOutX   = c.zInX - kZoomW();
         return c;
     }
     Hit hitChrome(int x, int y) const {
-        if (!m_chromeOn || y >= kBarH) return None;
+        if (!m_chromeOn || y >= kBarH()) return None;
         const ChromeX c = chromeLayout();
-        if (x < kBackX)         return Back;
-        if (x < kFwdX)          return Fwd;
-        if (x < kRelX)          return Reload;
-        if (x < kRelX + kHomeW) return Home;                // Home sits just after Reload
+        if (x < kBackX())         return Back;
+        if (x < kFwdX())          return Fwd;
+        if (x < kRelX())          return Reload;
+        if (x < kRelX() + kHomeW()) return Home;                // Home sits just after Reload
         if (x >= c.powerX)      return Power;
         if (x >= c.readerX)     return Reader;
         if (x >= c.starX)       return Bookmark;
@@ -2362,7 +2362,7 @@ public:
         if (x >= c.zOutX)       return ZoomOut;
         // Inside the address box: × on the right while editing clears the typed buffer.
         if (m_editing) {
-            const int clearLeft = c.zOutX - 8 - kClearW;
+            const int clearLeft = c.zOutX - 8 - kClearW();
             if (x >= clearLeft) return AddressClear;
         }
         return Address;
@@ -2401,15 +2401,15 @@ public:
     QRectF chromeHitRect(Hit h) const {
         const ChromeX c = chromeLayout();
         switch (h) {
-            case Back:     return QRectF(0, 0, kBackX, kBarH);
-            case Fwd:      return QRectF(kBackX, 0, kFwdX - kBackX, kBarH);
-            case Reload:   return QRectF(kFwdX, 0, kRelX - kFwdX, kBarH);
-            case Home:     return QRectF(kRelX, 0, kHomeW, kBarH);
-            case ZoomOut:  return QRectF(c.zOutX, 0, kZoomW, kBarH);
-            case ZoomIn:   return QRectF(c.zInX, 0, kZoomW, kBarH);
-            case Bookmark: return QRectF(c.starX, 0, kStarW, kBarH);
-            case Reader:   return QRectF(c.readerX, 0, kReaderW, kBarH);
-            case Power:    return QRectF(c.powerX, 0, kPowerW, kBarH);
+            case Back:     return QRectF(0, 0, kBackX(), kBarH());
+            case Fwd:      return QRectF(kBackX(), 0, kFwdX() - kBackX(), kBarH());
+            case Reload:   return QRectF(kFwdX(), 0, kRelX() - kFwdX(), kBarH());
+            case Home:     return QRectF(kRelX(), 0, kHomeW(), kBarH());
+            case ZoomOut:  return QRectF(c.zOutX, 0, kZoomW(), kBarH());
+            case ZoomIn:   return QRectF(c.zInX, 0, kZoomW(), kBarH());
+            case Bookmark: return QRectF(c.starX, 0, kStarW(), kBarH());
+            case Reader:   return QRectF(c.readerX, 0, kReaderW(), kBarH());
+            case Power:    return QRectF(c.powerX, 0, kPowerW(), kBarH());
             default:       return QRectF();
         }
     }
@@ -2428,7 +2428,7 @@ public:
             case Power:    iconPower(p, cx, cy); break;
             case ZoomOut:
             case ZoomIn: {
-                QFont zf = p->font(); zf.setPixelSize(40); zf.setBold(true); p->setFont(zf);
+                QFont zf = p->font(); zf.setPixelSize(qMax(20, int(40 * uiScale()))); zf.setBold(true); p->setFont(zf);
                 p->drawText(r, Qt::AlignCenter, h == ZoomOut ? "A-" : "A+");
                 break;
             }
@@ -2489,7 +2489,7 @@ public:
     }
     void handleEditTap(int x, int y) {
         // × in the address bar (chrome) while the keyboard is open.
-        if (y < kBarH && hitChrome(x, y) == AddressClear) { clearEditBuf(); return; }
+        if (y < kBarH() && hitChrome(x, y) == AddressClear) { clearEditBuf(); return; }
         const int i = rmweb::hitKey(m_keys, x, y);
         if (i < 0) return;                                       // tap outside the keys (page area) -> ignore
         switch (m_keys[i].kind) {
@@ -2685,12 +2685,12 @@ private Q_SLOTS:
     }
 private:
     // --- B2 frame painters (called by paint(); kept here so paint() stays a short orchestrator) -------------
-    // Shared pill: draws a centered rounded-rect badge with a text label at kBarH+50. Returns the pill rect.
+    // Shared pill: draws a centered rounded-rect badge with a text label at kBarH()+50. Returns the pill rect.
     QRectF drawTextPill(QPainter *p, qreal w, const QString &lbl, qreal extraLeftW = 0, qreal extraRightW = 0) const {
         QFont lf = p->font(); lf.setPixelSize(40); p->setFont(lf);
         const qreal tw = p->fontMetrics().horizontalAdvance(lbl);
         const qreal pad = 30, bh = 96, bw = pad + extraLeftW + tw + extraRightW + pad;
-        const qreal bx = (w - bw) / 2, by = kBarH + 50;
+        const qreal bx = (w - bw) / 2, by = kBarH() + 50;
         p->setPen(Qt::black); p->setBrush(Qt::white);
         p->drawRoundedRect(QRectF(bx, by, bw, bh), 18, 18);
         p->setBrush(Qt::NoBrush); p->setPen(Qt::black);
@@ -2738,7 +2738,7 @@ private:
         QFont lf = p->font(); lf.setPixelSize(36); p->setFont(lf);
         const qreal tw = p->fontMetrics().horizontalAdvance(m_notice);
         const qreal pad = 34, bh = 88, bw = pad + tw + pad;
-        const QRectF r((w - bw) / 2, kBarH + 170, bw, bh);
+        const QRectF r((w - bw) / 2, kBarH() + 170, bw, bh);
         p->setPen(Qt::NoPen); p->setBrush(Qt::black);
         p->drawRoundedRect(r, 16, 16);
         p->setPen(Qt::white); p->setBrush(Qt::NoBrush);
@@ -2789,8 +2789,8 @@ private:
     // docs/research/epaper-chrome-compositing.md). e-ink rules: no gradients/shadows, bold outlines,
     // large targets, address field drawn as a real rounded input box (EinkBro/KOReader pattern).
     void drawChromeBar(QPainter *p, qreal w) const {
-        p->fillRect(QRectF(0, 0, w, kBarH), Qt::white);
-        p->fillRect(QRectF(0, kBarH - 3, w, 3), Qt::black);
+        p->fillRect(QRectF(0, 0, w, kBarH()), Qt::white);
+        p->fillRect(QRectF(0, kBarH() - 3, w, 3), Qt::black);
         // Disabled = dark grey #777: lighter greys read as "faded out" on e-ink, #777 still reads
         // as "off" next to black but stays legible (form over tone — we do NOT thin/dash the stroke).
         auto pen = [&](bool on) { p->setPen(on ? Qt::black : QColor(119, 119, 119)); p->setBrush(Qt::NoBrush); };
@@ -2800,14 +2800,14 @@ private:
         pen(true);      drawChromeIcon(p, Home);
 
         const ChromeX c = chromeLayout();
-        const int addrX = kRelX + kHomeW;
-        const int clearW = m_editing ? kClearW : 0;
+        const int addrX = kRelX() + kHomeW();
+        const int clearW = m_editing ? kClearW() : 0;
         // Address field: rounded box; while editing, a × on the right clears the typed buffer.
-        const QRectF addrBox(addrX + 8, 14, c.zOutX - addrX - 16, kBarH - 28);
+        const QRectF addrBox(addrX + 8, 14, c.zOutX - addrX - 16, kBarH() - 28);
         p->setPen(QPen(Qt::black, m_editing ? 4 : 3));
         p->setBrush(m_editing ? QColor(245, 245, 245) : Qt::white);
         p->drawRoundedRect(addrBox, 14, 14);
-        QFont af = p->font(); af.setPixelSize(32); p->setFont(af);
+        QFont af = p->font(); af.setPixelSize(qMax(18, int(32 * uiScale()))); p->setFont(af);
         QString addrText;
         bool grey = false;
         if (m_editing) {
@@ -2840,7 +2840,7 @@ private:
         p->drawText(addrBox.adjusted(14 + lockPad, 0, -textRightPad, 0), Qt::AlignVCenter | Qt::AlignLeft, a);
         if (m_editing) {
             // Clear button: circle + × (large hit target for finger on e-ink).
-            const qreal cx = addrBox.right() - kClearW / 2.0, cy = addrBox.center().y();
+            const qreal cx = addrBox.right() - kClearW() / 2.0, cy = addrBox.center().y();
             const qreal r = 22;
             p->setPen(QPen(Qt::black, 3));
             p->setBrush(Qt::white);
@@ -2856,7 +2856,7 @@ private:
         drawChromeIcon(p, ZoomIn);
         if (m_readerMode) {
             p->setBrush(Qt::black); p->setPen(Qt::NoPen);
-            p->drawRoundedRect(QRectF(c.readerX + 20, 12, kReaderW - 40, kBarH - 24), 12, 12);
+            p->drawRoundedRect(QRectF(c.readerX + 20, 12, kReaderW() - 40, kBarH() - 24), 12, 12);
             p->setPen(Qt::white); p->setBrush(Qt::NoBrush); drawChromeIcon(p, Reader);
         } else { pen(m_readerable); drawChromeIcon(p, Reader); }
         pen(true); drawChromeIcon(p, Bookmark);
@@ -2875,16 +2875,16 @@ private:
     // --- Vector chrome icons: Lucide geometry (lucide.dev, ISC) on a shared 24x24 grid, drawn (not
     // font glyphs -> crisp + font-independent on e-ink). One grid box + one stroke width = a coherent
     // family. Caller sets pen colour (enabled grey / pressed white); filled shapes take the pen colour.
-    static constexpr qreal kIconBox = 44;                    // grid box, panel px (Lucide stroke 2/24 ~= 4)
+    static qreal kIconBox() { return 44.0 * uiScale(); }       // grid box, panel px (Lucide stroke 2/24 ~= 4)
     QPointF ig(qreal cx, qreal cy, qreal x, qreal y) const { // grid point (0..24) -> panel px around (cx,cy)
-        return QPointF(cx + (x - 12) * kIconBox / 24.0, cy + (y - 12) * kIconBox / 24.0);
+        return QPointF(cx + (x - 12) * kIconBox() / 24.0, cy + (y - 12) * kIconBox() / 24.0);
     }
     void strokeIcon(QPainter *p, const QPainterPath &pp) const {
         QPen pn = p->pen(); pn.setWidthF(4); pn.setCapStyle(Qt::RoundCap); pn.setJoinStyle(Qt::RoundJoin);
         p->setPen(pn); p->setBrush(Qt::NoBrush); p->drawPath(pp);
     }
     QRectF iconArc(qreal cx, qreal cy, qreal r) const {        // square rect for a radius-r arc on the grid
-        const qreal pr = r * kIconBox / 24.0;
+        const qreal pr = r * kIconBox() / 24.0;
         return QRectF(cx - pr, cy - pr, 2 * pr, 2 * pr);
     }
     void iconBack(QPainter *p, qreal cx, qreal cy) const {     // lucide/arrow-left
@@ -2909,7 +2909,7 @@ private:
     }
     void iconStop(QPainter *p, qreal cx, qreal cy) const {     // lucide/square, filled (stop reads solid)
         p->setBrush(p->pen().color()); p->setPen(Qt::NoPen);
-        const qreal s = 18 * kIconBox / 24.0, r = 2 * kIconBox / 24.0;
+        const qreal s = 18 * kIconBox() / 24.0, r = 2 * kIconBox() / 24.0;
         p->drawRoundedRect(QRectF(cx - s / 2, cy - s / 2, s, s), r, r);
         p->setBrush(Qt::NoBrush);
     }
@@ -2924,7 +2924,7 @@ private:
     }
     void iconStar(QPainter *p, qreal cx, qreal cy, bool filled) const {    // 5-point star, filled if bookmarked
         QPen pn = p->pen(); pn.setWidthF(4); pn.setJoinStyle(Qt::RoundJoin); p->setPen(pn);
-        const qreal R = 18, r = 7.2; QPolygonF star;
+        const qreal R = 18 * uiScale(), r = 7.2 * uiScale(); QPolygonF star;
         for (int i = 0; i < 10; ++i) {
             const double ang = -3.14159265 / 2 + i * 3.14159265 / 5;
             const double rad = (i % 2 == 0) ? R : r;
@@ -3028,8 +3028,8 @@ private:
         if (m_renderFailed) r = r.united(noticeZone());
         return r;
     }
-    static QRect barZone()    { return QRect(0, 0, kPanelW, kBarH); }                   // chrome bar
-    static QRect pillZone()   { return QRect(0, kBarH, kPanelW, 270); }               // badges + notice toast
+    static QRect barZone()    { return QRect(0, 0, kPanelW, kBarH()); }                   // chrome bar
+    static QRect pillZone()   { return QRect(0, kBarH(), kPanelW, 270); }               // badges + notice toast
     static QRect noticeZone() { return QRect(0, int(kPanelH * 0.30), kPanelW, 270); } // render-failed notice (drawRenderNotice)
     static QRect kbZone()     { return QRect(0, kbTopY(), kPanelW, kPanelH - kbTopY()); }// on-screen keyboard
     static QRect progZone()   { return QRect(0, kPanelH - 10, kPanelW, 10); }         // read-progress strip
@@ -3133,12 +3133,21 @@ private:
     mutable QRectF m_loadingStopRect;            // X zone of the "Loading NN%" pill (stashed by its painter)
     static const int kNoticeMs = 5000;           // toast on-screen time
     // chrome state, painted into the frame (reader-first: shown on launch, hidden by a content tap).
-    // Chrome layout (panel 1620): left cluster | wide address box | A- A+ ★ Reader Power
-    // Give the URL field ~half the bar — previous widths left only ~220px and the box looked "gone".
-    static const int kBarH = 104, kBackX = 150, kFwdX = 300, kRelX = 480, kReaderW = 150, kZoomW = 100, kPowerW = 110;
-    static const int kHomeW = 120, kStarW = 100;
+    // Chrome layout: metrics scale with the panel width (Paper Pro 1620 = scale 1.0, the reference;
+    // Move 954 -> 0.59, clamped to 0.6 so tap targets stay finger-sized on e-ink). Left cluster |
+    // address box | A- A+ ★ Reader Power. The address box gets whatever the clusters leave.
+    static qreal uiScale() { return qBound(0.60, qreal(kPanelW) / 1620.0, 1.0); }
+    static int kBarH()   { return int(104 * uiScale()); }
+    static int kBackX()  { return int(150 * uiScale()); }
+    static int kFwdX()   { return int(300 * uiScale()); }
+    static int kRelX()   { return int(480 * uiScale()); }
+    static int kHomeW()  { return int(120 * uiScale()); }
+    static int kReaderW(){ return int(150 * uiScale()); }
+    static int kZoomW()  { return int(100 * uiScale()); }
+    static int kPowerW() { return int(110 * uiScale()); }
+    static int kStarW()  { return int(100 * uiScale()); }
     bool m_powerArmed = false;                   // two-tap ⏻: first tap armed (3 s window), second quits
-    static const int kClearW = 72;               // × clear-button zone on the right of the address box
+    static int kClearW() { return int(72 * uiScale()); }   // × clear-button zone on the address box right
     bool m_chromeOn = true, m_canBack = false, m_canFwd = false, m_loading = false;
     Hit m_pressed = None;                // chrome button currently flashing its pressed state
     int m_tlsState = 0;                  // 0 = http/none, 1 = https ok, 2 = https with cert errors
@@ -3474,6 +3483,18 @@ int main(int argc, char **argv) {
         const QSize s = scr->size();
         if (s.width() > 200 && s.height() > 200) { kPanelW = s.width(); kPanelH = s.height(); }
     }
+    // Dev override: RMWEB_PANEL=WxH fakes the panel geometry (e.g. 954x1696 to dry-run the
+    // Paper Pro Move UI on a Paper Pro). Applied AFTER the QPA probe so it always wins;
+    // the touch raw range stays the real digitizer's, so taps scale into the fake viewport.
+    if (const char *gp = getenv("RMWEB_PANEL"); gp && *gp) {
+        int w = 0, h = 0;
+        if (sscanf(gp, "%dx%d", &w, &h) == 2 && w > 200 && h > 200) {
+            kPanelW = w; kPanelH = h;
+            qInfo("[panel] RMWEB_PANEL override in effect");
+        } else {
+            qWarning("[panel] ignoring malformed RMWEB_PANEL='%s' (want WxH)", gp);
+        }
+    }
     qInfo("[panel] %dx%d", kPanelW, kPanelH);   // touch raw range is logged by TouchReader (EVIOCGABS)
     const QString url      = (argc > 1) ? QString::fromUtf8(argv[1]) : QString();
     const QString savePath = (argc > 2) ? QString::fromUtf8(argv[2]) : QString();
@@ -3517,7 +3538,15 @@ int main(int argc, char **argv) {
         auto *qmlEngine = new QQmlEngine(&app);
         // No "engine" context property: the chrome is C++ (B2), and kQml doesn't reference engine.
         auto *comp = new QQmlComponent(qmlEngine, qmlEngine);
-        comp->setData(kQml, QUrl(QStringLiteral("inline.qml")));
+        QByteArray qmlSrc(kQml);
+        if (qEnvironmentVariableIsSet("RMWEB_PANEL")) {
+            // Fake panel geometry (Move UI dry-run): bake the fake size INTO the QML — the Screen
+            // binding + anchors.fill are real bindings and revert any C++-side setSize (verified).
+            const QByteArray w = QByteArray::number(kPanelW), h = QByteArray::number(kPanelH);
+            qmlSrc.replace("width: Screen.width; height: Screen.height", "width: " + w + "; height: " + h);
+            qmlSrc.replace("anchors.fill: parent", "width: " + w + "; height: " + h);
+        }
+        comp->setData(qmlSrc, QUrl(QStringLiteral("inline.qml")));
         if (comp->status() != QQmlComponent::Ready) {
             qWarning() << "[qml]" << comp->errorString();
             return 2;

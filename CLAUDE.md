@@ -553,3 +553,12 @@ written while the panel is idle. The "vendor region-render crash" from partial p
 INDEPENDENT (0/10 with partial off vs 8/8 with it on, all other races closed) — partial stays opt-in
 (RMWEB_PARTIAL=1). Paper Pro Move port verified safe on Paper Pro: `[panel] 1620x2160`, touch probe
 reads 2065x2833 via EVIOCGABS (max+1 — sub-pixel shift vs the old 2064/2832 constants, harmless).
+**2026-09-26 — chrome scales with panel width + RMWEB_PANEL dry-run:** the chrome bar was fixed
+Paper-Pro px (left cluster ends at 600, right cluster takes 560 -> a NEGATIVE address box at 954).
+Now `uiScale() = clamp(kPanelW/1620, 0.6, 1.0)` scales every bar metric (kBarH/kBackX/../kClearW are
+functions now), kIconBox, the bar fonts and the star; Paper Pro output is unchanged (scale 1.0,
+verified by grab). New dev knob RMWEB_PANEL=WxH fakes the panel geometry AFTER the QPA probe
+(viewport, zones, keyboard, touch scaling all follow); in display mode the size is baked into the
+inline QML — Screen bindings/anchors.fill are real bindings and revert any C++-side setSize
+(verified on device). A 954x1696 dry-run on the Paper Pro renders the whole UI in the top-left
+region and is what caught the chrome overlap.
