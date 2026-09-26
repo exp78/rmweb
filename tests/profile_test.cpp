@@ -73,7 +73,7 @@ int main() {
 
     // corrupt/missing -> defaults
     Settings s3 = loadSettings(dir + "/missing-subdir");
-    CHECK(s3.zoom > 0.84 && s3.zoom < 0.86); CHECK(s3.readerFont == 30); CHECK(s3.ua.empty());
+    CHECK(s3.zoom > 0.49 && s3.zoom < 0.51); CHECK(s3.readerFont == 30); CHECK(s3.ua.empty());
     CHECK(s3.block);                                   // no settings file -> content blocker defaults on
 
     // atomicWrite: a failed write returns false and must NOT clobber an existing good file
@@ -98,7 +98,7 @@ int main() {
     // loadSettings clamps out-of-range values back to defaults (zoom [0.5,3.0], readerFont [14,96])
     CHECK(detail::atomicWrite(dir + "/settings.txt", "zoom=99\nreaderFont=5\n"));
     Settings sc = loadSettings(dir);
-    CHECK(sc.zoom > 0.84 && sc.zoom < 0.86); CHECK(sc.readerFont == 30);
+    CHECK(sc.zoom > 0.49 && sc.zoom < 0.51); CHECK(sc.readerFont == 30);
     CHECK(detail::atomicWrite(dir + "/settings.txt", "zoom=0.5\nreaderFont=96\n"));
     Settings se = loadSettings(dir);
     CHECK(se.zoom == 0.5); CHECK(se.readerFont == 96);      // range edges are kept, not clamped
