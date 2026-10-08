@@ -61,32 +61,32 @@
       "version": "0.190-1.1ubuntu0.1"
     },
     "host-packages/libglib2.0-0t64_2.80.0-6ubuntu3.8_arm64.deb": {
-      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glib2.0/libglib2.0-0t64_2.80.0-6ubuntu3.8_arm64.deb",
-      "sha256": "cc2685cfd6b8b7b4823b6f863f893bbd81efbfaebcc0bc20aa4879cf825db2ec",
-      "bytes": 1531962,
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glib2.0/libglib2.0-0t64_2.80.0-6ubuntu3.10_arm64.deb",
+      "sha256": "2bfe91a671013e938cdf228f87ea98123a93b328c0ab7654388c04a285e438b5",
+      "bytes": 1533346,
       "package": "libglib2.0-0t64",
-      "version": "2.80.0-6ubuntu3.8"
+      "version": "2.80.0-6ubuntu3.10"
     },
     "host-packages/libglib2.0-bin_2.80.0-6ubuntu3.8_arm64.deb": {
-      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glib2.0/libglib2.0-bin_2.80.0-6ubuntu3.8_arm64.deb",
-      "sha256": "360d5aa45b3cfc163bdc0abd1bb2d385c36b38d82441f90082d5b6f43807b2ae",
-      "bytes": 97066,
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glib2.0/libglib2.0-bin_2.80.0-6ubuntu3.10_arm64.deb",
+      "sha256": "d95d9f43fc29c2213f0f18657f2544e56f143fc41f11f22d0f4be26e910de72c",
+      "bytes": 97114,
       "package": "libglib2.0-bin",
-      "version": "2.80.0-6ubuntu3.8"
+      "version": "2.80.0-6ubuntu3.10"
     },
     "host-packages/libglib2.0-data_2.80.0-6ubuntu3.8_all.deb": {
-      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glib2.0/libglib2.0-data_2.80.0-6ubuntu3.8_all.deb",
-      "sha256": "4f4269f52ac6a933dc53f37a2144a3984abbd4a1a0d44da1e7edbae410ddc1f4",
-      "bytes": 49588,
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glib2.0/libglib2.0-data_2.80.0-6ubuntu3.10_all.deb",
+      "sha256": "f196e280e4286f6dfc5ddaaf8c09cc6e8502e0de77619385e3fde19ea2739122",
+      "bytes": 50240,
       "package": "libglib2.0-data",
-      "version": "2.80.0-6ubuntu3.8"
+      "version": "2.80.0-6ubuntu3.10"
     },
     "host-packages/libglib2.0-dev-bin_2.80.0-6ubuntu3.8_arm64.deb": {
-      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glib2.0/libglib2.0-dev-bin_2.80.0-6ubuntu3.8_arm64.deb",
-      "sha256": "4d2e73889d63eaa9d00595bd68d74b37ca61034e48c898b7f625562d72b9b79a",
-      "bytes": 138394,
+      "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glib2.0/libglib2.0-dev-bin_2.80.0-6ubuntu3.10_arm64.deb",
+      "sha256": "af2391f46bf056cd327b1a55dada0cecf554ba5d2421a4517e180009be72d11d",
+      "bytes": 138320,
       "package": "libglib2.0-dev-bin",
-      "version": "2.80.0-6ubuntu3.8"
+      "version": "2.80.0-6ubuntu3.10"
     },
     "host-packages/libncurses6_6.4+20240113-1ubuntu2.2_arm64.deb": {
       "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/n/ncurses/libncurses6_6.4+20240113-1ubuntu2.2_arm64.deb",
