@@ -24,7 +24,7 @@ Signed authenticator bytes are returned verbatim, not reconstructed. The helper 
 
 ## Lifetime and hardware
 
-The helper sets parent-death SIGTERM, handles SIGTERM/SIGINT, disables core dumps and all dependency tracing, and suppresses stderr. It opens no credential or QR files. Only a verified Paper Pro (Ferrari) with one built-in `btnxpuart` adapter is supported. A request-scoped platform guard holds a finite wake lock named `rmweb-passkey-<pid>-<sequence>`, prepares the stock Bluetooth module/service only if no adapter exists, powers the adapter when needed, and attempts bounded restoration of its prior power after success, failure or ordinary cancellation. Existing powered adapters are preserved; unrelated adapters are rejected. A root-owned empty lock at `/run/rmweb-passkey.lock` serializes helpers through power restoration; it contains no credential data. No boot files are changed or pre-existing modules removed. SIGKILL/power loss cannot run asynchronous restoration; the kernel wake lock expires independently.
+The helper sets parent-death SIGTERM, handles SIGTERM/SIGINT, disables core dumps and all dependency tracing, and suppresses stderr. It opens no credential or QR files. Only a verified Paper Pro (Ferrari) with one built-in `btnxpuart` adapter is supported. A request-scoped platform guard holds a finite wake lock named `rmweb-passkey-<pid>-<sequence>`, prepares the stock Bluetooth module/service only if no adapter exists, powers the adapter when needed, and attempts bounded restoration of its prior power after success, failure or ordinary cancellation. A module/service stack the helper itself created is additionally stopped and unloaded on the same bounded path, so restoration leaves no driver behind. Existing powered adapters are preserved; unrelated adapters are rejected. A root-owned empty lock at `/run/rmweb-passkey.lock` serializes helpers through power restoration; it contains no credential data. No boot files are changed or pre-existing modules removed. SIGKILL/power loss cannot run asynchronous restoration; the kernel wake lock expires independently.
 
 Before replacing the helper, stop new launches and allow active helpers to finish
 restoration and exit. Never unlink the lock while a helper may hold it: replacing
@@ -38,7 +38,7 @@ its inode breaks serialization. The empty lock file can remain until reboot.
 /path/to/stage/build-sdk.sh /path/to/stage /absolute/build-cache
 ```
 
-The script runs helper/platform tests with the SDK target loader, builds the release executable and runs real-process pipe, EOF, signal and parent-death tests. No test performs a phone ceremony. Output is `build-cache/target/aarch64-unknown-linux-gnu/release/rmweb-auth-passkey-helper`.
+The script runs helper/platform tests with the SDK target loader, exercises the vendored patch's `private_probe_order_tests` against the staged libwebauthn checkout (skipped with a notice before `prepare.py` stages it), builds the release executable and runs real-process pipe, EOF, signal and parent-death tests. No test performs a phone ceremony. Output is `build-cache/target/aarch64-unknown-linux-gnu/release/rmweb-auth-passkey-helper`.
 
 To export the executable, license map and complete source archive, run in the same build container (with `--init` when invoking standalone process tests):
 
@@ -53,11 +53,13 @@ Use an absent output directory. The exporter verifies the prepared source hashes
 
 Source pin: libwebauthn v0.9.0 prerelease, commit `a6bdb700918f4c8c06c52d41f4d2d9e79888c5ad`, archive SHA256 `9cbd2d5afe03cc33f7bdbb7a9d5c81922d8008e55520beb2f4e6cfe35016bb54`, from the URL in `prepare.py`. LGPL-2.1-or-later terms are retained in `vendor/libwebauthn-COPYING`. The explicit patch preserves a decoded response queued before peer closure; its actual-source regression was red before the patch and green afterward. The PSL snapshot is a checksum-pinned official download (`2026-09-15_10-18-26_UTC`) under MPL-2.0, with notice in the file.
 
-On 2026-09-17, a user confirmed **PASS** from the disposable relying-party
-verifier on a Paper Pro running software 3.28.0.172 / Qt 6.10.3, after creating
-a test passkey on a phone and approving the browser's QR assertion. This
-establishes that test's signed assertion path; arbitrary account sign-in and
-other hardware remain unverified. See [the acceptance harness](../../tools/passkey-acceptance/README.md).
+On 2026-09-17, the contributor reported **PASS** from the disposable
+relying-party verifier on a Paper Pro running software 3.28.0.172 / Qt 6.10.3,
+after creating a test passkey on a phone and approving the browser's QR
+assertion; maintainer verification of that on-device result is pending. Taken
+as establishing that test's signed assertion path only once independently
+verified; arbitrary account sign-in and other hardware remain unverified. See
+[the acceptance harness](../../tools/passkey-acceptance/README.md).
 
 Ship this helper's complete source, Cargo.lock, dependency pin, patch, license
 notices and rebuild recipe alongside the binary; preserve the ability to

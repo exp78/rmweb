@@ -100,10 +100,11 @@ flow for phone passkeys. The caller owns its callback and credentials. This
 requires a patched WPE runtime and a qualified AppLoad build; it does not change
 the regular browser's stored-profile behavior.
 
-The qualified profile is Paper Pro software **3.28.0.172 / Qt 6.10.3**. A user
-confirmed the disposable test verifier's **PASS** after phone approval;
-arbitrary account sign-in, other firmware and other reMarkable models remain
-unverified. Start with the [authentication build and integration guide](docs/auth-browser.md)
+The qualified profile is Paper Pro software **3.28.0.172 / Qt 6.10.3**. The
+contributor reported the disposable test verifier's **PASS** after phone
+approval on that profile; maintainer verification of that on-device result is
+still pending. Arbitrary account sign-in, other firmware and other reMarkable
+models remain unverified. Start with the [authentication build and integration guide](docs/auth-browser.md)
 or the [disposable phone-passkey demo](tools/passkey-acceptance/DEMO.md).
 
 ## Roadmap / Planned

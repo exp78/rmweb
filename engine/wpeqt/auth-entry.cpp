@@ -15,7 +15,7 @@ extern char **environ;
 
 namespace {
 // Locate this owned installation from the executable, never caller input.
-bool installationPaths(std::string &browser, std::string &helpers) {
+bool installationPaths(std::string &browser, std::string &helpers, std::string &libraries) {
     char buffer[PATH_MAX];
     const ssize_t size = readlink("/proc/self/exe", buffer, sizeof(buffer));
     if (size <= 0 || size >= static_cast<ssize_t>(sizeof(buffer))) return false;
@@ -25,7 +25,9 @@ bool installationPaths(std::string &browser, std::string &helpers) {
     const std::string bin = executable.substr(0, separator);
     if (bin.size() <= 4 || bin.substr(bin.size() - 4) != "/bin") return false;
     browser = bin + "/rmweb-auth-browser";
-    helpers = bin.substr(0, bin.size() - 4) + "/runtime/libexec";
+    const std::string runtime = bin.substr(0, bin.size() - 4) + "/runtime";
+    helpers = runtime + "/libexec";
+    libraries = runtime + "/lib";
     return true;
 }
 constexpr const char *MountPoint = "/usr/libexec";
@@ -145,8 +147,15 @@ int main(int argc, char **argv) {
     if (geteuid() != 0) return fail("root ownership is required for the private mount namespace");
     if (unsetenv("LD_PRELOAD") != 0) return fail("could not clear inherited preload settings");
 
-    std::string browserPath, helperPath;
-    if (!installationPaths(browserPath, helperPath)) return fail("invalid installation layout");
+    std::string browserPath, helperPath, libraryPath;
+    if (!installationPaths(browserPath, helperPath, libraryPath)) return fail("invalid installation layout");
+    // The launcher sources the staged rmweb-env.sh, which exports this exact
+    // library path before exec. Pin the same installation-derived value here so
+    // an inherited caller-chosen search path never reaches the browser. Plain
+    // unsetenv is not an option: the staged runtime has no baked rpath pass and
+    // resolves its transitive libraries through LD_LIBRARY_PATH.
+    if (setenv("LD_LIBRARY_PATH", libraryPath.c_str(), 1) != 0)
+        return fail("could not pin the trusted library search path");
     const char *Browser = browserPath.c_str();
     const char *Helpers = helperPath.c_str();
     Fd browser(openOwned(Browser, false));

@@ -1,5 +1,7 @@
 #!/bin/sh
 # Disposable AppLoad test entry. No production catalog or service changes.
+# Assertions below intentionally use the `condition && condition || fail` idiom.
+# shellcheck disable=SC2015
 set -eu
 umask 077
 fail() { echo '[Passkey test] Test browser is unavailable.' >&2; exit 1; }

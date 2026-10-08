@@ -1,7 +1,9 @@
 //! Request-scoped Ferrari Bluetooth preparation. Call only after request validation.
 //! Normal/error cancellation must await the bounded `restore` attempt; a D-Bus
-//! failure cannot guarantee power restoration. Drop only attempts wake unlock
-//! synchronously. The finite kernel timeout also bounds a SIGKILL wake leak.
+//! failure cannot guarantee power restoration. A module/service stack created by
+//! preparation is stopped and unloaded on the same bounded path. Drop only
+//! attempts wake unlock synchronously. The finite kernel timeout also bounds a
+//! SIGKILL wake leak.
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -44,6 +46,7 @@ trait Platform {
     fn created_adapter(&self) -> bool;
     async fn prepare(&mut self) -> Result<bool, ()>;
     async fn set_powered(&mut self, powered: bool) -> Result<(), ()>;
+    async fn release_created(&mut self) -> Result<(), ()>;
 }
 
 struct Guard<P: Platform> {
@@ -95,6 +98,12 @@ impl<P: Platform> Guard<P> {
             if matches!(timeout(self.restore_budget, self.platform.set_powered(powered)).await, Ok(Ok(()))) {
                 self.restore_power = None;
             }
+        }
+        if self.platform.created_adapter() {
+            // A created stack has no prior state: remove the service and module
+            // started during preparation so restoration leaves no driver behind.
+            // Bounded like the power write; the wake lock is still released.
+            let _ = timeout(self.restore_budget, self.platform.release_created()).await;
         }
         self.platform.unlock();
     }
@@ -198,6 +207,15 @@ impl Platform for System {
     async fn set_powered(&mut self, powered: bool) -> Result<(), ()> {
         self.adapter().await?.set_powered(powered).await.map_err(|_| ())
     }
+
+    async fn release_created(&mut self) -> Result<(), ()> {
+        // Reverse the preparation order: the service releases the adapter before
+        // its driver module can unload. A failing stop must not strand the
+        // loaded module, so each step runs independently.
+        let service = command("/bin/systemctl", &["stop", "bluetooth.service"]).await;
+        let module = command("/sbin/modprobe", &["-r", "btnxpuart"]).await;
+        service.and(module)
+    }
 }
 
 fn ferrari_model(bytes: &[u8]) -> bool {
@@ -287,6 +305,7 @@ mod tests {
     struct Fake {
         state: Arc<Mutex<State>>, powered: bool, created: bool,
         fail_prepare: bool, fail_power_on: bool, stall_restore: bool,
+        fail_teardown: bool, stall_teardown: bool,
     }
     impl Platform for Fake {
         fn wake(&mut self) -> Result<(), ()> {
@@ -306,11 +325,17 @@ mod tests {
             if !powered && self.stall_restore { std::future::pending::<()>().await; }
             if powered && self.fail_power_on { Err(()) } else { Ok(()) }
         }
+        async fn release_created(&mut self) -> Result<(), ()> {
+            self.state.lock().unwrap().calls.push("teardown");
+            if self.stall_teardown { std::future::pending::<()>().await; }
+            if self.fail_teardown { Err(()) } else { Ok(()) }
+        }
     }
     fn fake(powered: bool) -> (Fake, Arc<Mutex<State>>) {
         let state = Arc::new(Mutex::new(State::default()));
         (Fake { state: state.clone(), powered, created: false, fail_prepare: false,
-            fail_power_on: false, stall_restore: false }, state)
+            fail_power_on: false, stall_restore: false, fail_teardown: false,
+            stall_teardown: false }, state)
     }
     async fn acquire(fake: Fake) -> Result<Guard<Fake>, ()> {
         Guard::acquire(fake, Duration::from_millis(100), Duration::from_millis(20)).await
@@ -346,13 +371,36 @@ mod tests {
     async fn partial_new_adapter_failure_restores_power_off() {
         let (mut fake, state) = fake(true); fake.created = true; fake.fail_prepare = true;
         assert!(acquire(fake).await.is_err());
-        assert_eq!(state.lock().unwrap().calls, ["wake", "prepare", "off", "unlock"]);
+        assert_eq!(state.lock().unwrap().calls, ["wake", "prepare", "off", "teardown", "unlock"]);
     }
     #[tokio::test]
     async fn newly_created_powered_adapter_is_disabled_after_use() {
         let (mut fake, state) = fake(true); fake.created = true;
         let mut guard = acquire(fake).await.unwrap(); guard.restore().await; guard.restore().await;
-        assert_eq!(state.lock().unwrap().calls, ["wake", "prepare", "off", "unlock"]);
+        assert_eq!(state.lock().unwrap().calls, ["wake", "prepare", "off", "teardown", "unlock"]);
+    }
+    #[tokio::test]
+    async fn created_stack_teardown_failure_still_releases_wake_lock() {
+        let (mut fake, state) = fake(true); fake.created = true; fake.fail_teardown = true;
+        let mut guard = acquire(fake).await.unwrap(); guard.restore().await;
+        assert!(!state.lock().unwrap().awake);
+        assert_eq!(state.lock().unwrap().calls, ["wake", "prepare", "off", "teardown", "unlock"]);
+    }
+    #[tokio::test]
+    async fn created_stack_teardown_is_bounded() {
+        let (mut fake, state) = fake(true); fake.created = true; fake.stall_teardown = true;
+        let mut guard = acquire(fake).await.unwrap();
+        timeout(Duration::from_millis(100), guard.restore()).await.unwrap();
+        assert!(!state.lock().unwrap().awake);
+        assert_eq!(state.lock().unwrap().calls, ["wake", "prepare", "off", "teardown", "unlock"]);
+    }
+    #[tokio::test]
+    async fn stalled_power_off_does_not_skip_created_teardown() {
+        let (mut fake, state) = fake(false); fake.created = true; fake.stall_restore = true;
+        let mut guard = acquire(fake).await.unwrap();
+        timeout(Duration::from_millis(100), guard.restore()).await.unwrap();
+        assert!(!state.lock().unwrap().awake);
+        assert_eq!(state.lock().unwrap().calls, ["wake", "prepare", "on", "off", "teardown", "unlock"]);
     }
     #[tokio::test]
     async fn restore_timeout_releases_wake_lock() {
@@ -385,6 +433,7 @@ mod tests {
                     std::future::pending().await
                 } else { self.0.set_powered(false).await }
             }
+            async fn release_created(&mut self) -> Result<(), ()> { self.0.release_created().await }
         }
         let result = Guard::acquire_until(PendingPower(fake), Duration::from_millis(100),
             Duration::from_millis(20), cancelled).await;

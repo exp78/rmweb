@@ -20,6 +20,6 @@ jobs:
           cache: npm
           cache-dependency-path: tools/passkey-acceptance/package-lock.json
       - name: Install passkey test dependencies
-        run: npm ci --prefix tools/passkey-acceptance
+        run: npm ci --ignore-scripts --prefix tools/passkey-acceptance
       - name: Run host tests
         run: bash scripts/run-tests.sh

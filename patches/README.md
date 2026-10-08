@@ -28,10 +28,12 @@ explicitly. Navigation, frame destruction, page closure, timeout, and abort
 cancel pending work; stale completion is rejected.
 
 The official SDK build and offline actual-engine tests passed, including the
-fixed diagnostic classification cases. A user-confirmed disposable relying-party
-**PASS** was recorded on Paper Pro 3.28.0.172 / Qt 6.10.3 on 2026-09-17. This is separate from arbitrary account
-sign-in. See `tests/auth-webauthn-provider/README.md` for
-the synthetic fixture's precise boundary.
+fixed diagnostic classification cases. The contributor also reported a
+disposable relying-party **PASS** on Paper Pro 3.28.0.172 / Qt 6.10.3 on
+2026-09-17; maintainer verification of that on-device result is pending. This
+is separate from arbitrary account sign-in. See
+`tests/auth-webauthn-provider/README.md` for the synthetic fixture's precise
+boundary.
 
 ## Fixed diagnostic events
 
@@ -60,6 +62,37 @@ accepted assertion buffers, not that the relying party accepted sign-in.
 `cancelled` covers every non-success completion, including timeout, an invalid
 assertion, and an unhandled UI request. Late calls produce no additional finish
 event. System syslog routing and retention apply to these fixed labels.
+
+## Bundled headless frame pacing
+
+Beyond the assertion provider, this patch intentionally bundles a second,
+separable component in `Source/WebKit/WPEPlatform/wpe/headless/WPEViewHeadless.cpp`:
+it reworks frame pacing on the headless view. Upstream schedules frames at a
+fixed 60 fps from buffer arrival; the bundled change
+
+- caps passive compositing at 8 frames per second,
+- raises pacing to 30 Hz for about one second after observed native input
+  (pointer, scroll, keyboard, touch) so queued animated frames drain promptly
+  and a tap or keystroke is not displayed late, and
+- stamps the pacing reference at completed presentation instead of buffer
+  arrival, so fast producers no longer alternate delayed with immediate frames.
+
+First and overdue frames stay immediate and buffer backpressure is unchanged.
+
+`WPEViewHeadless` is rmweb's production render path: both the regular browser
+and the authentication browser create their display with
+`wpe_display_headless_new`, so every presented frame flows through this view.
+On e-ink the panel cannot usefully show 60 fps, while each composited frame
+costs CPU time and power before its snapshot reaches the display controller.
+Bounding passive compositing to 8 fps saves both; the short 30 Hz window after
+input preserves interaction latency where it is perceptible.
+
+The component rides in this patch rather than a second patch because both touch
+the same staged engine build, pin and qualification cycle; it is documented
+here so the bundle carries no undocumented behavior. The offline actual-engine
+timing fixture `tests/auth_frame_pacing_smoke.cpp` covers static, animated and
+continuous frame production, including the post-input burst and the return to
+passive pacing.
 
 ## AppLoad prerequisites
 

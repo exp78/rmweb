@@ -22,6 +22,17 @@ helper_sysroot=/opt/remarkable-sdk/sysroots/cortexa53-crypto-remarkable-linux
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="$helper_sysroot/lib/ld-linux-aarch64.so.1 --library-path $helper_sysroot/lib:$helper_sysroot/usr/lib"
 cd "$helper_source"
 /usr/local/cargo/bin/cargo test --locked --tests
+# The vendored patch adds private_probe_order_tests inside libwebauthn; as a
+# path dependency its tests never run above. Exercise them against the vendored
+# workspace lock; scope the run to the patched module so the helper build does
+# not depend on upstream's unrelated hardware-adjacent cases. prepare.py is the
+# only step that unpacks the vendored checkout, so skip clearly before it.
+vendor_manifest="$helper_source/vendor/libwebauthn/libwebauthn/Cargo.toml"
+if [ -f "$vendor_manifest" ]; then
+    /usr/local/cargo/bin/cargo test --locked --manifest-path "$vendor_manifest" private_probe_order_tests
+else
+    echo '[build-sdk] no staged libwebauthn checkout; skipping vendored patch tests (run prepare.py first)' >&2
+fi
 /usr/local/cargo/bin/cargo build --release --locked
 python3 tests/process.py --binary "$CARGO_TARGET_DIR/aarch64-unknown-linux-gnu/release/rmweb-auth-passkey-helper" \
     --loader "$helper_sysroot/lib/ld-linux-aarch64.so.1" --library-path "$helper_sysroot/lib:$helper_sysroot/usr/lib"

@@ -41,15 +41,18 @@ def main():
 #include <sys/statvfs.h>
 int main(int argc, char **argv) {
     struct statvfs fs = {0};
+    const char *library = getenv("LD_LIBRARY_PATH");
     if (statvfs("/usr/libexec", &fs)) return 2;
-    printf("%ld\n%d\n%s\n%lu\n", (long)getpid(), argc,
-        getenv("LD_PRELOAD") ? "preload" : "clean", (unsigned long)(fs.f_flag & ST_RDONLY));
+    printf("%ld\n%d\n%s\n%s\n%lu\n", (long)getpid(), argc,
+        getenv("LD_PRELOAD") ? "preload" : "clean", library ? library : "unset",
+        (unsigned long)(fs.f_flag & ST_RDONLY));
     for (int i = 1; i < argc; ++i) puts(argv[i]);
     return access("/usr/libexec/auth-entry-parent-marker", F_OK) == 0 ? 3 : 0;
 }
 ''')
     subprocess.run(["gcc", str(source), "-o", str(browser)], check=True, timeout=30)
-    env = dict(os.environ, QTFB_KEY="123", LD_PRELOAD="/missing-auth-test-preload.so")
+    env = dict(os.environ, QTFB_KEY="123", LD_PRELOAD="/missing-auth-test-preload.so",
+               LD_LIBRARY_PATH="/missing-auth-test-library-path")
     count = 0
 
     def run(values, okay=False, contains="", environment=None):
@@ -108,7 +111,8 @@ int main(int argc, char **argv) {
     for values in ([url], [url, "--device-code", "ABCD-1234"],
                    ["https://other.example.test/authorize?state=literal$(test)`argv`&x=1"]):
         pid, out = run(values, okay=True)
-        assert out.splitlines() == [str(pid), str(len(values) + 1), "clean", "1", *values]
+        assert out.splitlines() == [str(pid), str(len(values) + 1), "clean",
+                                    str(runtime / "lib"), "1", *values]
     print(f"PASS {count} auth entry cases; literal arguments, same PID, private read-only mounts")
 
 

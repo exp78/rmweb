@@ -202,4 +202,5 @@ if (BASE / 'stage').exists():
 (STAGE.parent).replace(BASE / 'stage')
 write(BASE / 'header-manifest.json', json.dumps(manifest, indent=2) + '\n')
 work.cleanup()
-print(f'Prepared {len(manifest["generatedHeaders"])} development files under {BASE / 'stage/usr'}')
+staged = BASE / 'stage/usr'
+print(f'Prepared {len(manifest["generatedHeaders"])} development files under {staged}')

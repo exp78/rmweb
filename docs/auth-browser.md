@@ -235,16 +235,20 @@ cancellation, not phone cryptography. The separate
 only a verified assertion from its live verifier establishes that test's phone
 passkey result.
 
-On 2026-09-17, host policy, surface, launcher, helper and packaging suites
-passed, along with the actual SDK-built entry's 29 namespace/ownership cases
-and the acceptance app's four actual-WPE route fixtures. The separate
-self-contained acceptance app was built with the official Paper Pro 3.28 SDK,
-its package hashes and private helper namespace were checked on-device, and a
-user confirmed its **PASS** result after phone QR approval on software
-**3.28.0.172 / Qt 6.10.3**. The tested runtime used the already built patched WPE
-libraries; this was not a fresh full-engine rebuild.
+On 2026-09-17, the contributor reported the results below. The host suites are
+reproducible from this checkout; the SDK-built and on-device results are
+contributor-reported with maintainer verification pending. Reported: host
+policy, surface, launcher, helper and packaging suites passed, along with the
+actual SDK-built entry's 29 namespace/ownership cases and the acceptance app's
+four actual-WPE route fixtures. The separate self-contained acceptance app was
+built with the official Paper Pro 3.28 SDK, its package hashes and private
+helper namespace were checked on-device, and a user confirmed its **PASS**
+result after phone QR approval on software **3.28.0.172 / Qt 6.10.3**. The
+tested runtime used the already built patched WPE libraries; this was not a
+fresh full-engine rebuild.
 
-That physical result establishes the disposable relying party's assertion
+Pending independent verification, that contributor-reported physical result
+stands as evidence for the disposable relying party's assertion
 verification. It does not establish arbitrary provider compatibility, account
 sign-in, caller enrollment, RM2 support, or another firmware profile. Cancellation,
 Bluetooth restoration, stock-UI return and input should be rechecked for each

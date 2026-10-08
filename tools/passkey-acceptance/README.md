@@ -179,7 +179,7 @@ the disposable container. See the existing `tests/auth_entry_test.py` fixture.
 
 ## Validation evidence and boundaries
 
-On 2026-09-17:
+On 2026-09-17, the contributor reported:
 
 - The acceptance server, guided UI and runner passed 54 Node tests and JavaScript
   syntax checks. Six preparation tests passed in Linux, including private
@@ -193,7 +193,10 @@ On 2026-09-17:
   disposable phone passkey and approving its QR assertion, the user confirmed
   that the tablet displayed **PASS**.
 
-That is physical evidence for this disposable relying party, not arbitrary
+The Node and preparation suites are reproducible from this checkout; the
+SDK-built and on-device results above are contributor-reported with maintainer
+verification pending. Once independently verified, that is physical evidence
+for this disposable relying party, not arbitrary
 account sign-in, another device/firmware, or every cancellation/recovery path.
 Build again for the actual trusted test hostname. A synthetic fixture build
 using `https://login.example.com` is not a live catalog.
