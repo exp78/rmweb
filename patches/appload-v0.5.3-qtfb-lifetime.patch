@@ -1,0 +1,490 @@
+diff --git a/src/qtfb/FBController.cpp b/src/qtfb/FBController.cpp
+index f022c33..525ad6a 100644
+--- a/src/qtfb/FBController.cpp
++++ b/src/qtfb/FBController.cpp
+@@ -20,8 +20,12 @@ bool FBController::active() const {
+ }
+ 
+ void FBController::setActive(bool active){
+-    _active = active;
+-    emit activeChanged();
++    // Registration can queue an empty association before a client connects.
++    // window.qml treats an inactive transition as the application closing.
++    if(_active != active) {
++        _active = active;
++        emit activeChanged();
++    }
+     markedUpdate();
+ }
+ 
+@@ -30,15 +34,14 @@ FBController::~FBController(){
+ }
+ 
+ void FBController::paint(QPainter *painter) {
+-    isMidPaint = true;
+-    QDEBUG << "FB Repaint triggered for " << _framebufferID << ". Status: " << _active;
+-    // Do we have an SHM associated?
+-    if(this->image && this->_active) {
++    // A shared-data snapshot keeps SHM alive while a render thread paints.
++    const QImage frame = imageSnapshot();
++    if(!frame.isNull()) {
+         // Cool. Paint it.
+         if(_allowScaling) {
+-            painter->drawImage(QRect(0, 0, width(), height()), *image, image->rect());
++            painter->drawImage(QRect(0, 0, width(), height()), frame, frame.rect());
+         } else {
+-            painter->drawImage(0, 0, *image);
++            painter->drawImage(0, 0, frame);
+         }
+     } else {
+         /*
+@@ -52,32 +55,29 @@ void FBController::paint(QPainter *painter) {
+         painter->drawText(rect, "Unbound Framebuffer " + QString::number(_framebufferID), Qt::AlignCenter | Qt::AlignTop);
+         */
+     }
+-    isMidPaint = false;
+-}
+-
+-void FBController::associateSHM(QImage *image) {
+-    this->image = image;
+-    int key = _framebufferID;
+-    QMetaObject::invokeMethod(this, [this, key]() {
+-        if(!qtfb::management::isControllerAssociated(key)) {
+-            // The framebuffer connection was terminated as we were
+-            // waiting for the event loop to process this request.
+-            this->image = nullptr;
+-            this->setActive(false);
+-            return;
+-        }
+-        this->setActive(this->image != nullptr);
+-    }, Qt::QueuedConnection);
++}
++
++QImage FBController::imageSnapshot() const {
++    QMutexLocker lock(&imageMutex);
++    return image;
++}
++
++void FBController::associateSHM(QImage frame) {
++    {
++        QMutexLocker lock(&imageMutex);
++        image = std::move(frame);
++    }
++    setActive(!imageSnapshot().isNull());
+ }
+ 
+ void FBController::markedUpdate(const QRect &rect) {
+-    isMidPaint = true;
+-    if(_allowScaling && image) {
++    const QImage frame = imageSnapshot();
++    if(_allowScaling && !frame.isNull()) {
+         update(QRect(
+-           (rect.x() / image->width()) * this->width(),
+-           (rect.y() / image->height()) * this->height(),
+-           (rect.width() / image->width()) * this->width(),
+-           (rect.height() / image->height()) * this->height()
++           (rect.x() / frame.width()) * this->width(),
++           (rect.y() / frame.height()) * this->height(),
++           (rect.width() / frame.width()) * this->width(),
++           (rect.height() / frame.height()) * this->height()
+         ));
+     } else {
+         update(rect);
+@@ -94,10 +94,11 @@ bool FBController::allowScaling() const {
+ 
+ 
+ QPoint FBController::convertPointToQTFBPixels(const QPointF &input) {
+-    if(_allowScaling && image) {
++    const QImage frame = imageSnapshot();
++    if(_allowScaling && !frame.isNull() && width() > 0 && height() > 0) {
+         return QPoint(
+-            (input.x() * image->width()) / this->width(),
+-            (input.y() * image->height()) / this->height() 
++            (input.x() * frame.width()) / this->width(),
++            (input.y() * frame.height()) / this->height()
+         );
+     } else {
+         return QPoint(input.x(), input.y());
+diff --git a/src/qtfb/FBController.h b/src/qtfb/FBController.h
+index aa46b73..5f3dae6 100644
+--- a/src/qtfb/FBController.h
++++ b/src/qtfb/FBController.h
+@@ -12,6 +12,7 @@
+ #include <QJsonObject>
+ #include <QJsonValue>
+ #include <QQuickPaintedItem>
++#include <QMutex>
+ 
+ #include "common.h"
+ 
+@@ -38,9 +39,8 @@ public:
+ 
+     void markedUpdate(const QRect &rect = QRect());
+     void setActive(bool active); // NOT QML ACCESSIBLE!
+-    bool isMidPaint;
+     virtual void paint(QPainter *painter);
+-    void associateSHM(QImage *image);
++    void associateSHM(QImage image);
+ 
+     QPoint convertPointToQTFBPixels(const QPointF &input);
+ 
+@@ -73,5 +73,7 @@ private:
+     bool checkingGestureDragDown = false;
+     bool refreshedScreenAlready = false;
+ 
+-    QImage *image = nullptr;
++    QImage imageSnapshot() const;
++    mutable QMutex imageMutex;
++    QImage image;
+ };
+diff --git a/src/qtfb/fbmanagement.cpp b/src/qtfb/fbmanagement.cpp
+index 038bec3..98cc852 100644
+--- a/src/qtfb/fbmanagement.cpp
++++ b/src/qtfb/fbmanagement.cpp
+@@ -3,6 +3,7 @@
+ #include "common.h"
+ #include <iostream>
+ #include <mutex>
++#include <QCoreApplication>
+ /*
+ My implementation of the shared QT-framebuffer idea works by:
+ - Having all the clients communicate with the server via a UNIX socket, which governs
+@@ -23,30 +24,31 @@ My implementation of the shared QT-framebuffer idea works by:
+ static std::mutex globalBackendsListMutex;
+ #define SYNCHRONIZE const std::lock_guard<std::mutex> __lock(globalBackendsListMutex)
+ 
+-void tryToMatchUp(qtfb::FBKey key){
+-    // Try to find the client in the clients' list
+-    if(qtfb::management::connections.find(key) == qtfb::management::connections.end()) {
+-        return; // Client not found
+-    }
+-    if(qtfb::management::framebuffers.find(key) == qtfb::management::framebuffers.end()) {
+-        return; // Framebuffer not found
+-    }
+-    // Both of them found! Assign one to another.
+-    qtfb::management::ClientBackend *connection = qtfb::management::connections[key];
+-    QPointer<FBController> controller = qtfb::management::framebuffers[key];
+-    if(connection->shm == NULL || controller.isNull()){
+-        CERR << "Invalid state: Cannot have an partially-associated connection in the connections map!" << std::endl;
+-        return;
+-    }
+-    controller->associateSHM(connection->image);
+-    CERR << "Associated connection <==> framebuffer " << key << std::endl;
++// Resolve controllers only on their GUI thread. The queue owns no worker-stack
++// connection pointers, and the copied QImage owns its SHM until the last paint.
++void tryToMatchUp(qtfb::FBKey key) {
++    QMetaObject::invokeMethod(QCoreApplication::instance(), [key]() {
++        QPointer<FBController> controller;
++        QImage image;
++        {
++            SYNCHRONIZE;
++            const auto frame = qtfb::management::framebuffers.find(key);
++            if (frame == qtfb::management::framebuffers.end()) return;
++            controller = frame->second;
++            const auto backend = qtfb::management::connections.find(key);
++            if (backend != qtfb::management::connections.end() && backend->second->image)
++                image = *backend->second->image;
++        }
++        if (controller) controller->associateSHM(std::move(image));
++    }, Qt::QueuedConnection);
+ }
+ 
+ // Never wait for messages to come through. Not all clients have to be actively waiting for new input.
+ // If the socket's buffer was to overflow, simply drop the message.
+-#define SEND(message) send(connection->clientFD, &message, sizeof(message), MSG_DONTWAIT)
++#define SEND(message) send(connection->clientFD, &message, sizeof(message), MSG_DONTWAIT | MSG_NOSIGNAL)
+ 
+ void qtfb::management::registerController(FBKey key, QPointer<FBController> controller) {
++    SYNCHRONIZE;
+     if(key == -1) return;
+     if(qtfb::management::framebuffers.find(key) != qtfb::management::framebuffers.end()) {
+         CERR << "Violation: Tried to attach to an already defined framebuffer (" << key << "). Please change the framebufferID!" << std::endl;
+@@ -59,11 +61,13 @@ void qtfb::management::registerController(FBKey key, QPointer<FBController> cont
+ }
+ 
+ bool qtfb::management::isControllerAssociated(FBKey key) {
++    SYNCHRONIZE;
+     auto position = qtfb::management::connections.find(key);
+     return position != qtfb::management::connections.end();
+ }
+ 
+ void qtfb::management::unregisterController(FBKey key) {
++    SYNCHRONIZE;
+     auto position = qtfb::management::framebuffers.find(key);
+     if(position != qtfb::management::framebuffers.end()) {
+         qtfb::management::framebuffers.erase(position);
+@@ -71,6 +75,22 @@ void qtfb::management::unregisterController(FBKey key) {
+     CERR << "Unregistered framebuffer controller ID: " << key << std::endl;
+ }
+ 
++struct SharedFrameStorage {
++    unsigned char *address;
++    size_t size;
++    int fd;
++    int key;
++};
++
++static void releaseSharedFrame(void *opaque) {
++    auto *storage = static_cast<SharedFrameStorage *>(opaque);
++    munmap(storage->address, storage->size);
++    close(storage->fd);
++    FORMAT_SHM(name, storage->key);
++    shm_unlink(name);
++    delete storage;
++}
++
+ static bool createSHM(qtfb::management::ClientBackend *connection, int shmType, int width, int height) {
+     size_t shmSize;
+     QImage::Format format;
+@@ -125,6 +145,7 @@ static bool createSHM(qtfb::management::ClientBackend *connection, int shmType,
+     if(connection->shm == MAP_FAILED) {
+         CERR << "Failed to mmap() the SHM for framebuffer!" << std::endl;
+         shm_unlink(shmText);
++        close(connection->shmFD);
+         connection->shmFD = -1;
+         connection->shm = NULL;
+         connection->shmSize = 0;
+@@ -136,7 +157,8 @@ static bool createSHM(qtfb::management::ClientBackend *connection, int shmType,
+     memset(connection->shm, 0xFF, shmSize);
+     CERR << "Defined SHM (" << shmSize << " bytes) at " << (void *) connection->shm << std::endl;
+     // We have the SHM defined.
+-    connection->image = new QImage(connection->shm, width, height, bpl, format, nullptr, nullptr);
++    auto *storage = new SharedFrameStorage{connection->shm, shmSize, connection->shmFD, connection->shmKey};
++    connection->image = new QImage(connection->shm, width, height, bpl, format, releaseSharedFrame, storage);
+ 
+     return true;
+ }
+@@ -160,6 +182,8 @@ static bool createDefaultSHM(qtfb::management::ClientBackend *connection, int sh
+ 
+ static int handleInitialize(qtfb::management::ClientConnection *connection, qtfb::ClientMessage *inbound, int messageType) {
+     SYNCHRONIZE;
++    // Register each stack connection once; duplicates would survive close.
++    if (connection->fbKey != -1 || inbound->init.framebufferKey < 0) return RESP_ERR;
+     connection->fbKey = inbound->init.framebufferKey;
+     if(qtfb::management::connections.find(inbound->init.framebufferKey) != qtfb::management::connections.end()) {
+         // If there already exists a backend like that, check if the parameters are the same
+@@ -219,56 +243,45 @@ static int handleInitialize(qtfb::management::ClientConnection *connection, qtfb
+     return RESP_OK;
+ }
+ 
+-static int handleUpdateRegion(QPointer<FBController> controller, qtfb::management::ClientConnection *connection, qtfb::ClientMessage *inbound) {
+-    int x, y, w, h;
+-    switch(inbound->update.type) {
+-        case UPDATE_ALL:
+-            CERR << "Updated all of framebuffer " << connection->fbKey << std::endl;
+-            QMetaObject::invokeMethod(controller, [controller]() {
+-                controller->markedUpdate();
+-            }, Qt::QueuedConnection);
+-            break;
+-        case UPDATE_PARTIAL:
+-            CERR << "Updated region " << inbound->update.x << " " << inbound->update.y << " " << inbound->update.w << " " << inbound->update.h << " of framebuffer " << connection->fbKey << std::endl;
+-            x = inbound->update.x, y = inbound->update.y, w = inbound->update.w, h = inbound->update.h;
+-            QMetaObject::invokeMethod(controller, [controller, x, y, w, h]() {
+-                controller->markedUpdate(QRect(
+-                    x,
+-                    y,
+-                    w,
+-                    h
+-                ));
+-            }, Qt::QueuedConnection);
+-            break;
+-        default:
+-            CERR << "Unknown update method! " << inbound->update.type << " <-- " << inbound->update.x << " " << inbound->update.y << " " << inbound->update.w << " " << inbound->update.h << " of framebuffer " << connection->fbKey << std::endl;
+-    }
+-
+-    return RESP_OK;
+-}
+-
+-static int invokeOnConnectedFramebuffer(qtfb::management::ClientConnection *connection, std::function<int(QPointer<FBController>)> consumer) {
+-    if(connection->fbKey == -1){
+-        CERR << "Cannot update region of an uninitialized connection!" << std::endl;
++static int queueControllerMessage(qtfb::management::ClientConnection *connection,
++                                  const qtfb::ClientMessage &message) {
++    if (connection->fbKey == -1) return RESP_ERR;
++    if (message.type == MESSAGE_SET_REFRESH_MODE && (message.refreshMode < 0 || message.refreshMode > 4))
+         return RESP_ERR;
++    const auto key = connection->fbKey;
++    qint64 imageKey = 0;
++    {
++        SYNCHRONIZE;
++        const auto backend = qtfb::management::connections.find(key);
++        if (backend == qtfb::management::connections.end() || !backend->second->image) return RESP_ERR;
++        imageKey = backend->second->image->cacheKey();
+     }
+-    if(qtfb::management::framebuffers.find(connection->fbKey) != qtfb::management::framebuffers.end()) {
+-        QPointer<FBController> controller = qtfb::management::framebuffers[connection->fbKey];
+-        if(controller.isNull()) {
+-            return RESP_OK;
++    QMetaObject::invokeMethod(QCoreApplication::instance(), [key, imageKey, message]() {
++        QPointer<FBController> controller;
++        {
++            SYNCHRONIZE;
++            const auto backend = qtfb::management::connections.find(key);
++            const auto frame = qtfb::management::framebuffers.find(key);
++            if (backend == qtfb::management::connections.end() || !backend->second->image
++                || backend->second->image->cacheKey() != imageKey
++                || frame == qtfb::management::framebuffers.end()) return;
++            controller = frame->second;
+         }
+-        return consumer(controller);
+-    } else {
+-        CERR << "Could not find the framebuffer to act upon." << std::endl;
+-    }
++        if (!controller) return;
++        switch (message.type) {
++            case MESSAGE_UPDATE:
++                if (message.update.type == UPDATE_ALL) controller->markedUpdate();
++                else if (message.update.type == UPDATE_PARTIAL)
++                    controller->markedUpdate(QRect(message.update.x, message.update.y,
++                                                  message.update.w, message.update.h));
++                break;
++            case MESSAGE_SET_REFRESH_MODE: controller->setRefreshMode(message.refreshMode); break;
++            case MESSAGE_REQUEST_FULL_REFRESH: emit controller->requestFullRefresh(); break;
++        }
++    }, Qt::QueuedConnection);
+     return RESP_OK;
+ }
+ 
+-static inline void safetyWaitForEventLoopToCatchUp() {
+-    using namespace std::chrono_literals;
+-    std::this_thread::sleep_for(1s);
+-}
+-
+ static void managementClientThread(int incomingFD) {
+     qtfb::management::ClientConnection connection;
+     connection.clientFD = incomingFD;
+@@ -284,36 +297,12 @@ static void managementClientThread(int incomingFD) {
+                 status = handleInitialize(&connection, &inboundMessage, inboundMessage.type);
+                 break;
+             case MESSAGE_UPDATE:
+-                status = invokeOnConnectedFramebuffer(&connection, [&](auto controller) {
+-                    return handleUpdateRegion(controller, &connection, &inboundMessage);
+-                });
+-                break;
+-            case MESSAGE_TERMINATE:
+-                CERR << "The client requested closing the connection." << std::endl;
+-                goto close;
+             case MESSAGE_SET_REFRESH_MODE:
+-                status = invokeOnConnectedFramebuffer(&connection, [=](auto controller) {
+-                    int refresh = inboundMessage.refreshMode;
+-                    if(refresh > 4 || refresh < 0) {
+-                        CERR << "The client tried to set refresh mode to an undefined value!" << std::endl;
+-                        return RESP_ERR;
+-                    }
+-                    QMetaObject::invokeMethod(controller, [controller, refresh]() {
+-                        controller->setRefreshMode(refresh);
+-                    });
+-                    safetyWaitForEventLoopToCatchUp();
+-                    return RESP_OK;
+-                });
+-                break;
+             case MESSAGE_REQUEST_FULL_REFRESH:
+-                status = invokeOnConnectedFramebuffer(&connection, [=](auto controller) {
+-                    QMetaObject::invokeMethod(controller, [controller]() {
+-                        emit controller->requestFullRefresh();
+-                    });
+-                    safetyWaitForEventLoopToCatchUp();
+-                    return RESP_OK;
+-                });
++                status = queueControllerMessage(&connection, inboundMessage);
+                 break;
++            case MESSAGE_TERMINATE:
++                goto close;
+             default:
+                 CERR << "Client has tried to send a message with an invalid type: " << inboundMessage.type << std::endl;
+                 goto close;
+@@ -323,65 +312,44 @@ static void managementClientThread(int incomingFD) {
+             goto close;
+         }
+     }
+-    close: SYNCHRONIZE;
+-    qtfb::management::ClientBackend *backendToKill = NULL;
+-    if(connection.fbKey != -1) {
+-        auto position = qtfb::management::connections.find(connection.fbKey);
+-        if(position != qtfb::management::connections.end()){
+-            // There can be more than one backend. Was this the last?
+-            qtfb::management::ClientBackend *backend = qtfb::management::connections[connection.fbKey];
+-            auto position2 = std::find(backend->connections.begin(), backend->connections.end(), &connection);
+-            if(position2 != backend->connections.end()) {
+-                backend->connections.erase(position2);
+-            } else {
+-                CERR << "Cannot erase connection in list!" << std::endl;
+-            }
+-            if(backend->connections.empty()) {
+-                backendToKill = backend; // Delay destruction of the backend to after the (potential) object had dissotiated.
++    close:
++    qtfb::management::ClientBackend *backendToKill = nullptr;
++    {
++        SYNCHRONIZE;
++        const auto position = qtfb::management::connections.find(connection.fbKey);
++        if (position != qtfb::management::connections.end()) {
++            auto *backend = position->second;
++            const auto member = std::find(backend->connections.begin(), backend->connections.end(), &connection);
++            if (member != backend->connections.end()) backend->connections.erase(member);
++            if (backend->connections.empty()) {
++                backendToKill = backend;
+                 qtfb::management::connections.erase(position);
+             }
+         }
+     }
+-
+-    if(connection.fbKey != -1 && backendToKill){
+-        if(qtfb::management::framebuffers.find(connection.fbKey) != qtfb::management::framebuffers.end()) {
+-            // The client that died was associated with a framebuffer!
+-            QPointer<FBController> controller = qtfb::management::framebuffers[connection.fbKey];
+-            if(!controller.isNull()) {
+-                // Disassociate
+-                while(controller->isMidPaint) {
+-                    usleep(1000);
+-                    if(controller.isNull()) {
+-                        // The controller had been removed as we were waiting for the repaint to stop
+-                        goto continueDeletion;
+-                    }
+-                }
+-
+-                controller->associateSHM(NULL);
+-                CERR << "Disassociating framebuffer " << connection.fbKey << std::endl;
+-            }
+-        }
+-    }
+-
+-    continueDeletion:
+-
+-    CERR << "Closing client socket " << incomingFD << std::endl;
++    // No sender can still obtain the worker's stack connection. Never wait for
++    // GUI painting while holding the global mutex (or from the worker at all).
+     close(incomingFD);
+-    if(backendToKill != NULL) delete backendToKill;
++    if (backendToKill) {
++        tryToMatchUp(connection.fbKey);
++        delete backendToKill;
++    }
+ }
+ 
+ qtfb::management::ClientBackend::~ClientBackend() {
+-    delete image;
+-    if(shm != NULL) {
+-        munmap(shm, shmSize);
+-    }
+-    if(translationShm != NULL){
+-        delete[] translationShm;
+-    }
+-    if(shmKey != -1) {
+-        FORMAT_SHM(shmName, shmKey);
+-        shm_unlink(shmName);
++    if (image) {
++        // The QImage cleanup callback releases mapping/fd/name only after the
++        // controller and every render snapshot have also dropped their copies.
++        delete image;
++    } else {
++        if (shm) munmap(shm, shmSize);
++        if (shmFD >= 0) close(shmFD);
++        if (shmKey != -1) {
++            FORMAT_SHM(shmName, shmKey);
++            shm_unlink(shmName);
++        }
+     }
++    delete[] translationShm;
+ }
+ 
+ static void managementMainThread(){

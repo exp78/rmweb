@@ -1,0 +1,4 @@
+# Unified-diff context preserves upstream whitespace and pinned patch hashes.
+# -text keeps patch bytes LF-exact on any checkout: CRLF conversion would break
+# their recorded sha256 receipts.
+*.patch -text -whitespace
