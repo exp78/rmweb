@@ -1,0 +1,1273 @@
+diff --git a/Source/WebCore/CMakeLists.txt b/Source/WebCore/CMakeLists.txt
+--- a/Source/WebCore/CMakeLists.txt
++++ b/Source/WebCore/CMakeLists.txt
+@@ -69,6 +69,7 @@
+     "${WEBCORE_DIR}/Modules/web-locks"
+     "${WEBCORE_DIR}/Modules/webaudio"
+     "${WEBCORE_DIR}/Modules/webauthn"
++    "${WEBCORE_DIR}/Modules/webauthn/apdu"
+     "${WEBCORE_DIR}/Modules/webauthn/cbor"
+     "${WEBCORE_DIR}/Modules/webauthn/fido"
+     "${WEBCORE_DIR}/Modules/webcodecs"
+diff --git a/Source/WebCore/Headers.cmake b/Source/WebCore/Headers.cmake
+--- a/Source/WebCore/Headers.cmake
++++ b/Source/WebCore/Headers.cmake
+@@ -355,7 +355,9 @@
+     Modules/cookie-store/CookieChangeSubscription.h
+     Modules/cookie-store/CookieStoreGetOptions.h
+ 
++    Modules/credentialmanagement/BasicCredential.h
+     Modules/credentialmanagement/CredentialRequestOptions.h
++    Modules/credentialmanagement/MediationRequirement.h
+ 
+     Modules/encryptedmedia/CDMClient.h
+     Modules/encryptedmedia/MediaKeySystemClient.h
+@@ -629,18 +631,25 @@
+     Modules/webauthn/AuthenticationExtensionsClientInputsJSON.h
+     Modules/webauthn/AuthenticationExtensionsClientOutputs.h
+     Modules/webauthn/AuthenticationExtensionsClientOutputsJSON.h
++    Modules/webauthn/AuthenticatorAttachment.h
+     Modules/webauthn/AuthenticatorCoordinator.h
+     Modules/webauthn/AuthenticatorCoordinatorClient.h
+     Modules/webauthn/AuthenticatorResponseData.h
++    Modules/webauthn/AuthenticatorSelectionCriteria.h
+     Modules/webauthn/AuthenticatorTransport.h
++    Modules/webauthn/CredentialPropertiesOutput.h
+     Modules/webauthn/PublicKeyCredentialCreationOptions.h
+     Modules/webauthn/PublicKeyCredentialCreationOptionsJSON.h
+     Modules/webauthn/PublicKeyCredentialDescriptor.h
+     Modules/webauthn/PublicKeyCredentialDescriptorJSON.h
++    Modules/webauthn/PublicKeyCredentialEntity.h
+     Modules/webauthn/PublicKeyCredentialParameters.h
+     Modules/webauthn/PublicKeyCredentialRequestOptions.h
+     Modules/webauthn/PublicKeyCredentialRequestOptionsJSON.h
++    Modules/webauthn/PublicKeyCredentialRpEntity.h
+     Modules/webauthn/PublicKeyCredentialType.h
++    Modules/webauthn/PublicKeyCredentialUserEntity.h
++    Modules/webauthn/ResidentKeyRequirement.h
+     Modules/webauthn/UserVerificationRequirement.h
+     Modules/webauthn/WebAuthenticationConstants.h
+     Modules/webauthn/WebAuthenticationUtils.h
+@@ -2756,6 +2765,8 @@
+     testing/MockGamepad.h
+     testing/MockGamepadProvider.h
+ 
++    testing/MockWebAuthenticationConfiguration.h
++
+     workers/ScriptBuffer.h
+     workers/WorkerAnimationController.h
+     workers/WorkerDebuggerProxy.h
+diff --git a/Source/WebCore/Modules/identity/CredentialRequestCoordinator.cpp b/Source/WebCore/Modules/identity/CredentialRequestCoordinator.cpp
+--- a/Source/WebCore/Modules/identity/CredentialRequestCoordinator.cpp
++++ b/Source/WebCore/Modules/identity/CredentialRequestCoordinator.cpp
+@@ -265,7 +265,7 @@
+     Ref credential = DigitalCredential::create(
+         { parsedObject->vm(), parsedObject },
+         responseData.protocol);
+-    m_currentPromise->resolve(WTFMove(credential.ptr()));
++    m_currentPromise->resolve(credential.ptr());
+     m_currentPromise.reset();
+ }
+ 
+diff --git a/Source/WebCore/Modules/webauthn/AuthenticatorAssertionResponse.cpp b/Source/WebCore/Modules/webauthn/AuthenticatorAssertionResponse.cpp
+--- a/Source/WebCore/Modules/webauthn/AuthenticatorAssertionResponse.cpp
++++ b/Source/WebCore/Modules/webauthn/AuthenticatorAssertionResponse.cpp
+@@ -49,10 +49,12 @@
+     return create(ArrayBuffer::create(rawId), ArrayBuffer::create(authenticatorData), ArrayBuffer::create(signature), WTFMove(userhandleBuffer), std::nullopt, attachment);
+ }
+ 
++#if PLATFORM(COCOA)
+ Ref<AuthenticatorAssertionResponse> AuthenticatorAssertionResponse::create(Ref<ArrayBuffer>&& rawId, RefPtr<ArrayBuffer>&& userHandle, String&& name, SecAccessControlRef accessControl, AuthenticatorAttachment attachment)
+ {
+     return adoptRef(*new AuthenticatorAssertionResponse(WTFMove(rawId), WTFMove(userHandle), WTFMove(name), accessControl, attachment));
+ }
++#endif
+ 
+ void AuthenticatorAssertionResponse::setAuthenticatorData(Vector<uint8_t>&& authenticatorData)
+ {
+@@ -67,6 +69,7 @@
+ {
+ }
+ 
++#if PLATFORM(COCOA)
+ AuthenticatorAssertionResponse::AuthenticatorAssertionResponse(Ref<ArrayBuffer>&& rawId, RefPtr<ArrayBuffer>&& userHandle, String&& name, SecAccessControlRef accessControl, AuthenticatorAttachment attachment)
+     : AuthenticatorResponse(WTFMove(rawId), attachment)
+     , m_userHandle(WTFMove(userHandle))
+@@ -74,6 +77,7 @@
+     , m_accessControl(accessControl)
+ {
+ }
++#endif
+ 
+ AuthenticatorResponseData AuthenticatorAssertionResponse::data() const
+ {
+diff --git a/Source/WebCore/Modules/webauthn/AuthenticatorAssertionResponse.h b/Source/WebCore/Modules/webauthn/AuthenticatorAssertionResponse.h
+--- a/Source/WebCore/Modules/webauthn/AuthenticatorAssertionResponse.h
++++ b/Source/WebCore/Modules/webauthn/AuthenticatorAssertionResponse.h
+@@ -29,10 +29,11 @@
+ 
+ #include "AuthenticationResponseJSON.h"
+ #include "AuthenticatorResponse.h"
++#if PLATFORM(COCOA)
+ #include <wtf/RetainPtr.h>
+ #include <wtf/spi/cocoa/SecuritySPI.h>
+-
+ OBJC_CLASS LAContext;
++#endif
+ 
+ namespace WebCore {
+ 
+@@ -40,7 +41,9 @@
+ public:
+     static Ref<AuthenticatorAssertionResponse> create(Ref<ArrayBuffer>&& rawId, Ref<ArrayBuffer>&& authenticatorData, Ref<ArrayBuffer>&& signature, RefPtr<ArrayBuffer>&& userHandle, std::optional<AuthenticationExtensionsClientOutputs>&&, AuthenticatorAttachment);
+     WEBCORE_EXPORT static Ref<AuthenticatorAssertionResponse> create(const Vector<uint8_t>& rawId, const Vector<uint8_t>& authenticatorData, const Vector<uint8_t>& signature,  const Vector<uint8_t>& userHandle, AuthenticatorAttachment);
++#if PLATFORM(COCOA)
+     WEBCORE_EXPORT static Ref<AuthenticatorAssertionResponse> create(Ref<ArrayBuffer>&& rawId, RefPtr<ArrayBuffer>&& userHandle, String&& name, SecAccessControlRef, AuthenticatorAttachment);
++#endif
+     virtual ~AuthenticatorAssertionResponse() = default;
+ 
+     ArrayBuffer* authenticatorData() const { return m_authenticatorData.get(); }
+@@ -49,10 +52,14 @@
+     const String& name() const { return m_name; }
+     const String& displayName() const { return m_displayName; }
+     size_t numberOfCredentials() const { return m_numberOfCredentials; }
++#if PLATFORM(COCOA)
+     SecAccessControlRef accessControl() const { return m_accessControl.get(); }
++#endif
+     const String& group() const { return m_group; }
+     bool synchronizable() const { return m_synchronizable; }
++#if PLATFORM(COCOA)
+     LAContext * laContext() const { return m_laContext.get(); }
++#endif
+     RefPtr<ArrayBuffer> largeBlob() const { return m_largeBlob; }
+     const String& accessGroup() const { return m_accessGroup; }
+ 
+@@ -63,7 +70,9 @@
+     void setNumberOfCredentials(size_t numberOfCredentials) { m_numberOfCredentials = numberOfCredentials; }
+     void setGroup(const String& group) { m_group = group; }
+     void setSynchronizable(bool synchronizable) { m_synchronizable = synchronizable; }
++#if PLATFORM(COCOA)
+     void setLAContext(LAContext *context) { m_laContext = context; }
++#endif
+     void setLargeBlob(Ref<ArrayBuffer>&& largeBlob) { m_largeBlob = WTFMove(largeBlob); }
+     void setAccessGroup(const String& accessGroup) { m_accessGroup = accessGroup; }
+ 
+@@ -71,7 +80,9 @@
+ 
+ private:
+     AuthenticatorAssertionResponse(Ref<ArrayBuffer>&&, Ref<ArrayBuffer>&&, Ref<ArrayBuffer>&&, RefPtr<ArrayBuffer>&&, AuthenticatorAttachment);
++#if PLATFORM(COCOA)
+     AuthenticatorAssertionResponse(Ref<ArrayBuffer>&&, RefPtr<ArrayBuffer>&&, String&&, SecAccessControlRef, AuthenticatorAttachment);
++#endif
+ 
+     Type type() const final { return Type::Assertion; }
+     AuthenticatorResponseData data() const final;
+@@ -85,8 +96,10 @@
+     String m_group;
+     bool m_synchronizable;
+     size_t m_numberOfCredentials { 0 };
++#if PLATFORM(COCOA)
+     RetainPtr<SecAccessControlRef> m_accessControl;
+     RetainPtr<LAContext> m_laContext;
++#endif
+     RefPtr<ArrayBuffer> m_largeBlob;
+     String m_accessGroup;
+ };
+diff --git a/Source/WebCore/Modules/webauthn/PublicKeyCredentialCreationOptionsJSON.h b/Source/WebCore/Modules/webauthn/PublicKeyCredentialCreationOptionsJSON.h
+--- a/Source/WebCore/Modules/webauthn/PublicKeyCredentialCreationOptionsJSON.h
++++ b/Source/WebCore/Modules/webauthn/PublicKeyCredentialCreationOptionsJSON.h
+@@ -27,6 +27,9 @@
+ 
+ #if ENABLE(WEB_AUTHN)
+ #include "AuthenticationExtensionsClientInputsJSON.h"
++#include "AuthenticatorSelectionCriteria.h"
++#include "PublicKeyCredentialDescriptorJSON.h"
++#include "PublicKeyCredentialParameters.h"
+ #include "PublicKeyCredentialRpEntity.h"
+ #include "PublicKeyCredentialUserEntityJSON.h"
+ #include <wtf/Forward.h>
+@@ -35,9 +38,6 @@
+ 
+ enum class AuthenticatorAttachment : uint8_t;
+ enum class AttestationConveyancePreference : uint8_t;
+-struct AuthenticatorSelectionCriteria;
+-struct PublicKeyCredentialDescriptorJSON;
+-struct PublicKeyCredentialParameters;
+ 
+ struct PublicKeyCredentialCreationOptionsJSON {
+     PublicKeyCredentialRpEntity rp;
+diff --git a/Source/WebCore/PlatformWPE.cmake b/Source/WebCore/PlatformWPE.cmake
+--- a/Source/WebCore/PlatformWPE.cmake
++++ b/Source/WebCore/PlatformWPE.cmake
+@@ -147,3 +147,9 @@
+ list(APPEND WebCore_PRIVATE_DEFINITIONS
+      BITMAP_TEXTURE_POOL_MAX_SIZE_IN_MB=80
+ )
++
++if (ENABLE_WEB_AUTHN)
++    list(APPEND WebCore_SOURCES
++        Modules/webauthn/AuthenticationExtensionsClientOutputs.cpp
++    )
++endif ()
+diff --git a/Source/WebCore/Sources.txt b/Source/WebCore/Sources.txt
+--- a/Source/WebCore/Sources.txt
++++ b/Source/WebCore/Sources.txt
+@@ -457,7 +457,6 @@
+ Modules/webauthn/fido/FidoParsingUtils.cpp
+ Modules/webauthn/fido/Pin.cpp
+ Modules/webauthn/fido/U2fCommandConstructor.cpp
+-Modules/webauthn/fido/U2fResponseConverter.cpp
+ Modules/webcodecs/VideoColorSpace.cpp
+ Modules/webcodecs/WebCodecsAudioDecoder.cpp
+ Modules/webcodecs/WebCodecsAudioData.cpp
+diff --git a/Source/WebCore/SourcesCocoa.txt b/Source/WebCore/SourcesCocoa.txt
+--- a/Source/WebCore/SourcesCocoa.txt
++++ b/Source/WebCore/SourcesCocoa.txt
+@@ -135,6 +135,7 @@
+ Modules/speech/cocoa/WebSpeechRecognizerTask.mm
+ Modules/speech/cocoa/WebSpeechRecognizerTaskMock.mm
+ Modules/system-preview/ARKitBadgeSystemImage.mm
++Modules/webauthn/fido/U2fResponseConverter.cpp
+ Modules/webdatabase/cocoa/DatabaseManagerCocoa.mm
+ Modules/webxr/WebXROpaqueFramebufferCocoa.cpp
+ accessibility/cocoa/AXCoreObjectCocoa.mm
+diff --git a/Source/WebCore/platform/LocalizedStrings.cpp b/Source/WebCore/platform/LocalizedStrings.cpp
+--- a/Source/WebCore/platform/LocalizedStrings.cpp
++++ b/Source/WebCore/platform/LocalizedStrings.cpp
+@@ -1534,7 +1534,7 @@
+ }
+ #endif
+ 
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && PLATFORM(COCOA)
+ // On macOS, Touch ID prompt is not guaranteed to show on top of the UI client, and therefore additional
+ // information is provided to help users to make decisions.
+ String makeCredentialTouchIDPromptTitle(const String& bundleName, const String& domain)
+@@ -1551,7 +1551,7 @@
+ {
+     return WEB_UI_STRING("Continue with Touch ID.", "Continue with Touch ID.");
+ }
+-#endif // ENABLE(WEB_AUTHN)
++#endif // ENABLE(WEB_AUTHN) && PLATFORM(COCOA)
+ 
+ String pdfPasswordFormTitle()
+ {
+diff --git a/Source/WebCore/platform/LocalizedStrings.h b/Source/WebCore/platform/LocalizedStrings.h
+--- a/Source/WebCore/platform/LocalizedStrings.h
++++ b/Source/WebCore/platform/LocalizedStrings.h
+@@ -402,7 +402,7 @@
+     WEBCORE_EXPORT String inputWeekLabel(const DateComponents&);
+ #endif
+ 
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && PLATFORM(COCOA)
+     WEBCORE_EXPORT String makeCredentialTouchIDPromptTitle(const String& bundleName, const String& domain);
+     WEBCORE_EXPORT String getAssertionTouchIDPromptTitle(const String& bundleName, const String& domain);
+     WEBCORE_EXPORT String genericTouchIDPromptTitle();
+diff --git a/Source/WebKit/PlatformWPE.cmake b/Source/WebKit/PlatformWPE.cmake
+--- a/Source/WebKit/PlatformWPE.cmake
++++ b/Source/WebKit/PlatformWPE.cmake
+@@ -211,6 +211,7 @@
+     ${WEBKIT_DIR}/UIProcess/API/glib/WebKitUserMessage.h.in
+     ${WEBKIT_DIR}/UIProcess/API/glib/WebKitWebContext.h.in
+     ${WEBKIT_DIR}/UIProcess/API/glib/WebKitWebResource.h.in
++    ${WEBKIT_DIR}/UIProcess/API/glib/WebKitWebAuthenticationRequest.h.in
+     ${WEBKIT_DIR}/UIProcess/API/glib/WebKitWebView.h.in
+     ${WEBKIT_DIR}/UIProcess/API/glib/WebKitWebViewSessionState.h.in
+     ${WEBKIT_DIR}/UIProcess/API/glib/WebKitWebsiteData.h.in
+@@ -300,6 +301,7 @@
+     "-DUSE_GTK4=0"
+     "-DENABLE_2022_GLIB_API=$<BOOL:${ENABLE_2022_GLIB_API}>"
+     "-DENABLE_WPE_PLATFORM=$<BOOL:${ENABLE_WPE_PLATFORM}>"
++    "-DENABLE_WEB_AUTHN=$<BOOL:${ENABLE_WEB_AUTHN}>"
+     "-DUSE_GI_FINISH_FUNC_ANNOTATION=${USE_GI_FINISH_FUNC_ANNOTATION}"
+ )
+ unset(USE_GI_FINISH_FUNC_ANNOTATION)
+@@ -487,6 +489,12 @@
+     WebProcess/glib/SystemSettingsManager
+ )
+ 
++if (ENABLE_WEB_AUTHN)
++    list(APPEND WebKit_MESSAGES_IN_FILES
++        UIProcess/WebAuthentication/WebAuthenticatorCoordinatorProxy
++    )
++endif ()
++
+ if (ENABLE_WPE_PLATFORM)
+     list(APPEND WebKit_PRIVATE_INCLUDE_DIRECTORIES
+         "${WPEPlatform_DERIVED_SOURCES_DIR}"
+diff --git a/Source/WebKit/Sources.txt b/Source/WebKit/Sources.txt
+--- a/Source/WebKit/Sources.txt
++++ b/Source/WebKit/Sources.txt
+@@ -492,8 +492,6 @@
+ UIProcess/API/APIUIClient.cpp
+ UIProcess/API/APIUserScript.cpp
+ UIProcess/API/APIUserStyleSheet.cpp
+-UIProcess/API/APIWebAuthenticationAssertionResponse.cpp
+-UIProcess/API/APIWebAuthenticationPanel.cpp
+ UIProcess/API/APIWebPushDaemonConnection.cpp
+ UIProcess/API/APIWebsitePolicies.cpp
+ UIProcess/API/APIWindowFeatures.cpp
+@@ -612,19 +610,8 @@
+ UIProcess/UserContent/WebScriptMessageHandler.cpp
+ UIProcess/UserContent/WebUserContentControllerProxy.cpp
+ 
+-UIProcess/WebAuthentication/fido/CtapNfcDriver.cpp
+-UIProcess/WebAuthentication/fido/FidoAuthenticator.cpp
+-UIProcess/WebAuthentication/fido/FidoService.cpp
+-UIProcess/WebAuthentication/fido/U2fAuthenticator.cpp
+-
+-UIProcess/WebAuthentication/Mock/MockAuthenticatorManager.cpp
+-UIProcess/WebAuthentication/Mock/MockHidConnection.cpp
+-UIProcess/WebAuthentication/Mock/MockHidService.cpp
+-
+-UIProcess/WebAuthentication/AuthenticatorTransportService.cpp
+-UIProcess/WebAuthentication/Authenticator.cpp
+-UIProcess/WebAuthentication/WebAuthenticatorCoordinatorProxy.cpp
+-UIProcess/WebAuthentication/WebAuthenticationRequestData.cpp
++
++
+ 
+ UIProcess/WebsiteData/WebDeviceOrientationAndMotionAccessController.cpp
+ UIProcess/WebsiteData/WebsiteDataRecord.cpp
+diff --git a/Source/WebKit/SourcesCocoa.txt b/Source/WebKit/SourcesCocoa.txt
+--- a/Source/WebKit/SourcesCocoa.txt
++++ b/Source/WebKit/SourcesCocoa.txt
+@@ -929,3 +929,18 @@
+ WebSWServerToContextConnectionMessageReceiver.cpp
+ WebUserContentControllerMessageReceiver.cpp
+ WebUserContentControllerProxyMessageReceiver.cpp
++
++# Native Cocoa authenticator implementation.
++UIProcess/API/APIWebAuthenticationAssertionResponse.cpp
++UIProcess/API/APIWebAuthenticationPanel.cpp
++UIProcess/WebAuthentication/fido/CtapNfcDriver.cpp
++UIProcess/WebAuthentication/fido/FidoAuthenticator.cpp
++UIProcess/WebAuthentication/fido/FidoService.cpp
++UIProcess/WebAuthentication/fido/U2fAuthenticator.cpp
++UIProcess/WebAuthentication/Mock/MockAuthenticatorManager.cpp
++UIProcess/WebAuthentication/Mock/MockHidConnection.cpp
++UIProcess/WebAuthentication/Mock/MockHidService.cpp
++UIProcess/WebAuthentication/AuthenticatorTransportService.cpp
++UIProcess/WebAuthentication/Authenticator.cpp
++UIProcess/WebAuthentication/WebAuthenticatorCoordinatorProxy.cpp
++UIProcess/WebAuthentication/WebAuthenticationRequestData.cpp
+diff --git a/Source/WebKit/SourcesWPE.txt b/Source/WebKit/SourcesWPE.txt
+--- a/Source/WebKit/SourcesWPE.txt
++++ b/Source/WebKit/SourcesWPE.txt
+@@ -306,3 +306,6 @@
+ WebProcess/glib/WebProcessGLib.cpp
+ 
+ WebProcess/wpe/WebProcessMainWPE.cpp
++
++UIProcess/API/glib/WebKitWebAuthenticationRequest.cpp @no-unify
++UIProcess/WebAuthentication/wpe/WebAuthenticatorCoordinatorProxyWPE.cpp @no-unify
+diff --git a/Source/WebKit/UIProcess/API/APIUIClient.h b/Source/WebKit/UIProcess/API/APIUIClient.h
+--- a/Source/WebKit/UIProcess/API/APIUIClient.h
++++ b/Source/WebKit/UIProcess/API/APIUIClient.h
+@@ -56,6 +56,11 @@
+ #include <WebCore/PlatformXR.h>
+ #endif
+ 
++
++#if PLATFORM(WPE) && ENABLE(WEB_AUTHN)
++struct _WebKitWebAuthenticationRequest;
++#endif
++
+ namespace WebCore {
+ class RegistrableDomain;
+ class ResourceRequest;
+@@ -210,6 +215,9 @@
+     virtual void confirmPDFOpening(WebKit::WebPageProxy&, const WTF::URL&, WebKit::FrameInfoData&&, CompletionHandler<void(bool)>&& completionHandler) { completionHandler(true); }
+ 
+ #if ENABLE(WEB_AUTHN)
++#if PLATFORM(WPE)
++    virtual bool runWebAuthenticationRequest(WebKit::WebPageProxy&, _WebKitWebAuthenticationRequest*) { return false; }
++#endif
+     virtual void runWebAuthenticationPanel(WebKit::WebPageProxy&, WebAuthenticationPanel&, WebKit::WebFrameProxy&, WebKit::FrameInfoData&&, CompletionHandler<void(WebKit::WebAuthenticationPanelResult)>&& completionHandler) { completionHandler(WebKit::WebAuthenticationPanelResult::Unavailable); }
+ 
+     virtual void requestWebAuthenticationConditonalMediationRegistration(const WTF::String&, CompletionHandler<void(std::optional<bool>)>&& completionHandler)
+diff --git a/Source/WebKit/UIProcess/API/C/WKPage.cpp b/Source/WebKit/UIProcess/API/C/WKPage.cpp
+--- a/Source/WebKit/UIProcess/API/C/WKPage.cpp
++++ b/Source/WebKit/UIProcess/API/C/WKPage.cpp
+@@ -48,8 +48,10 @@
+ #include "APISerializedScriptValue.h"
+ #include "APISessionState.h"
+ #include "APIUIClient.h"
++#if !PLATFORM(WPE)
+ #include "APIWebAuthenticationPanel.h"
+ #include "APIWebAuthenticationPanelClient.h"
++#endif
+ #include "APIWebsitePolicies.h"
+ #include "APIWindowFeatures.h"
+ #include "AuthenticationChallengeDisposition.h"
+@@ -2260,7 +2262,7 @@
+             m_client.handleAutoplayEvent(toAPI(&page), toWKAutoplayEvent(event), toWKAutoplayEventFlags(flags), m_client.base.clientInfo);
+         }
+ 
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && !PLATFORM(WPE)
+         // The current method is specialized for WebKitTestRunner.
+         void runWebAuthenticationPanel(WebPageProxy&, API::WebAuthenticationPanel& panel, WebFrameProxy&, FrameInfoData&&, CompletionHandler<void(WebKit::WebAuthenticationPanelResult)>&& completionHandler) final
+         {
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitUIClient.cpp b/Source/WebKit/UIProcess/API/glib/WebKitUIClient.cpp
+--- a/Source/WebKit/UIProcess/API/glib/WebKitUIClient.cpp
++++ b/Source/WebKit/UIProcess/API/glib/WebKitUIClient.cpp
+@@ -68,6 +68,12 @@
+     }
+ 
+ private:
++#if PLATFORM(WPE) && ENABLE(WEB_AUTHN)
++    bool runWebAuthenticationRequest(WebPageProxy&, _WebKitWebAuthenticationRequest* request) final
++    {
++        return webkitWebViewRunWebAuthenticationRequest(m_webView, request);
++    }
++#endif
+     void createNewPage(WebPageProxy& page, Ref<API::PageConfiguration>&& configuration, Ref<API::NavigationAction>&& apiNavigationAction, CompletionHandler<void(RefPtr<WebPageProxy>&&)>&& completionHandler) final
+     {
+         WebKitNavigationAction navigationAction(WTFMove(apiNavigationAction));
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitWebAuthenticationRequest.cpp b/Source/WebKit/UIProcess/API/glib/WebKitWebAuthenticationRequest.cpp
+new file mode 100644
+--- /dev/null
++++ b/Source/WebKit/UIProcess/API/glib/WebKitWebAuthenticationRequest.cpp
+@@ -0,0 +1,189 @@
++/* Native WPE assertion provider. SPDX-License-Identifier: LGPL-2.0-or-later */
++#include "config.h"
++#if PLATFORM(WPE) && ENABLE(WEB_AUTHN)
++#include "WebKitWebAuthenticationRequestPrivate.h"
++#include <WebCore/AuthenticatorAttachment.h>
++#include <WebCore/AuthenticatorResponseData.h>
++#include <WebCore/ExceptionData.h>
++#include <WebCore/SecurityOrigin.h>
++#include <WebCore/WebAuthenticationUtils.h>
++#include <pal/crypto/CryptoDigest.h>
++#include <wtf/JSONValues.h>
++#include <wtf/MainThread.h>
++#include <wtf/glib/WTFGType.h>
++#include <wtf/text/Base64.h>
++#include <algorithm>
++#include <syslog.h>
++
++using namespace WebCore;
++using namespace WebKit;
++
++struct _WebKitWebAuthenticationRequestPrivate {
++    CString origin;
++    CString rpId;
++    CString optionsJSON;
++    GRefPtr<GBytes> clientHash;
++    GRefPtr<GCancellable> cancellable;
++    RefPtr<ArrayBuffer> clientJSON;
++    Vector<uint8_t> rpHash;
++    Vector<Vector<uint8_t>> allowedCredentials;
++    bool requireUV { false };
++    RequestCompletionHandler completion;
++    GSource* timeout { nullptr }; // The attached source holds a reference to this request.
++};
++
++WEBKIT_DEFINE_FINAL_TYPE(WebKitWebAuthenticationRequest, webkit_web_authentication_request, G_TYPE_OBJECT, GObject)
++
++static void webkit_web_authentication_request_class_init(WebKitWebAuthenticationRequestClass*)
++{
++}
++
++static std::span<const uint8_t> bytes(GBytes* value)
++{
++    if (!value)
++        return { };
++    gsize size = 0;
++    const auto* data = static_cast<const uint8_t*>(g_bytes_get_data(value, &size));
++    return { data, size };
++}
++
++static bool finish(WebKitWebAuthenticationRequest* request, const AuthenticatorResponseData& response, const ExceptionData& exception)
++{
++    ASSERT(isMainThread());
++    auto& state = *request->priv;
++    if (!state.completion)
++        return false;
++    GRefPtr protectedRequest = request;
++    auto completion = WTFMove(state.completion); // Invalidate before any reentrant callbacks.
++    if (auto* timeout = std::exchange(state.timeout, nullptr))
++        g_source_destroy(timeout);
++    if (!exception.message.isNull()) {
++        syslog(LOG_AUTHPRIV | LOG_NOTICE, "rmweb-webauthn: cancelled");
++        g_cancellable_cancel(state.cancellable.get());
++    } else
++        syslog(LOG_AUTHPRIV | LOG_NOTICE, "rmweb-webauthn: completed");
++    completion(response, AuthenticatorAttachment::CrossPlatform, exception);
++    return true;
++}
++
++void webkitWebAuthenticationRequestReject(WebKitWebAuthenticationRequest* request, ExceptionCode code)
++{
++    finish(request, { }, { code, "The WebAuthn request did not complete."_s });
++}
++
++WebKitWebAuthenticationRequest* webkitWebAuthenticationRequestCreate(const SecurityOriginData& origin,
++    const PublicKeyCredentialRequestOptions& options, RequestCompletionHandler&& completion)
++{
++    ASSERT(isMainThread());
++    auto* request = WEBKIT_WEB_AUTHENTICATION_REQUEST(g_object_new(WEBKIT_TYPE_WEB_AUTHENTICATION_REQUEST, nullptr));
++    auto& state = *request->priv;
++    state.origin = origin.toString().utf8();
++    state.rpId = options.rpId.utf8();
++    state.requireUV = options.userVerification == UserVerificationRequirement::Required;
++    state.cancellable = adoptGRef(g_cancellable_new());
++    state.completion = WTFMove(completion);
++    state.clientJSON = buildClientDataJson(ClientDataType::Get, options.challenge,
++        origin.securityOrigin(), WebAuthn::Scope::SameOrigin);
++    auto hash = buildClientDataJsonHash(*state.clientJSON);
++    state.clientHash = adoptGRef(g_bytes_new(hash.data(), hash.size()));
++    auto digest = PAL::CryptoDigest::create(PAL::CryptoDigest::Algorithm::SHA_256);
++    digest->addBytes(byteCast<uint8_t>(state.rpId.span()));
++    state.rpHash = digest->computeHash();
++
++    unsigned timeout = std::min(options.timeout.value_or(120000), 120000U);
++    Ref json = JSON::Object::create();
++    json->setString("rpId"_s, options.rpId);
++    json->setString("challenge"_s, base64URLEncodeToString(options.challenge.span()));
++    json->setInteger("timeout"_s, timeout);
++    json->setString("userVerification"_s, state.requireUV ? "required"_s
++        : options.userVerification == UserVerificationRequirement::Discouraged ? "discouraged"_s : "preferred"_s);
++    Ref credentials = JSON::Array::create();
++    for (const auto& credential : options.allowCredentials) {
++        state.allowedCredentials.append(Vector<uint8_t>(credential.id.span()));
++        Ref descriptor = JSON::Object::create();
++        descriptor->setString("type"_s, "public-key"_s);
++        descriptor->setString("id"_s, base64URLEncodeToString(credential.id.span()));
++        credentials->pushObject(WTFMove(descriptor));
++    }
++    json->setArray("allowCredentials"_s, WTFMove(credentials));
++    state.optionsJSON = json->toJSONString().utf8();
++
++    state.timeout = g_timeout_source_new(timeout);
++    g_source_set_callback(state.timeout, [](gpointer data) -> gboolean {
++        webkitWebAuthenticationRequestReject(WEBKIT_WEB_AUTHENTICATION_REQUEST(data), ExceptionCode::NotAllowedError);
++        return G_SOURCE_REMOVE;
++    }, g_object_ref(request), g_object_unref);
++    g_source_attach(state.timeout, g_main_context_get_thread_default());
++    g_source_unref(state.timeout);
++    return request;
++}
++
++const gchar* webkit_web_authentication_request_get_origin(WebKitWebAuthenticationRequest* request)
++{
++    g_return_val_if_fail(WEBKIT_IS_WEB_AUTHENTICATION_REQUEST(request), nullptr);
++    return request->priv->origin.data();
++}
++const gchar* webkit_web_authentication_request_get_rp_id(WebKitWebAuthenticationRequest* request)
++{
++    g_return_val_if_fail(WEBKIT_IS_WEB_AUTHENTICATION_REQUEST(request), nullptr);
++    return request->priv->rpId.data();
++}
++const gchar* webkit_web_authentication_request_get_options_json(WebKitWebAuthenticationRequest* request)
++{
++    g_return_val_if_fail(WEBKIT_IS_WEB_AUTHENTICATION_REQUEST(request), nullptr);
++    return request->priv->optionsJSON.data();
++}
++GBytes* webkit_web_authentication_request_get_client_data_hash(WebKitWebAuthenticationRequest* request)
++{
++    g_return_val_if_fail(WEBKIT_IS_WEB_AUTHENTICATION_REQUEST(request), nullptr);
++    return request->priv->clientHash.get();
++}
++GCancellable* webkit_web_authentication_request_get_cancellable(WebKitWebAuthenticationRequest* request)
++{
++    g_return_val_if_fail(WEBKIT_IS_WEB_AUTHENTICATION_REQUEST(request), nullptr);
++    return request->priv->cancellable.get();
++}
++void webkit_web_authentication_request_cancel(WebKitWebAuthenticationRequest* request)
++{
++    g_return_if_fail(WEBKIT_IS_WEB_AUTHENTICATION_REQUEST(request));
++    webkitWebAuthenticationRequestReject(request, ExceptionCode::NotAllowedError);
++}
++
++gboolean webkit_web_authentication_request_complete_assertion(WebKitWebAuthenticationRequest* request,
++    GBytes* credentialID, GBytes* authenticatorData, GBytes* signature, GBytes* userHandle)
++{
++    g_return_val_if_fail(WEBKIT_IS_WEB_AUTHENTICATION_REQUEST(request), FALSE);
++    ASSERT(isMainThread());
++    const auto& state = *request->priv;
++    if (!state.completion)
++        return FALSE;
++    auto id = bytes(credentialID);
++    auto data = bytes(authenticatorData);
++    auto sig = bytes(signature);
++    auto user = bytes(userHandle);
++    bool allowed = state.allowedCredentials.isEmpty() || std::ranges::any_of(state.allowedCredentials, [id](const auto& candidate) {
++        return std::ranges::equal(candidate.span(), id);
++    });
++    bool valid = !id.empty() && id.size() <= 1024 && data.size() >= 37 && data.size() <= 16384
++        && !sig.empty() && sig.size() <= 4096 && user.size() <= 64 && allowed
++        && (state.allowedCredentials.size() || !user.empty()) && (!userHandle || !user.empty());
++    if (valid) {
++        uint8_t flags = data[32];
++        valid = std::ranges::equal(data.first(32), state.rpHash.span())
++            && (flags & 0x01) && (!state.requireUV || (flags & 0x04))
++            && !(flags & 0x40) && (!(flags & 0x10) || (flags & 0x08));
++    }
++    if (!valid) {
++        webkitWebAuthenticationRequestReject(request, ExceptionCode::NotAllowedError);
++        return FALSE;
++    }
++    AuthenticatorResponseData response;
++    response.rawId = ArrayBuffer::create(id);
++    response.clientDataJSON = state.clientJSON;
++    response.authenticatorData = ArrayBuffer::create(data);
++    response.signature = ArrayBuffer::create(sig);
++    if (userHandle)
++        response.userHandle = ArrayBuffer::create(user);
++    return finish(request, response, { });
++}
++#endif
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitWebAuthenticationRequest.h.in b/Source/WebKit/UIProcess/API/glib/WebKitWebAuthenticationRequest.h.in
+new file mode 100644
+--- /dev/null
++++ b/Source/WebKit/UIProcess/API/glib/WebKitWebAuthenticationRequest.h.in
+@@ -0,0 +1,27 @@
++/* Native WPE assertion provider API. SPDX-License-Identifier: LGPL-2.0-or-later */
++@API_SINGLE_HEADER_CHECK@
++#ifndef WebKitWebAuthenticationRequest_h
++#define WebKitWebAuthenticationRequest_h
++#include <gio/gio.h>
++#include <@API_INCLUDE_PREFIX@/WebKitDefines.h>
++G_BEGIN_DECLS
++#define WEBKIT_TYPE_WEB_AUTHENTICATION_REQUEST (webkit_web_authentication_request_get_type())
++WEBKIT_DECLARE_FINAL_TYPE(WebKitWebAuthenticationRequest, webkit_web_authentication_request, WEBKIT, WEB_AUTHENTICATION_REQUEST, GObject)
++
++/* Immutable values, owned by the request. All calls run on the view's GLib thread.
++ * options_json is PublicKeyCredentialRequestOptionsJSON; its origin is separate.
++ * The caller must use exactly client_data_hash, not regenerate clientDataJSON. */
++WEBKIT_API const gchar * webkit_web_authentication_request_get_origin(WebKitWebAuthenticationRequest *request);
++WEBKIT_API const gchar * webkit_web_authentication_request_get_rp_id(WebKitWebAuthenticationRequest *request);
++WEBKIT_API const gchar * webkit_web_authentication_request_get_options_json(WebKitWebAuthenticationRequest *request);
++WEBKIT_API GBytes * webkit_web_authentication_request_get_client_data_hash(WebKitWebAuthenticationRequest *request);
++WEBKIT_API GCancellable * webkit_web_authentication_request_get_cancellable(WebKitWebAuthenticationRequest *request);
++
++/* Copies the buffers before returning. user_handle may be NULL for a permitted
++ * non-discoverable credential. Returns FALSE for invalid or stale completion.
++ * Invalid results reject the pending request; no second completion is allowed. */
++WEBKIT_API gboolean webkit_web_authentication_request_complete_assertion(WebKitWebAuthenticationRequest *request,
++    GBytes *credential_id, GBytes *authenticator_data, GBytes *signature, GBytes *user_handle);
++WEBKIT_API void webkit_web_authentication_request_cancel(WebKitWebAuthenticationRequest *request);
++G_END_DECLS
++#endif
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitWebAuthenticationRequestPrivate.h b/Source/WebKit/UIProcess/API/glib/WebKitWebAuthenticationRequestPrivate.h
+new file mode 100644
+--- /dev/null
++++ b/Source/WebKit/UIProcess/API/glib/WebKitWebAuthenticationRequestPrivate.h
+@@ -0,0 +1,12 @@
++/* SPDX-License-Identifier: LGPL-2.0-or-later */
++#pragma once
++#if PLATFORM(WPE) && ENABLE(WEB_AUTHN)
++#include "WebKitWebAuthenticationRequest.h"
++#include "WebAuthenticatorCoordinatorProxy.h"
++#include <WebCore/PublicKeyCredentialRequestOptions.h>
++#include <WebCore/SecurityOriginData.h>
++#include <WebCore/ExceptionCode.h>
++WebKitWebAuthenticationRequest* webkitWebAuthenticationRequestCreate(const WebCore::SecurityOriginData&,
++    const WebCore::PublicKeyCredentialRequestOptions&, WebKit::RequestCompletionHandler&&);
++void webkitWebAuthenticationRequestReject(WebKitWebAuthenticationRequest*, WebCore::ExceptionCode);
++#endif
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp b/Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp
+--- a/Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp
++++ b/Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp
+@@ -21,6 +21,9 @@
+ 
+ #include "config.h"
+ #include "WebKitWebView.h"
++#if PLATFORM(WPE) && ENABLE(WEB_AUTHN)
++#include "WebKitWebAuthenticationRequest.h"
++#endif
+ 
+ #include "APIContentWorld.h"
+ #include "APIData.h"
+@@ -140,6 +143,9 @@
+  */
+ 
+ enum {
++#if PLATFORM(WPE) && ENABLE(WEB_AUTHN)
++    WEB_AUTHENTICATION_REQUEST,
++#endif
+     LOAD_CHANGED,
+     LOAD_FAILED,
+     LOAD_FAILED_WITH_TLS_ERRORS,
+@@ -2517,6 +2523,21 @@
+      *
+      * Since: 2.40
+      */
++#if PLATFORM(WPE) && ENABLE(WEB_AUTHN)
++    /**
++     * WebKitWebView::webauthn-request:
++     * @web_view: the view owning the requesting document
++     * @request: an immutable native assertion request
++     *
++     * Return TRUE and retain @request for asynchronous completion. Observe its
++     * GCancellable and stop native transport when cancelled. All API calls must
++     * run on this view's GLib thread. An unhandled request fails as unsupported.
++     */
++    signals[WEB_AUTHENTICATION_REQUEST] = g_signal_new("webauthn-request",
++        G_TYPE_FROM_CLASS(webViewClass), G_SIGNAL_RUN_LAST, 0,
++        g_signal_accumulator_true_handled, nullptr, g_cclosure_marshal_generic,
++        G_TYPE_BOOLEAN, 1, WEBKIT_TYPE_WEB_AUTHENTICATION_REQUEST);
++#endif
+     signals[QUERY_PERMISSION_STATE] = g_signal_new(
+         "query-permission-state",
+         G_TYPE_FROM_CLASS(webViewClass),
+@@ -5763,3 +5784,12 @@
+ 
+     return webView->priv->defaultContentSecurityPolicy.data();
+ }
++
++#if PLATFORM(WPE) && ENABLE(WEB_AUTHN)
++bool webkitWebViewRunWebAuthenticationRequest(WebKitWebView* view, WebKitWebAuthenticationRequest* request)
++{
++    gboolean handled = FALSE;
++    g_signal_emit(view, signals[WEB_AUTHENTICATION_REQUEST], 0, request, &handled);
++    return handled;
++}
++#endif
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitWebViewPrivate.h b/Source/WebKit/UIProcess/API/glib/WebKitWebViewPrivate.h
+--- a/Source/WebKit/UIProcess/API/glib/WebKitWebViewPrivate.h
++++ b/Source/WebKit/UIProcess/API/glib/WebKitWebViewPrivate.h
+@@ -130,3 +130,8 @@
+ #if PLATFORM(GTK) || (PLATFORM(WPE) && ENABLE(WPE_PLATFORM))
+ WebKit::RendererBufferFormat webkitWebViewGetRendererBufferFormat(WebKitWebView*);
+ #endif
++
++#if PLATFORM(WPE) && ENABLE(WEB_AUTHN)
++struct _WebKitWebAuthenticationRequest;
++bool webkitWebViewRunWebAuthenticationRequest(WebKitWebView*, _WebKitWebAuthenticationRequest*);
++#endif
+diff --git a/Source/WebKit/UIProcess/API/glib/webkit.h.in b/Source/WebKit/UIProcess/API/glib/webkit.h.in
+--- a/Source/WebKit/UIProcess/API/glib/webkit.h.in
++++ b/Source/WebKit/UIProcess/API/glib/webkit.h.in
+@@ -129,6 +129,9 @@
+ #include <@API_INCLUDE_PREFIX@/WebKitWebInspector.h>
+ #endif
+ #include <@API_INCLUDE_PREFIX@/WebKitWebResource.h>
++#if PLATFORM(WPE) && ENABLE(WEB_AUTHN)
++#include <@API_INCLUDE_PREFIX@/WebKitWebAuthenticationRequest.h>
++#endif
+ #include <@API_INCLUDE_PREFIX@/WebKitWebView.h>
+ #if PLATFORM(WPE)
+ #include <wpe/WebKitWebViewBackend.h>
+diff --git a/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp b/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
+--- a/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
++++ b/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
+@@ -61,7 +61,7 @@
+ #include <wtf/text/TextBreakIterator.h>
+ #endif
+ 
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && !PLATFORM(WPE)
+ #include "VirtualAuthenticatorManager.h"
+ #include <WebCore/AuthenticatorTransport.h>
+ #endif
+@@ -1674,7 +1674,7 @@
+     return { };
+ }
+ 
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && !PLATFORM(WPE)
+ static WebCore::AuthenticatorTransport toAuthenticatorTransport(Inspector::Protocol::Automation::AuthenticatorTransport transport)
+ {
+     switch (transport) {
+@@ -1695,7 +1695,7 @@
+ 
+ Inspector::Protocol::ErrorStringOr<String /* authenticatorId */> WebAutomationSession::addVirtualAuthenticator(const String& browsingContextHandle, Ref<JSON::Object>&& authenticator)
+ {
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && !PLATFORM(WPE)
+     auto protocol = authenticator->getString("protocol"_s);
+     if (!protocol)
+         SYNC_FAIL_WITH_PREDEFINED_ERROR_AND_DETAILS(InvalidParameter, "The parameter 'protocol' is missing or invalid."_s);
+@@ -1736,7 +1736,7 @@
+ 
+ Inspector::Protocol::ErrorStringOr<void> WebAutomationSession::removeVirtualAuthenticator(const String& browsingContextHandle, const String& authenticatorId)
+ {
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && !PLATFORM(WPE)
+     auto page = webPageProxyForHandle(browsingContextHandle);
+     if (!page)
+         SYNC_FAIL_WITH_PREDEFINED_ERROR(WindowNotFound);
+diff --git a/Source/WebKit/UIProcess/WebAuthentication/AuthenticatorManager.h b/Source/WebKit/UIProcess/WebAuthentication/AuthenticatorManager.h
+--- a/Source/WebKit/UIProcess/WebAuthentication/AuthenticatorManager.h
++++ b/Source/WebKit/UIProcess/WebAuthentication/AuthenticatorManager.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && !PLATFORM(WPE)
+ 
+ #include "Authenticator.h"
+ #include "AuthenticatorPresenterCoordinator.h"
+diff --git a/Source/WebKit/UIProcess/WebAuthentication/Mock/MockAuthenticatorManager.h b/Source/WebKit/UIProcess/WebAuthentication/Mock/MockAuthenticatorManager.h
+--- a/Source/WebKit/UIProcess/WebAuthentication/Mock/MockAuthenticatorManager.h
++++ b/Source/WebKit/UIProcess/WebAuthentication/Mock/MockAuthenticatorManager.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && !PLATFORM(WPE)
+ 
+ #include "AuthenticatorManager.h"
+ #include <WebCore/MockWebAuthenticationConfiguration.h>
+diff --git a/Source/WebKit/UIProcess/WebAuthentication/WebAuthenticatorCoordinatorProxy.h b/Source/WebKit/UIProcess/WebAuthentication/WebAuthenticatorCoordinatorProxy.h
+--- a/Source/WebKit/UIProcess/WebAuthentication/WebAuthenticatorCoordinatorProxy.h
++++ b/Source/WebKit/UIProcess/WebAuthentication/WebAuthenticatorCoordinatorProxy.h
+@@ -47,6 +47,11 @@
+ typedef NSString *ASAuthorizationPublicKeyCredentialAttestationKind;
+ #endif
+ 
++#if PLATFORM(WPE)
++#include <wtf/glib/GRefPtr.h>
++struct _WebKitWebAuthenticationRequest;
++#endif
++
+ namespace WebCore {
+ enum class AuthenticatorAttachment : uint8_t;
+ struct ExceptionData;
+@@ -90,6 +95,9 @@
+     void deref() const final { RefCounted::deref(); }
+ 
+     std::optional<SharedPreferencesForWebProcess> sharedPreferencesForWebProcess() const;
++#if PLATFORM(WPE)
++    void cancelRequest(std::optional<WebCore::FrameIdentifier>);
++#endif
+ 
+ #if HAVE(WEB_AUTHN_AS_MODERN)
+     static WeakPtr<WebAuthenticatorCoordinatorProxy>& activeConditionalMediationProxy();
+@@ -118,6 +126,10 @@
+     void handleRequest(WebAuthenticationRequestData&&, RequestCompletionHandler&&);
+ 
+     WeakPtr<WebPageProxy> m_webPageProxy;
++#if PLATFORM(WPE)
++    GRefPtr<_WebKitWebAuthenticationRequest> m_request;
++    std::optional<WebCore::FrameIdentifier> m_requestFrame;
++#endif
+ 
+ #if HAVE(UNIFIED_ASC_AUTH_UI) || HAVE(WEB_AUTHN_AS_MODERN)
+     bool isASCAvailable();
+diff --git a/Source/WebKit/UIProcess/WebAuthentication/wpe/WebAuthenticatorCoordinatorProxyWPE.cpp b/Source/WebKit/UIProcess/WebAuthentication/wpe/WebAuthenticatorCoordinatorProxyWPE.cpp
+new file mode 100644
+--- /dev/null
++++ b/Source/WebKit/UIProcess/WebAuthentication/wpe/WebAuthenticatorCoordinatorProxyWPE.cpp
+@@ -0,0 +1,195 @@
++/* WPE native assertion bridge. SPDX-License-Identifier: BSD-2-Clause */
++#include "config.h"
++#include "WebAuthenticatorCoordinatorProxy.h"
++#if PLATFORM(WPE) && ENABLE(WEB_AUTHN)
++#include "APIUIClient.h"
++#include "FrameInfoData.h"
++#include "WebAuthenticatorCoordinatorProxyMessages.h"
++#include "WebFrameProxy.h"
++#include "WebKitWebAuthenticationRequestPrivate.h"
++#include "WebPageProxy.h"
++#include "WebProcessProxy.h"
++#include <WebCore/AuthenticatorAttachment.h>
++#include <WebCore/AuthenticatorResponseData.h>
++#include <WebCore/ExceptionData.h>
++#include <WebCore/SecurityOrigin.h>
++#include <WebCore/SecurityOriginData.h>
++#include <wtf/TZoneMallocInlines.h>
++#include <wtf/text/MakeString.h>
++#include <syslog.h>
++
++namespace WebKit {
++using namespace WebCore;
++WTF_MAKE_TZONE_ALLOCATED_IMPL(WebAuthenticatorCoordinatorProxy);
++
++Ref<WebAuthenticatorCoordinatorProxy> WebAuthenticatorCoordinatorProxy::create(WebPageProxy& page)
++{
++    return adoptRef(*new WebAuthenticatorCoordinatorProxy(page));
++}
++WebAuthenticatorCoordinatorProxy::WebAuthenticatorCoordinatorProxy(WebPageProxy& page)
++    : m_webPageProxy(page)
++{
++    page.protectedLegacyMainFrameProcess()->addMessageReceiver(Messages::WebAuthenticatorCoordinatorProxy::messageReceiverName(), page.webPageIDInMainFrameProcess(), *this);
++}
++WebAuthenticatorCoordinatorProxy::~WebAuthenticatorCoordinatorProxy()
++{
++    cancelRequest(std::nullopt);
++    if (RefPtr page = m_webPageProxy.get())
++        page->protectedLegacyMainFrameProcess()->removeMessageReceiver(Messages::WebAuthenticatorCoordinatorProxy::messageReceiverName(), page->webPageIDInMainFrameProcess());
++}
++std::optional<SharedPreferencesForWebProcess> WebAuthenticatorCoordinatorProxy::sharedPreferencesForWebProcess() const
++{
++    RefPtr page = m_webPageProxy.get();
++    return page ? page->protectedLegacyMainFrameProcess()->sharedPreferencesForWebProcess() : std::nullopt;
++}
++void WebAuthenticatorCoordinatorProxy::makeCredential(FrameIdentifier, FrameInfoData&&,
++    PublicKeyCredentialCreationOptions&&, MediationRequirement, RequestCompletionHandler&& handler)
++{
++    handler({ }, AuthenticatorAttachment::CrossPlatform, { ExceptionCode::NotSupportedError, "This browser supports phone passkey sign-in only."_s });
++}
++
++static std::optional<SecurityOriginData> trustedOrigin(WebPageProxy& page, FrameIdentifier frameID, const FrameInfoData& info)
++{
++    RefPtr frame = WebFrameProxy::webFrame(frameID);
++    if (!frame || frame->page() != &page || &frame->process() != &page.legacyMainFrameProcess()
++        || !frame->url().protocolIs("https"_s) || frame->provisionalURL().isValid())
++        return std::nullopt;
++    auto origin = SecurityOriginData::fromURLWithoutStrictOpaqueness(frame->url());
++    if (info.securityOrigin != origin || info.isMainFrame != frame->isMainFrame()
++        || !origin.host().containsOnlyASCII() || URL::hostIsIPAddress(origin.host()))
++        return std::nullopt;
++    // This first provider supports same-origin HTTPS documents only. Never
++    // infer an about:blank origin or accept an IPC-supplied ancestor origin.
++    for (RefPtr ancestor = frame->parentFrame(); ancestor; ancestor = ancestor->parentFrame()) {
++        if (ancestor->page() != &page || !ancestor->url().protocolIs("https"_s)
++            || SecurityOriginData::fromURLWithoutStrictOpaqueness(ancestor->url()) != origin)
++            return std::nullopt;
++    }
++    return origin;
++}
++
++static bool supportedOptions(const PublicKeyCredentialRequestOptions& options)
++{
++    if (!options.challenge.length()) {
++        syslog(LOG_AUTHPRIV | LOG_NOTICE, "rmweb-webauthn: reject-challenge-empty");
++        return false;
++    }
++    if (options.challenge.length() > 16384) {
++        syslog(LOG_AUTHPRIV | LOG_NOTICE, "rmweb-webauthn: reject-challenge-too-large");
++        return false;
++    }
++    if (options.allowCredentials.size() > 64) {
++        syslog(LOG_AUTHPRIV | LOG_NOTICE, "rmweb-webauthn: reject-allowlist-too-large");
++        return false;
++    }
++    if (options.authenticatorAttachment == AuthenticatorAttachment::Platform) {
++        syslog(LOG_AUTHPRIV | LOG_NOTICE, "rmweb-webauthn: reject-options-platform");
++        return false;
++    }
++    if (options.extensions) {
++        const auto& extensions = *options.extensions;
++        if (!extensions.appid.isNull()) {
++            syslog(LOG_AUTHPRIV | LOG_NOTICE, "rmweb-webauthn: reject-options-appid");
++            return false;
++        }
++        if (extensions.credProps.value_or(false)) {
++            syslog(LOG_AUTHPRIV | LOG_NOTICE, "rmweb-webauthn: reject-options-credProps");
++            return false;
++        }
++        if (extensions.largeBlob) {
++            syslog(LOG_AUTHPRIV | LOG_NOTICE, "rmweb-webauthn: reject-options-largeBlob");
++            return false;
++        }
++        if (extensions.prf) {
++            syslog(LOG_AUTHPRIV | LOG_NOTICE, "rmweb-webauthn: reject-options-prf");
++            return false;
++        }
++    }
++    for (const auto& credential : options.allowCredentials) {
++        if (credential.type != PublicKeyCredentialType::PublicKey) {
++            syslog(LOG_AUTHPRIV | LOG_NOTICE, "rmweb-webauthn: reject-options-credential-type");
++            return false;
++        }
++        if (!credential.id.length()) {
++            syslog(LOG_AUTHPRIV | LOG_NOTICE, "rmweb-webauthn: reject-credential-id-empty");
++            return false;
++        }
++        if (credential.id.length() > 1024) {
++            syslog(LOG_AUTHPRIV | LOG_NOTICE, "rmweb-webauthn: reject-credential-id-too-large");
++            return false;
++        }
++    }
++    return true;
++}
++
++void WebAuthenticatorCoordinatorProxy::getAssertion(FrameIdentifier frameID, FrameInfoData&& info,
++    PublicKeyCredentialRequestOptions&& options, MediationRequirement mediation,
++    std::optional<SecurityOriginData> parentOrigin, RequestCompletionHandler&& handler)
++{
++    syslog(LOG_AUTHPRIV | LOG_NOTICE, "rmweb-webauthn: assertion-received");
++    RefPtr page = m_webPageProxy.get();
++    auto origin = page ? trustedOrigin(*page, frameID, info) : std::nullopt;
++    if (!origin || parentOrigin) {
++        syslog(LOG_AUTHPRIV | LOG_NOTICE, "rmweb-webauthn: reject-secure-origin");
++        handler({ }, AuthenticatorAttachment::CrossPlatform, { ExceptionCode::SecurityError, "The requesting document is not an eligible secure context."_s });
++        return;
++    }
++    const bool unsupportedMediation = mediation == MediationRequirement::Conditional || mediation == MediationRequirement::Silent;
++    if (unsupportedMediation)
++        syslog(LOG_AUTHPRIV | LOG_NOTICE, "rmweb-webauthn: reject-mediation");
++    if (unsupportedMediation || !supportedOptions(options)) {
++        handler({ }, AuthenticatorAttachment::CrossPlatform, { ExceptionCode::NotSupportedError, "The requested WebAuthn mode or options are not supported."_s });
++        return;
++    }
++    if (options.rpId.isEmpty())
++        options.rpId = origin->host();
++    URL rpURL { makeString("https://"_s, options.rpId, '/' ) };
++    if (!options.rpId.containsOnlyASCII() || options.rpId.length() > 253
++        || !rpURL.isValid() || rpURL.host() != options.rpId
++        || !origin->securityOrigin()->isMatchingRegistrableDomainSuffix(options.rpId)) {
++        syslog(LOG_AUTHPRIV | LOG_NOTICE, "rmweb-webauthn: reject-rp");
++        handler({ }, AuthenticatorAttachment::CrossPlatform, { ExceptionCode::SecurityError, "The relying party ID is not authorized for this origin."_s });
++        return;
++    }
++    cancelRequest(std::nullopt);
++    auto request = adoptGRef(webkitWebAuthenticationRequestCreate(*origin, options, WTFMove(handler)));
++    m_request = request;
++    m_requestFrame = frameID;
++    if (!page->uiClient().runWebAuthenticationRequest(*page, request.get())) {
++        syslog(LOG_AUTHPRIV | LOG_NOTICE, "rmweb-webauthn: unhandled-ui");
++        webkitWebAuthenticationRequestReject(request.get(), ExceptionCode::NotSupportedError);
++    }
++}
++void WebAuthenticatorCoordinatorProxy::cancelRequest(std::optional<FrameIdentifier> frameID)
++{
++    if (frameID && m_requestFrame != frameID) {
++        RefPtr frame = WebFrameProxy::webFrame(*frameID);
++        if (!frame || !frame->isMainFrame())
++            return;
++    }
++    auto request = WTFMove(m_request);
++    m_requestFrame = std::nullopt;
++    if (request)
++        webkit_web_authentication_request_cancel(request.get());
++}
++void WebAuthenticatorCoordinatorProxy::cancel(CompletionHandler<void()>&& handler)
++{
++    cancelRequest(std::nullopt);
++    handler();
++}
++void WebAuthenticatorCoordinatorProxy::isUserVerifyingPlatformAuthenticatorAvailable(const SecurityOriginData&, QueryCompletionHandler&& handler)
++{
++    handler(false);
++}
++void WebAuthenticatorCoordinatorProxy::isConditionalMediationAvailable(const SecurityOriginData&, QueryCompletionHandler&& handler)
++{
++    handler(false);
++}
++void WebAuthenticatorCoordinatorProxy::getClientCapabilities(const SecurityOriginData&, CapabilitiesCompletionHandler&& handler)
++{
++    handler({ { "conditionalGet"_s, false }, { "conditionalCreate"_s, false },
++        { "hybridTransport"_s, true }, { "relatedOrigins"_s, false },
++        { "userVerifyingPlatformAuthenticator"_s, false } });
++}
++} // namespace WebKit
++#endif
+diff --git a/Source/WebKit/UIProcess/WebPageProxy.cpp b/Source/WebKit/UIProcess/WebPageProxy.cpp
+--- a/Source/WebKit/UIProcess/WebPageProxy.cpp
++++ b/Source/WebKit/UIProcess/WebPageProxy.cpp
+@@ -6464,7 +6464,12 @@
+ void WebPageProxy::didDestroyFrame(IPC::Connection& connection, FrameIdentifier frameID)
+ {
+ #if ENABLE(WEB_AUTHN)
++#if PLATFORM(WPE)
++    if (RefPtr messenger = m_webAuthnCredentialsMessenger)
++        messenger->cancelRequest(frameID);
++#else
+     protectedWebsiteDataStore()->protectedAuthenticatorManager()->cancelRequest(webPageIDInMainFrameProcess(), frameID);
++#endif
+ #endif
+     if (RefPtr automationSession = m_configuration->processPool().automationSession())
+         automationSession->didDestroyFrame(frameID);
+@@ -6756,7 +6761,12 @@
+     }
+ 
+ #if ENABLE(WEB_AUTHN)
++#if PLATFORM(WPE)
++    if (RefPtr messenger = m_webAuthnCredentialsMessenger)
++        messenger->cancelRequest(frameID);
++#else
+     protectedWebsiteDataStore()->protectedAuthenticatorManager()->cancelRequest(m_webPageID, frameID);
++#endif
+ #endif
+ }
+ 
+@@ -11317,7 +11327,12 @@
+ #endif
+ 
+ #if ENABLE(WEB_AUTHN)
++#if PLATFORM(WPE)
++    if (RefPtr messenger = m_webAuthnCredentialsMessenger)
++        messenger->cancelRequest(std::nullopt);
++#else
+     protectedWebsiteDataStore()->protectedAuthenticatorManager()->cancelRequest(m_webPageID, std::nullopt);
++#endif
+ #endif
+ 
+     m_speechRecognitionPermissionManager = nullptr;
+@@ -14923,7 +14938,11 @@
+ #if ENABLE(WEB_AUTHN)
+ void WebPageProxy::setMockWebAuthenticationConfiguration(MockWebAuthenticationConfiguration&& configuration)
+ {
++#if !PLATFORM(WPE)
+     protectedWebsiteDataStore()->setMockWebAuthenticationConfiguration(WTFMove(configuration));
++#else
++    UNUSED_PARAM(configuration);
++#endif
+ }
+ #endif
+ 
+diff --git a/Source/WebKit/UIProcess/WebsiteData/WebsiteDataStore.cpp b/Source/WebKit/UIProcess/WebsiteData/WebsiteDataStore.cpp
+--- a/Source/WebKit/UIProcess/WebsiteData/WebsiteDataStore.cpp
++++ b/Source/WebKit/UIProcess/WebsiteData/WebsiteDataStore.cpp
+@@ -95,7 +95,7 @@
+ #include "WebPrivacyHelpers.h"
+ #endif
+ 
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && !PLATFORM(WPE)
+ #include "VirtualAuthenticatorManager.h"
+ #endif // ENABLE(WEB_AUTHN)
+ 
+@@ -160,7 +160,7 @@
+     , m_configuration(WTFMove(configuration))
+     , m_trackingPreventionDebugMode(m_configuration->resourceLoadStatisticsDebugModeEnabled())
+     , m_queue(WorkQueue::create("com.apple.WebKit.WebsiteDataStore"_s))
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && !PLATFORM(WPE)
+     , m_authenticatorManager(AuthenticatorManager::create())
+ #endif
+ #if ENABLE(DEVICE_ORIENTATION)
+@@ -2246,7 +2246,7 @@
+ }
+ #endif
+ 
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && !PLATFORM(WPE)
+ void WebsiteDataStore::setMockWebAuthenticationConfiguration(WebCore::MockWebAuthenticationConfiguration&& configuration)
+ {
+     if (!m_authenticatorManager->isMock()) {
+diff --git a/Source/WebKit/UIProcess/WebsiteData/WebsiteDataStore.h b/Source/WebKit/UIProcess/WebsiteData/WebsiteDataStore.h
+--- a/Source/WebKit/UIProcess/WebsiteData/WebsiteDataStore.h
++++ b/Source/WebKit/UIProcess/WebsiteData/WebsiteDataStore.h
+@@ -336,7 +336,7 @@
+     void addSecKeyProxyStore(Ref<SecKeyProxyStore>&&);
+ #endif
+ 
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && !PLATFORM(WPE)
+     AuthenticatorManager& authenticatorManager() { return m_authenticatorManager.get(); }
+     Ref<AuthenticatorManager> protectedAuthenticatorManager();
+     void setMockWebAuthenticationConfiguration(WebCore::MockWebAuthenticationConfiguration&&);
+@@ -630,7 +630,7 @@
+     Vector<Ref<SecKeyProxyStore>> m_secKeyProxyStores;
+ #endif
+ 
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && !PLATFORM(WPE)
+     Ref<AuthenticatorManager> m_authenticatorManager;
+ #endif
+ 
+diff --git a/Source/WebKit/WebProcess/WebAuthentication/WebAuthenticatorCoordinator.cpp b/Source/WebKit/WebProcess/WebAuthentication/WebAuthenticatorCoordinator.cpp
+--- a/Source/WebKit/WebProcess/WebAuthentication/WebAuthenticatorCoordinator.cpp
++++ b/Source/WebKit/WebProcess/WebAuthentication/WebAuthenticatorCoordinator.cpp
+@@ -28,7 +28,6 @@
+ 
+ #if ENABLE(WEB_AUTHN)
+ 
+-#include "DefaultWebBrowserChecks.h"
+ #include "FrameInfoData.h"
+ #include "WebAuthenticatorCoordinatorProxyMessages.h"
+ #include "WebFrame.h"
+@@ -57,13 +56,6 @@
+ using namespace WebCore;
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(WebAuthenticatorCoordinator);
+-
+-namespace {
+-inline bool isWebBrowser()
+-{
+-    return isParentProcessAFullWebBrowser(WebProcess::singleton());
+-}
+-}
+ 
+ WebAuthenticatorCoordinator::WebAuthenticatorCoordinator(WebPage& webPage)
+     : m_webPage(webPage)
+diff --git a/Source/WebKit/WebProcess/WebPage/WebPage.cpp b/Source/WebKit/WebProcess/WebPage/WebPage.cpp
+--- a/Source/WebKit/WebProcess/WebPage/WebPage.cpp
++++ b/Source/WebKit/WebProcess/WebPage/WebPage.cpp
+@@ -399,7 +399,7 @@
+ #endif
+ 
+ #if ENABLE(WEB_AUTHN)
+-#include "WebAuthenticatorCoordinator.h"
++#include "WebProcess/WebAuthentication/WebAuthenticatorCoordinator.h"
+ #include <WebCore/AuthenticatorCoordinator.h>
+ #endif // ENABLE(WEB_AUTHN)
+ 
+diff --git a/Source/WebKit/WPEPlatform/wpe/headless/WPEViewHeadless.cpp b/Source/WebKit/WPEPlatform/wpe/headless/WPEViewHeadless.cpp
+--- a/Source/WebKit/WPEPlatform/wpe/headless/WPEViewHeadless.cpp
++++ b/Source/WebKit/WPEPlatform/wpe/headless/WPEViewHeadless.cpp
+@@ -27,6 +27,7 @@
+ #include "WPEViewHeadless.h"
+
+ #include "WPEToplevelHeadless.h"
++#include "WPEEvent.h"
+ #include <wtf/glib/GRefPtr.h>
+ #include <wtf/glib/RunLoopSourcePriority.h>
+ #include <wtf/glib/WTFGType.h>
+@@ -40,6 +41,7 @@
+     GRefPtr<WPEBuffer> committedBuffer;
+     GRefPtr<GSource> frameSource;
+     gint64 lastFrameTime;
++    gint64 lastInputTime;
+ };
+ WEBKIT_DEFINE_FINAL_TYPE(WPEViewHeadless, wpe_view_headless, WPE_TYPE_VIEW, WPEView)
+
+@@ -90,6 +92,9 @@
+         if (priv->committedBuffer)
+             wpe_view_buffer_released(view, priv->committedBuffer.get());
+         priv->committedBuffer = WTFMove(priv->pendingBuffer);
++        // Pace from completed presentation, not buffer arrival: otherwise
++        // fast producers alternate delayed frames with immediate frames.
++        priv->lastFrameTime = g_get_monotonic_time();
+         wpe_view_buffer_rendered(view, priv->committedBuffer.get());
+
+         if (g_source_is_destroyed(priv->frameSource.get()))
+@@ -98,6 +103,32 @@
+     }, object, nullptr);
+     g_source_attach(priv->frameSource.get(), g_main_context_get_thread_default());
+     g_source_set_ready_time(priv->frameSource.get(), -1);
++
++    // Observe native input without consuming it. Briefly drain the compositor
++    // pipeline faster so old animated frames do not delay a tap or keystroke.
++    g_signal_connect(view, "event", G_CALLBACK(+[](WPEView* view, WPEEvent* event, gpointer) -> gboolean {
++        switch (wpe_event_get_event_type(event)) {
++        case WPE_EVENT_POINTER_DOWN:
++        case WPE_EVENT_POINTER_UP:
++        case WPE_EVENT_SCROLL:
++        case WPE_EVENT_KEYBOARD_KEY_DOWN:
++        case WPE_EVENT_KEYBOARD_KEY_UP:
++        case WPE_EVENT_TOUCH_DOWN:
++        case WPE_EVENT_TOUCH_UP:
++        case WPE_EVENT_TOUCH_MOVE: {
++            auto* priv = WPE_VIEW_HEADLESS(view)->priv;
++            priv->lastInputTime = g_get_monotonic_time();
++            if (priv->pendingBuffer && priv->frameSource && !g_source_is_destroyed(priv->frameSource.get())) {
++                auto next = priv->lastFrameTime + (G_USEC_PER_SEC / 30);
++                g_source_set_ready_time(priv->frameSource.get(), next <= priv->lastInputTime ? 0 : next);
++            }
++            break;
++        }
++        default:
++            break;
++        }
++        return FALSE;
++    }), nullptr);
+ }
+
+ static void wpeViewHeadlessDispose(GObject* object)
+@@ -117,10 +148,11 @@
+     auto* priv = WPE_VIEW_HEADLESS(view)->priv;
+     priv->pendingBuffer = buffer;
+     auto now = g_get_monotonic_time();
+-    if (!priv->lastFrameTime)
+-        priv->lastFrameTime = now;
+-    auto next = priv->lastFrameTime + (G_USEC_PER_SEC / 60);
+-    priv->lastFrameTime = now;
++    // Bound passive e-ink compositing to eight frames per second. Native
++    // input gets one second at 30 Hz to drain already queued frames promptly.
++    // First and overdue frames remain immediate; backpressure is unchanged.
++    auto rate = priv->lastInputTime && now - priv->lastInputTime < G_USEC_PER_SEC ? 30 : 8;
++    auto next = priv->lastFrameTime ? priv->lastFrameTime + (G_USEC_PER_SEC / rate) : now;
+     if (next <= now)
+         g_source_set_ready_time(priv->frameSource.get(), 0);
+     else

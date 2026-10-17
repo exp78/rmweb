@@ -1,0 +1,9 @@
+diff --git a/resources/qml/virtualKeyboard/Key.qml b/resources/qml/virtualKeyboard/Key.qml
+--- a/resources/qml/virtualKeyboard/Key.qml
++++ b/resources/qml/virtualKeyboard/Key.qml
+@@ -115,5 +115,4 @@
+     function handlePress(touchArea, x, y) {
+-        console.log("Press " + label)
+         isClick = true;
+         pressMouseX = x;
+         pressMouseY = y;

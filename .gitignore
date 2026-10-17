@@ -6,6 +6,8 @@
 # build artifacts
 build/
 dist/
+__pycache__/
+*.pyc
 *.o
 *.so
 
